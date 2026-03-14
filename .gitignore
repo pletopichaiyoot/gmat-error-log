@@ -1,5 +1,6 @@
 node_modules
 /data/*.db
+/data/chrome-cdp-profile/
 .DS_Store
 client/dist
 GMAT Error Log.xlsx
