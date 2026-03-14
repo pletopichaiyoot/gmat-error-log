@@ -8,7 +8,9 @@ const {
   saveScrapeResult,
   listRuns,
   listSessions,
+  countSessions,
   listErrors,
+  countErrors,
   getPatterns,
   getSessionAnalysis,
   updateErrorAnnotation,
@@ -19,6 +21,15 @@ const app = express();
 const PORT = Number(process.env.PORT || 4310);
 const HOST = process.env.HOST || '127.0.0.1';
 const clientDistPath = path.resolve(__dirname, '..', 'client', 'dist');
+const THAI_UTC_OFFSET_MS = 7 * 60 * 60 * 1000;
+const THAI_TIME_ZONE = 'Asia/Bangkok';
+const TODAY_SAFETY_BUFFER_HOURS = Math.max(
+  0,
+  Number.isFinite(Number(process.env.SCRAPE_TODAY_BUFFER_HOURS))
+    ? Number(process.env.SCRAPE_TODAY_BUFFER_HOURS)
+    : 36
+);
+const ONE_HOUR_MS = 60 * 60 * 1000;
 
 const SOURCE_PRESETS = [
   {
@@ -99,21 +110,46 @@ function resolveSourcePreset(rawSource) {
   );
 }
 
-function toSinceLocal(date) {
+function thaiDateParts(date) {
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
-  const yyyy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-  const hh = String(date.getHours()).padStart(2, '0');
-  const min = String(date.getMinutes()).padStart(2, '0');
-  const sec = String(date.getSeconds()).padStart(2, '0');
+  const thaiDate = new Date(date.getTime() + THAI_UTC_OFFSET_MS);
+  return {
+    yyyy: thaiDate.getUTCFullYear(),
+    mm: thaiDate.getUTCMonth() + 1,
+    dd: thaiDate.getUTCDate(),
+    hh: thaiDate.getUTCHours(),
+    min: thaiDate.getUTCMinutes(),
+    sec: thaiDate.getUTCSeconds(),
+  };
+}
+
+function toSinceThai(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
+  const parts = thaiDateParts(date);
+  if (!parts) return null;
+  const yyyy = parts.yyyy;
+  const mm = String(parts.mm).padStart(2, '0');
+  const dd = String(parts.dd).padStart(2, '0');
+  const hh = String(parts.hh).padStart(2, '0');
+  const min = String(parts.min).padStart(2, '0');
+  const sec = String(parts.sec).padStart(2, '0');
   return `${yyyy}${mm}${dd}${hh}${min}${sec}`;
 }
 
-function startOfToday() {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
+function thaiMidnight(date = new Date()) {
+  const parts = thaiDateParts(date);
+  if (!parts) return null;
+  return new Date(Date.UTC(parts.yyyy, parts.mm - 1, parts.dd, 0, 0, 0) - THAI_UTC_OFFSET_MS);
+}
+
+function parseThaiDateTimeString(value) {
+  const input = String(value || '').trim();
+  const match = input.match(
+    /^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2}))?)?$/
+  );
+  if (!match) return null;
+  const [, yyyy, mm, dd, hh = '00', min = '00', sec = '00'] = match;
+  return `${yyyy}${mm}${dd}${hh}${min}${sec}`;
 }
 
 function parseCustomSince(rawValue) {
@@ -121,10 +157,10 @@ function parseCustomSince(rawValue) {
   const str = String(rawValue).trim();
   if (!str) return null;
   if (/^\d{14}$/.test(str)) return str;
-
-  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(str) ? `${str}T00:00:00` : str;
-  const date = new Date(normalized);
-  return toSinceLocal(date);
+  const parsedThaiLiteral = parseThaiDateTimeString(str);
+  if (parsedThaiLiteral) return parsedThaiLiteral;
+  const date = new Date(str);
+  return toSinceThai(date);
 }
 
 function resolveSinceFromWindow({ windowKey, customSince, fullDefaultSince }) {
@@ -133,18 +169,19 @@ function resolveSinceFromWindow({ windowKey, customSince, fullDefaultSince }) {
   if (key === 'full') return fullDefaultSince;
   if (key === 'custom') return parseCustomSince(customSince) || fullDefaultSince;
 
+  const start = thaiMidnight(new Date());
+  if (!start) return fullDefaultSince;
+
   if (key === 'last3') {
-    const d = startOfToday();
-    d.setDate(d.getDate() - 3);
-    return toSinceLocal(d);
+    return toSinceThai(new Date(start.getTime() - 3 * 24 * 60 * 60 * 1000));
   }
   if (key === 'last7') {
-    const d = startOfToday();
-    d.setDate(d.getDate() - 7);
-    return toSinceLocal(d);
+    return toSinceThai(new Date(start.getTime() - 7 * 24 * 60 * 60 * 1000));
   }
 
-  return toSinceLocal(startOfToday());
+  // "today" uses a safety buffer to avoid missing fresh sessions due to
+  // timestamp skew or delayed activity writes on the source side.
+  return toSinceThai(new Date(start.getTime() - TODAY_SAFETY_BUFFER_HOURS * ONE_HOUR_MS));
 }
 
 function chromeBinaryPath() {
@@ -194,8 +231,22 @@ app.get('/api/sources', (req, res) => {
 app.get('/api/sessions', async (req, res) => {
   try {
     const runId = req.query.runId ? Number(req.query.runId) : null;
-    const rows = await listSessions(runId);
-    res.json({ sessions: rows });
+    const page = Math.max(1, Number(req.query.page || 1));
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
+    const offset = (page - 1) * pageSize;
+
+    const [rows, total] = await Promise.all([
+      listSessions(runId, { limit: pageSize, offset }),
+      countSessions(runId),
+    ]);
+
+    res.json({
+      sessions: rows,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -224,14 +275,30 @@ app.get('/api/sessions/:sessionId/analysis', async (req, res) => {
 app.get('/api/errors', async (req, res) => {
   try {
     const runId = req.query.runId ? Number(req.query.runId) : null;
-    const rows = await listErrors({
+    const page = Math.max(1, Number(req.query.page || 1));
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
+    const offset = (page - 1) * pageSize;
+
+    const filterOptions = {
       runId,
       subject: req.query.subject || '',
       difficulty: req.query.difficulty || '',
       topic: req.query.topic || '',
       confidence: req.query.confidence || '',
+    };
+
+    const [rows, total] = await Promise.all([
+      listErrors({ ...filterOptions, limit: pageSize, offset }),
+      countErrors(filterOptions),
+    ]);
+
+    res.json({
+      errors: rows,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
     });
-    res.json({ errors: rows });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -407,6 +474,7 @@ app.post('/api/scrape', async (req, res) => {
       run: savedRun,
       source: preset.label,
       sinceUsed: sinceValue,
+      sinceTimezone: THAI_TIME_ZONE,
       scrapeWindowUsed: String(scrapeWindow || 'today').toLowerCase(),
       mode: 'auto-upsert',
       warning,

@@ -26,6 +26,7 @@ const CONFIG = {
   nextPageWaitMs:    2600,               // ms to wait after clicking "Next" in pagination
   reviewReadyTimeoutMs: 18000,           // ms to wait for review answer DOM to stabilize
 };
+const THAI_TIME_ZONE = 'Asia/Bangkok';
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
 
@@ -47,6 +48,54 @@ function parseTimeSec(str) {
   }
   const m = str.match(/(?:(\d+)\s*mins?\s*)?(\d+)\s*secs?/);
   return m ? (parseInt(m[1] || 0) * 60 + parseInt(m[2] || 0)) : 0;
+}
+
+function formatYmdInTimeZone(date, timeZone) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const parts = formatter.formatToParts(date);
+  const year = parts.find((part) => part.type === 'year')?.value;
+  const month = parts.find((part) => part.type === 'month')?.value;
+  const day = parts.find((part) => part.type === 'day')?.value;
+  if (!year || !month || !day) return null;
+  return `${year}-${month}-${day}`;
+}
+
+function toThaiDateOnly(rawValue) {
+  if (!rawValue) return null;
+  const parsed = new Date(rawValue);
+  if (!Number.isNaN(parsed.getTime())) return formatYmdInTimeZone(parsed, THAI_TIME_ZONE);
+  const text = String(rawValue).trim();
+  const dayOnly = text.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+  return dayOnly || null;
+}
+
+function extractActivityDate(activityData = {}) {
+  const candidates = [
+    activityData.client_created_at,
+    activityData.created_at,
+    activityData.client_updated_at,
+    activityData.updated_at,
+  ];
+  for (const candidate of candidates) {
+    const thaiDate = toThaiDateOnly(candidate);
+    if (thaiDate) return thaiDate;
+  }
+  return null;
+}
+
+function inferTimestampTimezoneLabel(rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value) return 'unknown';
+  if (/z$/i.test(value)) return 'UTC (Z)';
+  const offsetMatch = value.match(/([+-]\d{2}:?\d{2})$/);
+  if (offsetMatch) return `offset ${offsetMatch[1]}`;
+  return 'no offset in timestamp (likely client-local)';
 }
 
 function sourceFamily(source) {
@@ -104,9 +153,18 @@ function isCompletedAnswerActivity(activity) {
 }
 
 function normalizeSubSubject(question) {
+  const direct = String(question?.subject_sub_raw || question?.subject_sub || '')
+    .trim()
+    .toUpperCase();
+  if (direct === 'CR' || direct === 'RC' || direct === 'PS' || direct === 'DS') return direct;
+  if (direct === 'MSR' || direct === 'TA' || direct === 'GI' || direct === 'TPA' || direct === 'DI') return direct;
+  if (direct === 'QUANT') return 'QUANT';
+  if (direct === 'VERBAL') return 'VERBAL';
+
   const catId = Number(question?.cat_id);
   if (catId === 1337013) return 'CR';
   if (catId === 1337023) return 'RC';
+  if (catId >= 1336700 && catId <= 1336899) return 'DI';
 
   const label = String(question?.cat_label || '').toLowerCase();
   if (!label) return null;
@@ -123,10 +181,105 @@ function normalizeSubSubject(question) {
   return null;
 }
 
+function subSubjectGroup(subSubject) {
+  const value = String(subSubject || '').trim().toUpperCase();
+  if (!value) return null;
+  if (value === 'DS') return 'DS';
+  if (value === 'TPA' || value === 'TA' || value === 'GI' || value === 'MSR' || value === 'DI') return 'DI';
+  if (value === 'CR' || value === 'RC' || value === 'VERBAL') return value === 'VERBAL' ? 'Verbal' : value;
+  if (value === 'PS' || value === 'QUANT') return value === 'QUANT' ? 'Quant' : value;
+  return null;
+}
+
+function detectSubSubjectCodeFromText(rawValue) {
+  const text = String(rawValue || '').toLowerCase();
+  if (!text) return null;
+
+  const mentions = [];
+  if (text.includes('data sufficiency')) mentions.push('DS');
+  if (text.includes('multi-source reasoning')) mentions.push('MSR');
+  if (text.includes('table analysis')) mentions.push('TA');
+  if (text.includes('graphics interpretation')) mentions.push('GI');
+  if (text.includes('two-part analysis')) mentions.push('TPA');
+  if (text.includes('critical reasoning')) mentions.push('CR');
+  if (text.includes('reading comprehension')) mentions.push('RC');
+  if (text.includes('problem solving')) mentions.push('PS');
+
+  const unique = Array.from(new Set(mentions));
+  if (unique.length === 1) return unique[0];
+  if (unique.length > 1) return null;
+  return null;
+}
+
+function detectSubSubjectGroupFromText(rawValue) {
+  return subSubjectGroup(detectSubSubjectCodeFromText(rawValue));
+}
+
+function detectSubSubjectCodeFromCurrentPage() {
+  const selector =
+    'h1,h2,h3,[class*="title"],[class*="heading"],[class*="breadcrumb"],[class*="header"],[class*="category"],[class*="subtitle"]';
+  const nodes = Array.from(document.querySelectorAll(selector)).slice(0, 40);
+  for (const node of nodes) {
+    const text = node?.innerText?.trim();
+    if (!text) continue;
+    const detected = detectSubSubjectCodeFromText(text);
+    if (detected) return detected;
+  }
+
+  const lines = String(document.body?.innerText || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 80);
+  for (const line of lines) {
+    const detected = detectSubSubjectCodeFromText(line);
+    if (detected) return detected;
+  }
+
+  const bodyDetected = detectSubSubjectCodeFromText(document.body?.innerText || '');
+  if (bodyDetected) return bodyDetected;
+  return null;
+}
+
+function detectSubSubjectGroupFromCurrentPage() {
+  return subSubjectGroup(detectSubSubjectCodeFromCurrentPage());
+}
+
+function diSubtopicFromSubSubject(subSubject) {
+  const value = String(subSubject || '').trim().toUpperCase();
+  if (!value) return '';
+  if (value === 'DS') return 'Data Sufficiency';
+  if (value === 'MSR') return 'Multi-Source Reasoning';
+  if (value === 'TA') return 'Table Analysis';
+  if (value === 'GI') return 'Graphics Interpretation';
+  if (value === 'TPA') return 'Two-Part Analysis';
+  return '';
+}
+
+function mergeCategorySubCodeHints(targetMap, nextMap) {
+  if (!(targetMap instanceof Map) || !(nextMap instanceof Map)) return targetMap;
+  for (const [catId, code] of nextMap.entries()) {
+    const num = Number(catId);
+    const nextCode = String(code || '').trim().toUpperCase();
+    if (!Number.isInteger(num) || !nextCode) continue;
+    const existing = String(targetMap.get(num) || '').trim().toUpperCase();
+    if (!existing) {
+      targetMap.set(num, nextCode);
+      continue;
+    }
+    if (existing === 'DI' && nextCode !== 'DI') {
+      targetMap.set(num, nextCode);
+    }
+  }
+  return targetMap;
+}
+
 function subSubjectFamily(subSubject) {
-  if (subSubject === 'CR' || subSubject === 'RC') return 'Verbal';
-  if (subSubject === 'PS' || subSubject === 'DS') return 'Quant';
-  if (subSubject === 'TPA' || subSubject === 'TA' || subSubject === 'GI' || subSubject === 'MSR') return 'DI';
+  if (subSubject === 'CR' || subSubject === 'RC' || subSubject === 'VERBAL') return 'Verbal';
+  if (subSubject === 'PS' || subSubject === 'QUANT') return 'Quant';
+  if (subSubject === 'DS' || subSubject === 'TPA' || subSubject === 'TA' || subSubject === 'GI' || subSubject === 'MSR' || subSubject === 'DI') {
+    return 'DI';
+  }
   return 'Mixed';
 }
 
@@ -271,6 +424,165 @@ function detectTopic(text) {
   return '';
 }
 
+function normalizeAnswerLetter(rawValue) {
+  if (rawValue === null || rawValue === undefined) return null;
+  const text = String(rawValue).trim().toUpperCase();
+  if (!text) return null;
+  if (/^[A-E]$/.test(text)) return text;
+  if (/^[1-5]$/.test(text)) return String.fromCharCode(64 + Number(text));
+  if (/^[0-4]$/.test(text)) return String.fromCharCode(65 + Number(text));
+  const explicit = text.match(/\b([A-E])\b/)?.[1];
+  if (explicit) return explicit;
+  return null;
+}
+
+function looksLikeDiCategoryId(value) {
+  const num = Number(value);
+  if (!Number.isInteger(num)) return false;
+  return num >= 1336700 && num < 1336800;
+}
+
+function isDiReviewContext(source, sessionSubject, catId, reviewCategoryId) {
+  if (sourceFamily(source) === 'DI') return true;
+  const subject = String(sessionSubject || '').trim().toUpperCase();
+  if (subject === 'DI' || subject === 'TA' || subject === 'GI' || subject === 'MSR' || subject === 'TPA') {
+    return true;
+  }
+  if (looksLikeDiCategoryId(catId)) return true;
+  if (looksLikeDiCategoryId(reviewCategoryId)) return true;
+  return false;
+}
+
+function extractAnswerLettersFromText(text) {
+  const content = String(text || '');
+  if (!content.trim()) return { my_answer: null, correct_answer: null };
+
+  const patterns = {
+    my: [
+      /your answer\s*[:\-]\s*([A-E])/i,
+      /you answered\s*[:\-]\s*([A-E])/i,
+      /selected answer\s*[:\-]\s*([A-E])/i,
+    ],
+    correct: [
+      /correct answer\s*[:\-]\s*([A-E])/i,
+      /the correct answer is\s*\(?([A-E])\)?/i,
+    ],
+  };
+
+  let myAnswer = null;
+  let correctAnswer = null;
+  for (const regex of patterns.my) {
+    const m = content.match(regex);
+    if (m?.[1]) {
+      myAnswer = normalizeAnswerLetter(m[1]);
+      if (myAnswer) break;
+    }
+  }
+  for (const regex of patterns.correct) {
+    const m = content.match(regex);
+    if (m?.[1]) {
+      correctAnswer = normalizeAnswerLetter(m[1]);
+      if (correctAnswer) break;
+    }
+  }
+
+  return {
+    my_answer: myAnswer,
+    correct_answer: correctAnswer,
+  };
+}
+
+function inferChoiceLetterFromNode(el, idx) {
+  const attrCandidates = [
+    el?.getAttribute?.('data-choice'),
+    el?.getAttribute?.('data-answer'),
+    el?.getAttribute?.('data-option'),
+    el?.getAttribute?.('data-letter'),
+    el?.getAttribute?.('aria-label'),
+    el?.querySelector?.('[data-choice]')?.getAttribute?.('data-choice'),
+    el?.querySelector?.('[aria-label]')?.getAttribute?.('aria-label'),
+  ];
+  for (const value of attrCandidates) {
+    const letter = normalizeAnswerLetter(value);
+    if (letter) return letter;
+  }
+
+  const text = String(el?.innerText || '').trim();
+  const leadingLetter = text.match(/^\s*([A-E])[\).:\-\s]/i)?.[1];
+  if (leadingLetter) return normalizeAnswerLetter(leadingLetter);
+
+  return ['A', 'B', 'C', 'D', 'E'][idx] ?? String.fromCharCode(65 + idx);
+}
+
+function elementLooksSelected(el) {
+  if (!el) return false;
+  const classText = String(el.className || '').toLowerCase();
+  if (
+    classText.includes('selected') ||
+    classText.includes('active') ||
+    classText.includes('chosen') ||
+    classText.includes('incorrect')
+  ) {
+    return true;
+  }
+  const ariaChecked = String(el.getAttribute?.('aria-checked') || '').toLowerCase();
+  if (ariaChecked === 'true') return true;
+  if (el.querySelector?.('input:checked')) return true;
+  return false;
+}
+
+function elementLooksCorrect(el) {
+  if (!el) return false;
+  const classText = String(el.className || '').toLowerCase();
+  if (classText.includes('corrected') || classText.includes('is-correct') || classText.includes('correct-answer')) {
+    return true;
+  }
+  if (el.querySelector?.('[class*="corrected"], [class*="is-correct"], [class*="correct-answer"]')) return true;
+  return false;
+}
+
+function elementLooksIncorrect(el) {
+  if (!el) return false;
+  const classText = String(el.className || '').toLowerCase();
+  if (classText.includes('incorrect') || classText.includes('is-incorrect')) {
+    return true;
+  }
+  if (el.querySelector?.('[class*="incorrect"], [class*="is-incorrect"]')) return true;
+  return false;
+}
+
+function extractAnswersFromChoiceDom() {
+  const selectors = [
+    '.question-choices-multi .multi-choice',
+    '[class*="question-choices"] .multi-choice',
+    '[class*="question-choices"] [class*="choice"]',
+  ];
+
+  let choiceEls = [];
+  for (const selector of selectors) {
+    const nodes = Array.from(document.querySelectorAll(selector));
+    if (nodes.length > choiceEls.length) choiceEls = nodes;
+  }
+  if (!choiceEls.length) return { my_answer: null, correct_answer: null, selected_answer: null };
+
+  let myAnswer = null;
+  let correctAnswer = null;
+  let selectedAnswer = null;
+
+  choiceEls.forEach((el, idx) => {
+    const letter = inferChoiceLetterFromNode(el, idx);
+    if (!selectedAnswer && elementLooksSelected(el)) selectedAnswer = letter;
+    if (!myAnswer && elementLooksIncorrect(el)) myAnswer = letter;
+    if (!correctAnswer && elementLooksCorrect(el)) correctAnswer = letter;
+  });
+
+  return {
+    my_answer: normalizeAnswerLetter(myAnswer),
+    correct_answer: normalizeAnswerLetter(correctAnswer),
+    selected_answer: normalizeAnswerLetter(selectedAnswer),
+  };
+}
+
 function derivedSubject(questions, source) {
   const subSubjects = Array.from(
     new Set(
@@ -280,7 +592,13 @@ function derivedSubject(questions, source) {
     )
   );
 
-  if (subSubjects.length === 1) return subSubjects[0];
+  if (subSubjects.length === 1) {
+    const only = subSubjects[0];
+    if (only === 'MSR' || only === 'TA' || only === 'GI' || only === 'TPA' || only === 'DI') return 'DI';
+    if (only === 'VERBAL') return 'Verbal';
+    if (only === 'QUANT') return 'Quant';
+    return only;
+  }
   if (subSubjects.length > 1) {
     const families = Array.from(new Set(subSubjects.map((item) => subSubjectFamily(item))));
     if (families.length === 1 && families[0] !== 'Mixed') return families[0];
@@ -368,7 +686,73 @@ function dedupeWrongRefs(items) {
   return output;
 }
 
+function categoryRowKey(row = {}) {
+  const qId = String(row.q_id || '').trim();
+  const qCode = String(row.q_code || '').trim();
+  const correctness = row.correct ? 1 : 0;
+  const timeSec = Number(row.time_sec) || 0;
+  const difficulty = String(row.difficulty || '').trim().toLowerCase();
+
+  if (qId) return `id:${qId}:${qCode}:${correctness}:${timeSec}:${difficulty}`;
+  if (qCode) return `code:${qCode}:${correctness}:${timeSec}:${difficulty}`;
+
+  return `raw:${difficulty}:${correctness}:${timeSec}:${String(
+    row.question_url || ''
+  )}`;
+}
+
+function selectPreferredSubjectSub(existingValue, incomingValue) {
+  const existing = String(existingValue || '').trim();
+  const incoming = String(incomingValue || '').trim();
+  if (!incoming) return existing || null;
+  if (!existing) return incoming;
+  if (existing === incoming) return existing;
+  if (existing === 'DI' && incoming === 'DS') return incoming;
+  return existing;
+}
+
+function mergeUniqueCategoryRows(existingRows = [], incomingRows = []) {
+  const merged = [...existingRows];
+  const seen = new Map();
+  merged.forEach((row, idx) => {
+    seen.set(categoryRowKey(row), idx);
+  });
+
+  for (const row of incomingRows) {
+    const key = categoryRowKey(row);
+    if (seen.has(key)) {
+      const index = seen.get(key);
+      const current = merged[index] || {};
+      merged[index] = {
+        ...current,
+        q_code: current.q_code || row.q_code || null,
+        q_id: current.q_id || row.q_id || null,
+        cat_id: current.cat_id || row.cat_id || null,
+        question_url: current.question_url || row.question_url || null,
+        subject_sub: selectPreferredSubjectSub(current.subject_sub, row.subject_sub),
+        subject_sub_raw: current.subject_sub_raw || row.subject_sub_raw || null,
+        topic: current.topic || row.topic || null,
+      };
+      continue;
+    }
+    seen.set(key, merged.length);
+    merged.push(row);
+  }
+
+  return merged;
+}
+
 async function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function enqueueCategoryCandidates(queue, seenQueued, values = []) {
+  for (const value of values) {
+    const num = Number(value);
+    if (!Number.isInteger(num) || num <= 0) continue;
+    if (seenQueued.has(num)) continue;
+    seenQueued.add(num);
+    queue.push(num);
+  }
+}
 
 function dedupeNumeric(values = []) {
   const out = [];
@@ -442,6 +826,67 @@ function extractCategoryCandidatesFromCurrentPage(sessionId) {
   }
 
   return dedupeNumeric(values);
+}
+
+function extractCategorySubCodesFromCurrentPage(sessionId) {
+  const out = new Map();
+
+  const categoryRows = Array.from(document.querySelectorAll('[data-id].category.content,[data-id][class*="category"][class*="content"]'));
+  for (const row of categoryRows) {
+    const catId = Number(row.getAttribute('data-id'));
+    if (!Number.isInteger(catId) || catId <= 0) continue;
+    const text = String(row.innerText || row.textContent || '').trim().replace(/\s+/g, ' ');
+    if (!text) continue;
+    const code = detectSubSubjectCodeFromText(text);
+    if (!code) continue;
+    const current = String(out.get(catId) || '').trim().toUpperCase();
+    if (!current || (current === 'DI' && code !== 'DI')) {
+      out.set(catId, code);
+    }
+  }
+
+  const attrs = ['href', 'data-href', 'data-url', 'data-link', 'onclick'];
+  const nodes = [document.body, ...document.querySelectorAll('*')];
+
+  for (const node of nodes) {
+    let parsed = null;
+    for (const attr of attrs) {
+      const raw = node?.getAttribute?.(attr);
+      parsed = parseCategoryRoute(raw);
+      if (parsed) break;
+    }
+    if (!parsed) continue;
+    if (Number(parsed.session_id) !== Number(sessionId)) continue;
+
+    const textCandidates = [
+      node?.innerText,
+      node?.textContent,
+      node?.getAttribute?.('aria-label'),
+      node?.getAttribute?.('title'),
+    ];
+
+    for (const rawText of textCandidates) {
+      const text = String(rawText || '').trim();
+      if (!text) continue;
+      if (text.length > 220) continue;
+      if ((text.match(/\n/g) || []).length > 2) continue;
+      const code = detectSubSubjectCodeFromText(text);
+      if (!code) continue;
+      const current = String(out.get(parsed.cat_id) || '').trim().toUpperCase();
+      if (!current || (current === 'DI' && code !== 'DI')) {
+        out.set(parsed.cat_id, code);
+      }
+      const parent = parentCategoryFromQuestionCategory(parsed.cat_id);
+      if (parent) {
+        const parentCurrent = String(out.get(parent) || '').trim().toUpperCase();
+        if (!parentCurrent || (parentCurrent === 'DI' && code !== 'DI')) {
+          out.set(parent, code);
+        }
+      }
+    }
+  }
+
+  return out;
 }
 
 async function scrapeCategoryRowsFromCurrentPage(cfg = CONFIG) {
@@ -570,9 +1015,14 @@ async function scrapePart1(cfg = CONFIG) {
   const rawAnswers = allActivities.filter(a => a.activity_type === 'answer');
   const answers = rawAnswers.filter(isCompletedAnswerActivity);
   const skippedIncomplete = rawAnswers.length - answers.length;
+  const sampleTimestamp = answers.find((item) => item?.activity_data?.client_created_at)?.activity_data?.client_created_at;
+  const gmatTimestampTimezone = inferTimestampTimezoneLabel(sampleTimestamp);
   console.log(
     `  ${answers.length} answer activities found` +
       (skippedIncomplete > 0 ? ` (${skippedIncomplete} incomplete skipped)` : '')
+  );
+  console.log(
+    `  Timestamp basis: GMAT client_created_at=${gmatTimestampTimezone}; normalizing session dates to ${THAI_TIME_ZONE}.`
   );
 
   // Group by session: build sid → {date, avgSec, total, errors, catIds, questions[]}
@@ -583,6 +1033,13 @@ async function scrapePart1(cfg = CONFIG) {
     if (!apiSessions[sid]) apiSessions[sid] = { sid, questions: [], catIds: new Set() };
     const s = apiSessions[sid];
     const idCandidates = extractIdCandidatesFromActivity(d);
+    const catLabel = extractCategoryLabel(d);
+    const apiSubRaw = normalizeSubSubject({
+      cat_id: d.question_category_id,
+      cat_label: catLabel,
+    });
+    const apiSub = subSubjectGroup(apiSubRaw);
+    const apiDiTopic = diSubtopicFromSubSubject(apiSubRaw);
     s.questions.push({
       q_id:       idCandidates[0] || null,
       q_id_candidates: idCandidates,
@@ -590,10 +1047,16 @@ async function scrapePart1(cfg = CONFIG) {
       user_answer: d.user_answer ?? null,
       time_sec:   d.time_taken ?? 0,
       cat_id:     d.question_category_id,
-      cat_label:  extractCategoryLabel(d),
+      cat_label:  catLabel,
+      subject_sub: apiSub || null,
+      subject_sub_raw: apiSubRaw || null,
+      topic: apiDiTopic || null,
     });
     s.catIds.add(d.question_category_id);
-    s.date = (d.client_created_at?.slice(0, 10) > (s.date ?? '')) ? d.client_created_at.slice(0, 10) : (s.date ?? d.client_created_at?.slice(0, 10));
+    const activityDate = extractActivityDate(d);
+    if (activityDate && (!s.date || activityDate > s.date)) {
+      s.date = activityDate;
+    }
   }
 
   // ── Step 1b: Scrape each session's categories page for difficulty + q_code ─
@@ -609,46 +1072,169 @@ async function scrapePart1(cfg = CONFIG) {
         .filter((q) => q?.q_id)
         .map((q) => [String(q.q_id), q])
     );
+    const subGroupByCategory = new Map();
+    const subCodeByCategory = new Map();
+    for (const apiQ of apiS.questions || []) {
+      const directCat = Number(apiQ?.cat_id);
+      const directSubRaw = String(apiQ?.subject_sub_raw || normalizeSubSubject(apiQ) || '').trim().toUpperCase();
+      const directSub = subSubjectGroup(directSubRaw || apiQ?.subject_sub || normalizeSubSubject(apiQ));
+      if (Number.isInteger(directCat) && directSub && !subGroupByCategory.has(directCat)) {
+        subGroupByCategory.set(directCat, directSub);
+      }
+      if (Number.isInteger(directCat) && directSubRaw && !subCodeByCategory.has(directCat)) {
+        subCodeByCategory.set(directCat, directSubRaw);
+      }
+      const parentCat = parentCategoryFromQuestionCategory(directCat);
+      if (Number.isInteger(parentCat) && directSub && !subGroupByCategory.has(parentCat)) {
+        subGroupByCategory.set(parentCat, directSub);
+      }
+      if (Number.isInteger(parentCat) && directSubRaw && !subCodeByCategory.has(parentCat)) {
+        subCodeByCategory.set(parentCat, directSubRaw);
+      }
+    }
 
     await navigateHashSafe(`custom-quiz/${sid}`, cfg.pageWaitMs);
     const discoveredCategoryIds = extractCategoryCandidatesFromCurrentPage(sid);
+    const pageSubCodeHints = extractCategorySubCodesFromCurrentPage(sid);
 
     const apiCatIds = Array.from(apiS.catIds || [])
       .map((id) => Number(id))
       .filter((id) => Number.isInteger(id))
       .sort((a, b) => a - b);
     const derivedParents = apiCatIds.map(parentCategoryFromQuestionCategory).filter(Boolean);
-    const categoryCandidates = dedupeNumeric([
+    const initialCategoryCandidates = dedupeNumeric([
       cfg.reviewCategoryId,
       ...discoveredCategoryIds,
+      ...Array.from(pageSubCodeHints.keys()),
+      ...apiCatIds,
       ...derivedParents,
     ]);
 
     let reviewCategoryId = null;
     let catQs = [];
+    let catQsCombined = [];
     let bodyText = '';
     const attempted = [];
+    const categoriesWithRows = [];
+    const categoryQueue = [];
+    const seenQueuedCategories = new Set();
+    enqueueCategoryCandidates(categoryQueue, seenQueuedCategories, initialCategoryCandidates);
 
-    for (const candidate of categoryCandidates) {
+    while (categoryQueue.length) {
+      const candidate = categoryQueue.shift();
       attempted.push(candidate);
       const navResult = await navigateHashSafe(`custom-quiz/${sid}/categories/${candidate}`, cfg.pageWaitMs);
-      const rows = await scrapeCategoryRowsFromCurrentPage(cfg);
+      mergeCategorySubCodeHints(pageSubCodeHints, extractCategorySubCodesFromCurrentPage(sid));
+      const pageSubCode =
+        pageSubCodeHints.get(Number(candidate)) ||
+        subCodeByCategory.get(Number(candidate)) ||
+        detectSubSubjectCodeFromCurrentPage() ||
+        null;
+      const pageSubGroup = subSubjectGroup(pageSubCode) || subGroupByCategory.get(Number(candidate)) || null;
+      const rows = (await scrapeCategoryRowsFromCurrentPage(cfg)).map((row) => {
+        const fromApi = row?.q_id ? apiByQId.get(String(row.q_id)) : null;
+        const rowCatId = Number(row?.cat_id);
+        const rowParentCatId = parentCategoryFromQuestionCategory(rowCatId);
+        const rowHintCode = String(
+          pageSubCodeHints.get(rowCatId) ||
+          pageSubCodeHints.get(rowParentCatId) ||
+          subCodeByCategory.get(rowCatId) ||
+          subCodeByCategory.get(rowParentCatId) ||
+          ''
+        )
+          .trim()
+          .toUpperCase();
+        const apiSubCode = String(
+          fromApi?.subject_sub_raw ||
+          subCodeByCategory.get(Number(fromApi?.cat_id)) ||
+          subCodeByCategory.get(parentCategoryFromQuestionCategory(fromApi?.cat_id)) ||
+          normalizeSubSubject(fromApi) ||
+          ''
+        )
+          .trim()
+          .toUpperCase();
+        const resolvedSubCode = rowHintCode || apiSubCode || pageSubCode || '';
+        const resolvedGroup =
+          subSubjectGroup(resolvedSubCode) ||
+          subSubjectGroup(fromApi?.subject_sub || normalizeSubSubject(fromApi)) ||
+          pageSubGroup ||
+          null;
+        const currentTopic = String(row?.topic || '').trim();
+        const diTopic = resolvedGroup === 'DI' ? diSubtopicFromSubSubject(resolvedSubCode) : '';
+        return {
+          ...row,
+          subject_sub: resolvedGroup,
+          subject_sub_raw: resolvedSubCode || null,
+          topic: currentTopic || diTopic || null,
+        };
+      });
+      const discoveredNestedIds = extractCategoryCandidatesFromCurrentPage(sid);
+      enqueueCategoryCandidates(categoryQueue, seenQueuedCategories, discoveredNestedIds);
+      mergeCategorySubCodeHints(pageSubCodeHints, extractCategorySubCodesFromCurrentPage(sid));
       if (navResult.hadPageError && !rows.length) {
         console.warn(`  ⚠️ ${sid} — category ${candidate} caused page error (${navResult.newPageErrors}), trying next.`);
         continue;
       }
       if (rows.length > 0) {
-        reviewCategoryId = candidate;
-        catQs = rows;
-        bodyText = document.body.innerText;
-        break;
+        if (!reviewCategoryId) reviewCategoryId = candidate;
+        categoriesWithRows.push(candidate);
+        catQsCombined = mergeUniqueCategoryRows(catQsCombined, rows);
+        if (!bodyText) bodyText = document.body.innerText;
       }
+    }
+    catQs = catQsCombined;
+    if (categoriesWithRows.length > 1) {
+      console.log(`  ℹ️ ${sid} — merged ${catQs.length} rows across categories: ${categoriesWithRows.join(', ')}`);
+    }
+    if (!initialCategoryCandidates.length) {
+      console.warn(`  ⚠️ ${sid} — no category candidates discovered from page/API.`);
     }
 
     // Last fallback for unknown route shapes.
     if (!catQs.length) {
       await navigateHashSafe(`custom-quiz/${sid}`, cfg.pageWaitMs);
-      catQs = await scrapeCategoryRowsFromCurrentPage(cfg);
+      mergeCategorySubCodeHints(pageSubCodeHints, extractCategorySubCodesFromCurrentPage(sid));
+      const fallbackPageCode =
+        pageSubCodeHints.get(Number(reviewCategoryId)) ||
+        detectSubSubjectCodeFromCurrentPage();
+      const fallbackPageGroup = subSubjectGroup(fallbackPageCode);
+      catQs = (await scrapeCategoryRowsFromCurrentPage(cfg)).map((row) => {
+        const fromApi = row?.q_id ? apiByQId.get(String(row.q_id)) : null;
+        const rowCatId = Number(row?.cat_id);
+        const rowParentCatId = parentCategoryFromQuestionCategory(rowCatId);
+        const rowHintCode = String(
+          pageSubCodeHints.get(rowCatId) ||
+          pageSubCodeHints.get(rowParentCatId) ||
+          subCodeByCategory.get(rowCatId) ||
+          subCodeByCategory.get(rowParentCatId) ||
+          ''
+        )
+          .trim()
+          .toUpperCase();
+        const apiSubCode = String(
+          fromApi?.subject_sub_raw ||
+          subCodeByCategory.get(Number(fromApi?.cat_id)) ||
+          subCodeByCategory.get(parentCategoryFromQuestionCategory(fromApi?.cat_id)) ||
+          normalizeSubSubject(fromApi) ||
+          ''
+        )
+          .trim()
+          .toUpperCase();
+        const resolvedSubCode = rowHintCode || apiSubCode || fallbackPageCode || '';
+        const resolvedGroup =
+          subSubjectGroup(resolvedSubCode) ||
+          subSubjectGroup(fromApi?.subject_sub || normalizeSubSubject(fromApi)) ||
+          fallbackPageGroup ||
+          null;
+        const currentTopic = String(row?.topic || '').trim();
+        const diTopic = resolvedGroup === 'DI' ? diSubtopicFromSubSubject(resolvedSubCode) : '';
+        return {
+          ...row,
+          subject_sub: resolvedGroup,
+          subject_sub_raw: resolvedSubCode || null,
+          topic: currentTopic || diTopic || null,
+        };
+      });
       bodyText = document.body.innerText;
       if (!reviewCategoryId) {
         const categoryFromRows = dedupeNumeric(catQs.map((q) => q.cat_id))[0];
@@ -719,6 +1305,18 @@ async function scrapePart1(cfg = CONFIG) {
       const apiQId = String(apiQ.q_id);
       if (seenQIds.has(apiQId)) continue;
       seenQIds.add(apiQId);
+      const fallbackSubCode =
+        String(
+          pageSubCodeHints.get(Number(apiQ.cat_id)) ||
+            pageSubCodeHints.get(parentCategoryFromQuestionCategory(apiQ.cat_id)) ||
+            ''
+        )
+          .trim()
+          .toUpperCase() ||
+        String(apiQ.subject_sub_raw || '').trim().toUpperCase();
+      const fallbackSubGroup =
+        subSubjectGroup(fallbackSubCode || apiQ.subject_sub || normalizeSubSubject(apiQ)) || null;
+      const fallbackDiTopic = fallbackSubGroup === 'DI' ? diSubtopicFromSubSubject(fallbackSubCode) : '';
       questions.push({
         q_code: null,
         correct: Boolean(apiQ.correct),
@@ -728,6 +1326,9 @@ async function scrapePart1(cfg = CONFIG) {
         q_id: apiQId,
         cat_id: reviewCategoryId || parentCategoryFromQuestionCategory(apiQ.cat_id) || apiQ.cat_id || null,
         question_url: null,
+        subject_sub: fallbackSubGroup,
+        subject_sub_raw: fallbackSubCode || null,
+        topic: apiQ.topic || fallbackDiTopic || null,
       });
     }
 
@@ -739,6 +1340,15 @@ async function scrapePart1(cfg = CONFIG) {
     const apiCorrectCount = apiS.questions.filter((q) => Boolean(q.correct)).length;
     const apiErrorCount = apiS.questions.filter((q) => !q.correct).length;
     const statsQuestions = catQs.length ? catQs : questions;
+    const computedCorrect = statsQuestions.length
+      ? statsQuestions.filter((q) => q.correct).length
+      : apiCorrectCount;
+    const computedErrors = statsQuestions.length
+      ? statsQuestions.filter((q) => !q.correct).length
+      : apiErrorCount;
+    const computedTotal = computedCorrect + computedErrors;
+    const computedAccuracyPct =
+      computedTotal > 0 ? Number(((computedCorrect * 100) / computedTotal).toFixed(1)) : null;
 
     sessions.push({
       session_id:            parseInt(sid),
@@ -749,9 +1359,9 @@ async function scrapePart1(cfg = CONFIG) {
       stats: {
         total_q_api:         apiS.questions.length,          // API total (may include 1 extra from other sub-category)
         total_q_categories:  catQs.length,                   // session-scoped categories rows (if available)
-        correct:             statsQuestions.length ? statsQuestions.filter(q => q.correct).length : apiCorrectCount,
-        errors:              statsQuestions.length ? statsQuestions.filter(q => !q.correct).length : apiErrorCount,
-        accuracy_pct:        accMatch ? parseFloat(accMatch[1]) : null,
+        correct:             computedCorrect,
+        errors:              computedErrors,
+        accuracy_pct:        computedAccuracyPct,
         avg_time_sec:        avgMatch  ? parseTimeSec(avgMatch[1])  : Math.round(apiS.questions.reduce((s,q)=>s+q.time_sec,0)/apiS.questions.length),
         avg_correct_time_sec:  cAvgMatch ? parseTimeSec(cAvgMatch[1]) : null,
         avg_incorrect_time_sec: wAvgMatch ? parseTimeSec(wAvgMatch[1]) : null,
@@ -765,7 +1375,15 @@ async function scrapePart1(cfg = CONFIG) {
 
   const result = {
     extracted_at: new Date().toISOString(),
-    config: { since: cfg.since, source: cfg.source, clientId: runtimeClientId },
+    config: {
+      since: cfg.since,
+      source: cfg.source,
+      clientId: runtimeClientId,
+      sinceTimezone: THAI_TIME_ZONE,
+      sessionDateTimezone: THAI_TIME_ZONE,
+      gmatTimestampTimezone,
+      gmatTimestampField: 'client_created_at',
+    },
     sessions: sessions.sort((a, b) => a.date > b.date ? 1 : -1),
   };
 
@@ -799,8 +1417,16 @@ async function scrapePart2(sessions, cfg = CONFIG) {
         review_category_id: wq.review_category_id || s.review_category_id || null,
         q_code: wq.q_code || null,
         question_url: wq.question_url || null,
+        api_user_answer: wq.user_answer || null,
       });
     }
+  }
+
+  const subCodeHintsBySession = new Map();
+  const sessionIdsForHints = Array.from(new Set(toScrape.map((item) => Number(item.session_id)).filter((id) => Number.isInteger(id))));
+  for (const sid of sessionIdsForHints) {
+    await navigateHashSafe(`custom-quiz/${sid}`, cfg.pageWaitMs);
+    subCodeHintsBySession.set(String(sid), extractCategorySubCodesFromCurrentPage(sid));
   }
 
   console.log(`📖 Scraping ${toScrape.length} wrong-answer review pages…`);
@@ -820,8 +1446,10 @@ async function scrapePart2(sessions, cfg = CONFIG) {
       cat_id,
       review_category_id,
       q_code: expectedQCode,
-      question_url: savedQuestionUrl
+      question_url: savedQuestionUrl,
+      api_user_answer: apiUserAnswer,
     } = toScrape[i];
+    const diContext = isDiReviewContext(source, session_subject, cat_id, review_category_id);
     const qIdCandidates = Array.from(
       new Set([q_id, ...(Array.isArray(q_id_candidates) ? q_id_candidates : [])].filter(Boolean).map((id) => String(id)))
     );
@@ -903,25 +1531,51 @@ async function scrapePart2(sessions, cfg = CONFIG) {
     }
 
     // Answer choices
-    let my_answer = null, correct_answer = null;
-    const choiceEls = Array.from(
-      document.querySelectorAll(
-        '.question-choices-multi .multi-choice, [class*="question-choices"] .multi-choice'
-      )
-    );
-    choiceEls.forEach((el, idx) => {
-      const letter = ['A', 'B', 'C', 'D', 'E'][idx] ?? String.fromCharCode(65 + idx);
-      if (el.classList.contains('corrected')) correct_answer = letter;
-      if (el.classList.contains('incorrect')) my_answer      = letter;
-    });
-    if (!my_answer) {
+    const pageText = document.body.innerText || '';
+    const domAnswers = extractAnswersFromChoiceDom();
+    const textAnswers = extractAnswerLettersFromText(pageText);
+    const apiAnswer = normalizeAnswerLetter(apiUserAnswer);
+
+    let my_answer = domAnswers.my_answer || textAnswers.my_answer || null;
+    let correct_answer = domAnswers.correct_answer || textAnswers.correct_answer || null;
+
+    if (!my_answer && domAnswers.selected_answer && correct_answer && domAnswers.selected_answer !== correct_answer) {
+      my_answer = domAnswers.selected_answer;
+    }
+    if (!my_answer && apiAnswer && correct_answer && apiAnswer !== correct_answer) {
+      my_answer = apiAnswer;
+    }
+    if (!my_answer && !correct_answer && apiAnswer) {
+      my_answer = apiAnswer;
+    }
+
+    if (diContext && my_answer && correct_answer && my_answer === correct_answer) {
+      // DI pages can contain multiple sub-answers where a single-letter parse is ambiguous.
+      my_answer = null;
+      correct_answer = null;
+    }
+
+    if (!my_answer && !correct_answer && !diContext) {
       skippedNotWrong += 1;
-      console.warn(`  ↷ Skipped ${session_id}/${q_id}: page is not marked as incorrect`);
+      console.warn(`  ↷ Skipped ${session_id}/${q_id}: unable to detect answers on review page`);
+      continue;
+    }
+    if (my_answer && correct_answer && my_answer === correct_answer && !diContext) {
+      skippedNotWrong += 1;
+      console.warn(`  ↷ Skipped ${session_id}/${q_id}: parsed as non-incorrect (my=${my_answer}, correct=${correct_answer})`);
       continue;
     }
 
     // Topic from question text
-    const topic = shouldInferTopic(source, session_subject) ? detectTopic(document.body.innerText) : '';
+    const sessionHints = subCodeHintsBySession.get(String(session_id));
+    const hintedSubCode =
+      sessionHints?.get(Number(usedReviewCatId || reviewCatId || cat_id)) ||
+      sessionHints?.get(Number(cat_id)) ||
+      null;
+    const pageSubCode = hintedSubCode || detectSubSubjectCodeFromCurrentPage();
+    const diTopicFromPage = diSubtopicFromSubSubject(pageSubCode);
+    const inferredTopic = shouldInferTopic(source, session_subject) ? detectTopic(document.body.innerText) : '';
+    const topic = inferredTopic || diTopicFromPage || '';
 
     wrongAnswers.push({
       session_id,
@@ -1008,7 +1662,7 @@ async function runScraper(cfg = CONFIG) {
         if (detail) {
           q.my_answer      = detail.my_answer;
           q.correct_answer = detail.correct_answer;
-          q.topic          = detail.topic;
+          q.topic          = detail.topic || q.topic || null;
           q.q_id           = detail.q_id || null;
           q.cat_id         = detail.cat_id || null;
           q.question_url   = detail.question_url || null;

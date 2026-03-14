@@ -100,6 +100,8 @@ async function initDb() {
       q_code TEXT,
       q_id TEXT,
       cat_id INTEGER,
+      subject_sub TEXT,
+      subject_sub_raw TEXT,
       question_url TEXT,
       correct INTEGER NOT NULL,
       difficulty TEXT,
@@ -116,6 +118,8 @@ async function initDb() {
 
   await ensureQuestionAttemptsColumn('q_id', 'TEXT');
   await ensureQuestionAttemptsColumn('cat_id', 'INTEGER');
+  await ensureQuestionAttemptsColumn('subject_sub', 'TEXT');
+  await ensureQuestionAttemptsColumn('subject_sub_raw', 'TEXT');
   await ensureQuestionAttemptsColumn('question_url', 'TEXT');
   await ensureQuestionAttemptsColumn('mistake_type', 'TEXT');
   await ensureQuestionAttemptsColumn('notes', 'TEXT');
@@ -269,6 +273,8 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
             q_code,
             q_id,
             cat_id,
+            subject_sub,
+            subject_sub_raw,
             question_url,
             correct,
             difficulty,
@@ -277,7 +283,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
             my_answer,
             correct_answer,
             topic
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         [
           runId,
@@ -285,6 +291,8 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           q.q_code || null,
           q.q_id || null,
           safeInt(q.cat_id),
+          q.subject_sub || null,
+          q.subject_sub_raw || null,
           q.question_url || null,
           boolToInt(Boolean(q.correct)),
           q.difficulty || null,
@@ -318,10 +326,16 @@ async function getLatestRunId() {
   return row ? row.id : null;
 }
 
-async function listSessions(runId) {
+async function listSessions(runId, { limit, offset } = {}) {
   const params = [];
   const whereClause = runId ? 'WHERE s.run_id = ?' : '';
   if (runId) params.push(runId);
+
+  let limitClause = '';
+  if (limit !== undefined && offset !== undefined) {
+    limitClause = 'LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+  }
 
   return all(
     `
@@ -336,7 +350,22 @@ async function listSessions(runId) {
         s.total_q_categories,
         s.correct_count,
         s.error_count,
-        s.accuracy_pct,
+        ROUND(
+          CASE
+            WHEN COUNT(q.id) > 0
+              THEN
+                100.0
+                * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END)
+                / COUNT(q.id)
+            WHEN (COALESCE(s.correct_count, 0) + COALESCE(s.error_count, 0)) > 0
+              THEN
+                100.0
+                * COALESCE(s.correct_count, 0)
+                / (COALESCE(s.correct_count, 0) + COALESCE(s.error_count, 0))
+            ELSE s.accuracy_pct
+          END,
+          1
+        ) AS accuracy_pct,
         s.avg_time_sec,
         s.avg_correct_time_sec,
         s.avg_incorrect_time_sec,
@@ -426,16 +455,42 @@ async function listSessions(runId) {
       ${whereClause}
       GROUP BY s.id
       ORDER BY s.session_date DESC, s.session_external_id DESC
+      ${limitClause}
     `,
     params
   );
 }
 
-async function listErrors({ runId, subject, difficulty, topic, confidence }) {
+async function countSessions(runId) {
+  const params = [];
+  const whereClause = runId ? 'WHERE run_id = ?' : '';
+  if (runId) params.push(runId);
+  const row = await get(`SELECT COUNT(*) as total FROM sessions ${whereClause}`, params);
+  return row ? row.total : 0;
+}
+
+async function listErrors({ runId, subject, difficulty, topic, confidence, limit, offset }) {
   const params = [];
   const where = ['q.correct = 0'];
+  const normalizedSubExpr = `
+    CASE
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'DS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN 'DI'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'DS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('DI', 'TA', 'GI', 'MSR', 'TPA') THEN 'DI'
+      WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%data sufficiency%' THEN 'DS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('CR', 'RC', 'PS', 'QUANT', 'VERBAL') THEN
+        CASE UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
+          WHEN 'QUANT' THEN 'Quant'
+          WHEN 'VERBAL' THEN 'Verbal'
+          ELSE UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
+        END
+      ELSE ''
+    END
+  `;
   const subjectExpr = `
     CASE
+      WHEN (${normalizedSubExpr}) <> '' THEN (${normalizedSubExpr})
       WHEN q.cat_id = 1337013 THEN 'CR'
       WHEN q.cat_id = 1337023 THEN 'RC'
       WHEN COALESCE(NULLIF(s.subject, ''), 'Unknown') = 'Verbal' THEN
@@ -449,10 +504,22 @@ async function listErrors({ runId, subject, difficulty, topic, confidence }) {
           ) THEN 'CR'
           ELSE 'Verbal'
         END
+      WHEN q.cat_id BETWEEN 1336700 AND 1336899 THEN 'DI'
       ELSE COALESCE(NULLIF(s.subject, ''), 'Unknown')
     END
   `;
-
+  const topicExpr = `
+    CASE
+      WHEN COALESCE(NULLIF(q.topic, ''), '') <> '' THEN q.topic
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'MSR' THEN 'Multi-Source Reasoning'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TA' THEN 'Table Analysis'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'GI' THEN 'Graphics Interpretation'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TPA' THEN 'Two-Part Analysis'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      ELSE 'Unknown'
+    END
+  `;
   if (runId) {
     where.push('q.run_id = ?');
     params.push(runId);
@@ -467,12 +534,20 @@ async function listErrors({ runId, subject, difficulty, topic, confidence }) {
     params.push(difficulty);
   }
   if (topic) {
-    where.push(`COALESCE(NULLIF(q.topic, ''), 'Unknown') = ?`);
+    where.push(`(${topicExpr}) = ?`);
     params.push(topic);
   }
   if (confidence) {
     where.push(`COALESCE(NULLIF(q.confidence, ''), 'not selected') = ?`);
     params.push(confidence);
+  }
+
+  let limitClause = '';
+  if (limit !== undefined && offset !== undefined) {
+    limitClause = 'LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+  } else {
+    limitClause = 'LIMIT 500';
   }
 
   return all(
@@ -483,6 +558,8 @@ async function listErrors({ runId, subject, difficulty, topic, confidence }) {
         s.session_external_id,
         s.session_date,
         ${subjectExpr} AS subject,
+        q.subject_sub,
+        q.subject_sub_raw,
         s.source,
         q.q_code,
         q.q_id,
@@ -490,7 +567,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence }) {
         q.question_url,
         q.difficulty,
         q.confidence,
-        q.topic,
+        ${topicExpr} AS topic,
         q.time_sec,
         q.my_answer,
         q.correct_answer,
@@ -500,18 +577,35 @@ async function listErrors({ runId, subject, difficulty, topic, confidence }) {
       INNER JOIN sessions s ON s.id = q.session_id
       WHERE ${where.join(' AND ')}
       ORDER BY s.session_date DESC, s.session_external_id DESC, q.id DESC
-      LIMIT 500
+      ${limitClause}
     `,
     params
   );
 }
 
-async function getPatterns(runId) {
-  const runClause = runId ? 'run_id = ? AND ' : '';
-  const runParams = runId ? [runId] : [];
-  const runJoinClause = runId ? 'q.run_id = ? AND ' : '';
-  const subjectSubExpr = `
+async function countErrors({ runId, subject, difficulty, topic, confidence }) {
+  const params = [];
+  const where = ['q.correct = 0'];
+  // Re-use expressions for subject and topic logic to ensure consistency
+  const normalizedSubExpr = `
     CASE
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'DS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN 'DI'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'DS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('DI', 'TA', 'GI', 'MSR', 'TPA') THEN 'DI'
+      WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%data sufficiency%' THEN 'DS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('CR', 'RC', 'PS', 'QUANT', 'VERBAL') THEN
+        CASE UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
+          WHEN 'QUANT' THEN 'Quant'
+          WHEN 'VERBAL' THEN 'Verbal'
+          ELSE UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
+        END
+      ELSE ''
+    END
+  `;
+  const subjectExpr = `
+    CASE
+      WHEN (${normalizedSubExpr}) <> '' THEN (${normalizedSubExpr})
       WHEN q.cat_id = 1337013 THEN 'CR'
       WHEN q.cat_id = 1337023 THEN 'RC'
       WHEN COALESCE(NULLIF(s.subject, ''), 'Unknown') = 'Verbal' THEN
@@ -525,6 +619,90 @@ async function getPatterns(runId) {
           ) THEN 'CR'
           ELSE 'Verbal'
         END
+      WHEN q.cat_id BETWEEN 1336700 AND 1336899 THEN 'DI'
+      ELSE COALESCE(NULLIF(s.subject, ''), 'Unknown')
+    END
+  `;
+  const topicExpr = `
+    CASE
+      WHEN COALESCE(NULLIF(q.topic, ''), '') <> '' THEN q.topic
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'MSR' THEN 'Multi-Source Reasoning'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TA' THEN 'Table Analysis'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'GI' THEN 'Graphics Interpretation'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TPA' THEN 'Two-Part Analysis'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      ELSE 'Unknown'
+    END
+  `;
+
+  if (runId) {
+    where.push('q.run_id = ?');
+    params.push(runId);
+  }
+  if (subject) {
+    where.push(`(${subjectExpr}) = ?`);
+    params.push(subject);
+  }
+  if (difficulty) {
+    where.push(`COALESCE(NULLIF(q.difficulty, ''), 'Unknown') = ?`);
+    params.push(difficulty);
+  }
+  if (topic) {
+    where.push(`(${topicExpr}) = ?`);
+    params.push(topic);
+  }
+  if (confidence) {
+    where.push(`COALESCE(NULLIF(q.confidence, ''), 'not selected') = ?`);
+    params.push(confidence);
+  }
+
+  const row = await get(
+    `
+      SELECT COUNT(*) as total
+      FROM question_attempts q
+      INNER JOIN sessions s ON s.id = q.session_id
+      WHERE ${where.join(' AND ')}
+    `,
+    params
+  );
+  return row ? row.total : 0;
+}
+
+async function getPatterns(runId) {
+  const runClause = runId ? 'run_id = ? AND ' : '';
+  const runParams = runId ? [runId] : [];
+  const runJoinClause = runId ? 'q.run_id = ? AND ' : '';
+  const normalizedSubExpr = `
+    CASE
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'DS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN 'DI'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'DS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('DI', 'TA', 'GI', 'MSR', 'TPA') THEN 'DI'
+      WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%data sufficiency%' THEN 'DS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'QUANT' THEN 'Quant'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'VERBAL' THEN 'Verbal'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('CR', 'RC', 'PS') THEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
+      ELSE ''
+    END
+  `;
+  const subjectSubExpr = `
+    CASE
+      WHEN (${normalizedSubExpr}) <> '' THEN (${normalizedSubExpr})
+      WHEN q.cat_id = 1337013 THEN 'CR'
+      WHEN q.cat_id = 1337023 THEN 'RC'
+      WHEN COALESCE(NULLIF(s.subject, ''), 'Unknown') = 'Verbal' THEN
+        CASE
+          WHEN COALESCE(NULLIF(q.topic, ''), '') IN (
+            'Main Idea', 'Detail', 'Purpose', 'Author Attitude', 'Organization', 'Application'
+          ) THEN 'RC'
+          WHEN COALESCE(NULLIF(q.topic, ''), '') IN (
+            'Weaken', 'Strengthen', 'Explain', 'Inference', 'Assumption',
+            'Boldface', 'Evaluate', 'Flaw', 'Parallel', 'Complete', 'Method'
+          ) THEN 'CR'
+          ELSE 'Verbal'
+        END
+      WHEN q.cat_id BETWEEN 1336700 AND 1336899 THEN 'DI'
       WHEN COALESCE(NULLIF(s.subject, ''), '') IN ('CR', 'RC', 'PS', 'DS', 'Quant', 'DI', 'TA', 'GI', 'MSR', 'TPA') THEN COALESCE(NULLIF(s.subject, ''), 'Unknown')
       WHEN LOWER(COALESCE(s.source, '')) LIKE '%quant%' THEN 'Quant'
       WHEN LOWER(COALESCE(s.source, '')) LIKE '%data insights%' THEN 'DI'
@@ -541,6 +719,7 @@ async function getPatterns(runId) {
   `;
   const subjectExpr = `
     CASE
+      WHEN (${normalizedSubExpr}) <> '' THEN (${normalizedSubExpr})
       WHEN q.cat_id = 1337013 THEN 'CR'
       WHEN q.cat_id = 1337023 THEN 'RC'
       WHEN COALESCE(NULLIF(s.subject, ''), 'Unknown') = 'Verbal' THEN
@@ -554,7 +733,20 @@ async function getPatterns(runId) {
           ) THEN 'CR'
           ELSE 'Verbal'
         END
+      WHEN q.cat_id BETWEEN 1336700 AND 1336899 THEN 'DI'
       ELSE COALESCE(NULLIF(s.subject, ''), 'Unknown')
+    END
+  `;
+  const topicExpr = `
+    CASE
+      WHEN COALESCE(NULLIF(q.topic, ''), '') <> '' THEN q.topic
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'MSR' THEN 'Multi-Source Reasoning'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TA' THEN 'Table Analysis'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'GI' THEN 'Graphics Interpretation'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TPA' THEN 'Two-Part Analysis'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      ELSE 'Unknown'
     END
   `;
 
@@ -570,11 +762,11 @@ async function getPatterns(runId) {
   const byTopic = await all(
     `
       SELECT
-        COALESCE(NULLIF(topic, ''), 'Unknown') AS topic,
+        ${topicExpr} AS topic,
         COUNT(*) AS mistakes
-      FROM question_attempts
-      WHERE ${runClause}correct = 0
-      GROUP BY COALESCE(NULLIF(topic, ''), 'Unknown')
+      FROM question_attempts q
+      WHERE ${runClause}q.correct = 0
+      GROUP BY ${topicExpr}
       ORDER BY mistakes DESC, topic ASC
       LIMIT 20
     `,
@@ -618,12 +810,12 @@ async function getPatterns(runId) {
     `
       SELECT
         ${subjectExpr} AS subject,
-        COALESCE(NULLIF(q.topic, ''), 'Unknown') AS topic,
+        ${topicExpr} AS topic,
         COUNT(*) AS mistakes
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
       WHERE ${runJoinClause}q.correct = 0
-      GROUP BY ${subjectExpr}, COALESCE(NULLIF(q.topic, ''), 'Unknown')
+      GROUP BY ${subjectExpr}, ${topicExpr}
       ORDER BY subject ASC, mistakes DESC, topic ASC
     `,
     runParams
@@ -691,20 +883,14 @@ async function getPatterns(runId) {
       SELECT
         ${subjectFamilyExpr} AS subject_family,
         ${subjectSubExpr} AS subject_sub,
-        COALESCE(NULLIF(q.topic, ''), 'Unknown') AS subtopic,
-        COUNT(*) AS total_questions,
-        SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) AS correct_count,
-        SUM(CASE WHEN q.correct = 0 THEN 1 ELSE 0 END) AS incorrect_count,
-        ROUND(
-          100.0 * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
-          1
-        ) AS accuracy_pct,
+        ${topicExpr} AS subtopic,
+        COUNT(*) AS incorrect_count,
         ROUND(AVG(q.time_sec), 0) AS avg_time_sec
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
-      WHERE ${runJoinClause}1 = 1
-      GROUP BY ${subjectFamilyExpr}, ${subjectSubExpr}, COALESCE(NULLIF(q.topic, ''), 'Unknown')
-      ORDER BY ${subjectSortExpr}, subject_sub ASC, total_questions DESC, subtopic ASC
+      WHERE ${runJoinClause}q.correct = 0
+      GROUP BY ${subjectFamilyExpr}, ${subjectSubExpr}, ${topicExpr}
+      ORDER BY ${subjectSortExpr}, subject_sub ASC, incorrect_count DESC, subtopic ASC
       LIMIT 250
     `,
     runParams
@@ -739,18 +925,47 @@ async function getSessionAnalysis(sessionId) {
         s.total_q_categories,
         s.correct_count,
         s.error_count,
-        s.accuracy_pct,
+        ROUND(
+          CASE
+            WHEN COUNT(q.id) > 0
+              THEN
+                100.0
+                * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END)
+                / COUNT(q.id)
+            WHEN (COALESCE(s.correct_count, 0) + COALESCE(s.error_count, 0)) > 0
+              THEN
+                100.0
+                * COALESCE(s.correct_count, 0)
+                / (COALESCE(s.correct_count, 0) + COALESCE(s.error_count, 0))
+            ELSE s.accuracy_pct
+          END,
+          1
+        ) AS accuracy_pct,
         s.avg_time_sec,
         s.avg_correct_time_sec,
         s.avg_incorrect_time_sec
       FROM sessions s
+      LEFT JOIN question_attempts q ON q.session_id = s.id
       WHERE s.id = ?
+      GROUP BY s.id
       LIMIT 1
     `,
     [id]
   );
 
   if (!session) return null;
+  const topicExpr = `
+    CASE
+      WHEN COALESCE(NULLIF(q.topic, ''), '') <> '' THEN q.topic
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'MSR' THEN 'Multi-Source Reasoning'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TA' THEN 'Table Analysis'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'GI' THEN 'Graphics Interpretation'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TPA' THEN 'Two-Part Analysis'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      ELSE 'Unknown'
+    END
+  `;
 
   const byDifficulty = await all(
     `
@@ -783,11 +998,11 @@ async function getSessionAnalysis(sessionId) {
   const topWrongTopics = await all(
     `
       SELECT
-        COALESCE(NULLIF(topic, ''), 'Unknown') AS topic,
+        ${topicExpr} AS topic,
         COUNT(*) AS mistakes
-      FROM question_attempts
-      WHERE session_id = ? AND correct = 0
-      GROUP BY COALESCE(NULLIF(topic, ''), 'Unknown')
+      FROM question_attempts q
+      WHERE q.session_id = ? AND q.correct = 0
+      GROUP BY ${topicExpr}
       ORDER BY mistakes DESC, topic ASC
       LIMIT 8
     `,
@@ -818,16 +1033,16 @@ async function getSessionAnalysis(sessionId) {
         id,
         q_code,
         difficulty,
-        topic,
+        ${topicExpr} AS topic,
         my_answer,
         correct_answer,
         time_sec,
         question_url,
         mistake_type,
         notes
-      FROM question_attempts
-      WHERE session_id = ? AND correct = 0
-      ORDER BY COALESCE(time_sec, 0) DESC, id DESC
+      FROM question_attempts q
+      WHERE q.session_id = ? AND q.correct = 0
+      ORDER BY COALESCE(q.time_sec, 0) DESC, q.id DESC
       LIMIT 10
     `,
     [id]
@@ -896,7 +1111,9 @@ module.exports = {
   saveScrapeResult,
   listRuns,
   listSessions,
+  countSessions,
   listErrors,
+  countErrors,
   getPatterns,
   getSessionAnalysis,
   getLatestRunForSource,

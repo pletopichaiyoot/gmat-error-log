@@ -1040,3 +1040,21 @@ th.sortable:hover {
 
   .pattern-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 }
+
+/* ─── Pagination ─────────────────────────────────────────────── */
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s4);
+  padding: var(--s4) 0 var(--s2);
+  border-top: 1px solid var(--border);
+  margin-top: var(--s2);
+}
+
+.pagination-info {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}

@@ -48,6 +48,28 @@ function extractAppSlug(appUrl) {
   }
 }
 
+function parseUrlSafe(rawValue) {
+  try {
+    return new URL(String(rawValue || ''));
+  } catch (_error) {
+    return null;
+  }
+}
+
+function trimTrailingSlash(value) {
+  return String(value || '').replace(/\/+$/, '');
+}
+
+function matchesAppEntry(pageUrl, appUrl) {
+  const pageParsed = parseUrlSafe(pageUrl);
+  const appParsed = parseUrlSafe(appUrl);
+  if (!pageParsed || !appParsed) return false;
+
+  const pagePath = trimTrailingSlash(pageParsed.pathname || '/');
+  const appPath = trimTrailingSlash(appParsed.pathname || '/');
+  return pageParsed.origin === appParsed.origin && pagePath === appPath;
+}
+
 function clipText(value, maxLen = 1000) {
   const text = String(value || '');
   if (text.length <= maxLen) return text;
@@ -98,11 +120,8 @@ async function inferReviewCategoryId(page, cfg, fallbackReviewCategoryId) {
 
     const categories = details?.categories || [];
     if (categories.length === 1) return categories[0];
-    if (categories.length > 1) {
-      const maybeParent = categories[0] - 10;
-      if (maybeParent > 0) return maybeParent;
-      return categories[0];
-    }
+    // Mixed-category sources (e.g., OG Main) should not force a single category id.
+    if (categories.length > 1) return fallbackReviewCategoryId;
   } catch (_error) {
     // Fallback below.
   }
@@ -112,6 +131,7 @@ async function inferReviewCategoryId(page, cfg, fallbackReviewCategoryId) {
 async function runScrapeFromOpenBrowser(options = {}) {
   const cdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://127.0.0.1:9222';
   const scraperSource = await loadScraperSource(options.scraperPath);
+  const reloadPageBeforeScrape = options.reloadPageBeforeScrape !== false;
 
   const startedAt = new Date().toISOString();
   const consoleLogs = [];
@@ -125,6 +145,13 @@ async function runScrapeFromOpenBrowser(options = {}) {
   let gmatPage = null;
   let runtimeConfig = normalizeConfig(options);
   const appSlug = extractAppSlug(options.appUrl);
+  let sourceNavigation = {
+    requestedUrl: options.appUrl || '',
+    fromUrl: '',
+    toUrl: '',
+    didNavigate: false,
+    reloadedBeforeScrape: false,
+  };
   let onConsole = null;
   let onPageError = null;
   try {
@@ -144,6 +171,35 @@ async function runScrapeFromOpenBrowser(options = {}) {
     gmatPage.setDefaultTimeout(0);
     await gmatPage.bringToFront();
     await gmatPage.waitForLoadState('domcontentloaded');
+
+    if (options.appUrl && !matchesAppEntry(gmatPage.url(), options.appUrl)) {
+      sourceNavigation = {
+        ...sourceNavigation,
+        fromUrl: gmatPage.url(),
+      };
+      await gmatPage.goto(options.appUrl, { waitUntil: 'domcontentloaded' });
+      await gmatPage.waitForLoadState('domcontentloaded');
+      sourceNavigation = {
+        ...sourceNavigation,
+        toUrl: gmatPage.url(),
+        didNavigate: true,
+      };
+    } else {
+      sourceNavigation = {
+        ...sourceNavigation,
+        fromUrl: gmatPage.url(),
+        toUrl: gmatPage.url(),
+      };
+    }
+
+    if (reloadPageBeforeScrape) {
+      await gmatPage.reload({ waitUntil: 'domcontentloaded' });
+      sourceNavigation = {
+        ...sourceNavigation,
+        toUrl: gmatPage.url(),
+        reloadedBeforeScrape: true,
+      };
+    }
 
     onConsole = (msg) => {
       pushLog(consoleLogs, {
@@ -205,6 +261,7 @@ async function runScrapeFromOpenBrowser(options = {}) {
         finishedAt: new Date().toISOString(),
         cdpUrl,
         appSlug,
+        sourceNavigation,
         runtimeConfig,
         diagnostics,
         warningCount,
@@ -218,6 +275,7 @@ async function runScrapeFromOpenBrowser(options = {}) {
       finishedAt: new Date().toISOString(),
       cdpUrl,
       appSlug,
+      sourceNavigation,
       runtimeConfig,
       consoleLogs,
       pageErrors,

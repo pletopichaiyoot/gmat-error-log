@@ -57,6 +57,16 @@ function formatDifficultyStat(total, accuracy, avgTimeSec) {
   return `${count} (${formatPercent(accuracy)} / ${formatDurationSeconds(avgTimeSec)})`;
 }
 
+function getSessionQuestionCount(session) {
+  const categories = Number(session?.total_q_categories);
+  if (Number.isFinite(categories) && categories > 0) return categories;
+
+  const api = Number(session?.total_q_api);
+  if (Number.isFinite(api)) return api;
+
+  return null;
+}
+
 function formatNotePreview(value, maxLength = 42) {
   if (!value) return '-';
   const text = String(value).trim();
@@ -151,6 +161,10 @@ function App() {
   const [sessionSort, setSessionSort] = useState({ key: 'session_date', order: 'desc' });
   const [sessionDateRange, setSessionDateRange] = useState({ start: '', end: '' });
 
+  // Pagination state
+  const [sessionPagination, setSessionPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
+  const [errorPagination, setErrorPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
+
   const summary = useMemo(() => {
     if (!runs.length) {
       return { id: '-', total_sessions: 0, total_questions: 0, total_errors: 0 };
@@ -182,23 +196,59 @@ function App() {
   }
 
   async function loadDashboard(runId = selectedRunId) {
-    const runQuery = runId ? `?runId=${runId}` : '';
-    const [sessionsRes, errorsRes, patternsRes] = await Promise.all([
-      fetchJson(`/api/sessions${runQuery}`),
-      fetchJson(`/api/errors${runQuery}`),
-      fetchJson(`/api/patterns${runQuery}`),
+    // Initial load: fetch first page of sessions and first page of errors
+    await Promise.all([
+      loadSessions(1, runId),
+      loadErrors(1, runId),
+      (async () => {
+        const runQuery = runId ? `?runId=${runId}` : '';
+        const patternsRes = await fetchJson(`/api/patterns${runQuery}`);
+        setPatterns({
+          byTopic: patternsRes.byTopic || [],
+          bySubject: patternsRes.bySubject || [],
+          bySubjectTopic: patternsRes.bySubjectTopic || [],
+          byDifficulty: patternsRes.byDifficulty || [],
+          confidenceMismatch: patternsRes.confidenceMismatch || [],
+          subjectProgress: patternsRes.subjectProgress || [],
+          categoryBreakdown: patternsRes.categoryBreakdown || [],
+          subtopicBreakdown: patternsRes.subtopicBreakdown || [],
+        });
+      })(),
     ]);
-    setSessions(sessionsRes.sessions || []);
-    setErrors(filterDisplayableErrors(errorsRes.errors || []));
-    setPatterns({
-      byTopic: patternsRes.byTopic || [],
-      bySubject: patternsRes.bySubject || [],
-      bySubjectTopic: patternsRes.bySubjectTopic || [],
-      byDifficulty: patternsRes.byDifficulty || [],
-      confidenceMismatch: patternsRes.confidenceMismatch || [],
-      subjectProgress: patternsRes.subjectProgress || [],
-      categoryBreakdown: patternsRes.categoryBreakdown || [],
-      subtopicBreakdown: patternsRes.subtopicBreakdown || [],
+  }
+
+  async function loadSessions(page, runId = selectedRunId) {
+    const params = new URLSearchParams();
+    if (runId) params.set('runId', runId);
+    params.set('page', page);
+    params.set('pageSize', sessionPagination.pageSize);
+    const data = await fetchJson(`/api/sessions?${params.toString()}`);
+    setSessions(data.sessions || []);
+    setSessionPagination({
+      page: data.page,
+      pageSize: data.pageSize,
+      total: data.total,
+      totalPages: data.totalPages,
+    });
+  }
+
+  async function loadErrors(page, runId = selectedRunId, customFilters = filters) {
+    const params = new URLSearchParams();
+    if (runId) params.set('runId', runId);
+    params.set('page', page);
+    params.set('pageSize', errorPagination.pageSize);
+    if (customFilters.subject) params.set('subject', customFilters.subject);
+    if (customFilters.difficulty) params.set('difficulty', customFilters.difficulty);
+    if (customFilters.topic) params.set('topic', customFilters.topic);
+    if (customFilters.confidence) params.set('confidence', customFilters.confidence);
+
+    const data = await fetchJson(`/api/errors?${params.toString()}`);
+    setErrors(filterDisplayableErrors(data.errors || []));
+    setErrorPagination({
+      page: data.page,
+      pageSize: data.pageSize,
+      total: data.total,
+      totalPages: data.totalPages,
     });
   }
 
@@ -298,7 +348,7 @@ function App() {
         ? ` sessions=${diagnostics.sessions}, questions=${diagnostics.questions}, errors=${diagnostics.errors}.`
         : '';
       setStatus({
-        message: `Run ${result.run.id} complete (${result.source}, ${result.scrapeWindowUsed}, since ${result.sinceUsed}).${diagnosticsText}${warningText}`,
+        message: `Run ${result.run.id} complete (${result.source}, ${result.scrapeWindowUsed}, since ${result.sinceUsed} ICT/UTC+7).${diagnosticsText}${warningText}`,
         isError: Boolean(result.warning),
       });
       setSyncDebug({
@@ -343,22 +393,13 @@ function App() {
   }
 
   async function loadErrorsByFilters(customFilters = filters) {
-    const params = new URLSearchParams();
-    if (selectedRunId) params.set('runId', selectedRunId);
-    if (customFilters.subject) params.set('subject', customFilters.subject);
-    if (customFilters.difficulty) params.set('difficulty', customFilters.difficulty);
-    if (customFilters.topic) params.set('topic', customFilters.topic);
-    if (customFilters.confidence) params.set('confidence', customFilters.confidence);
-    const query = params.toString();
-    const result = await fetchJson(`/api/errors${query ? `?${query}` : ''}`);
-    return filterDisplayableErrors(result.errors || []);
+    await loadErrors(1, selectedRunId, customFilters);
   }
 
   async function handleApplyFilter(event) {
     event.preventDefault();
     try {
-      const nextRows = await loadErrorsByFilters(filters);
-      setErrors(nextRows);
+      await loadErrorsByFilters(filters);
     } catch (error) {
       setStatus({ message: error.message, isError: true });
     }
@@ -492,7 +533,10 @@ function App() {
   }, [subjectCards]);
 
   const processedSessions = useMemo(() => {
-    let list = [...sessions];
+    let list = sessions.map((session) => ({
+      ...session,
+      question_count_display: getSessionQuestionCount(session),
+    }));
 
     // Filter by subject
     if (sessionSubjectFilter) {
@@ -560,8 +604,7 @@ function App() {
     const merged = { ...filters, ...patternDrilldown.criteria };
     setFilters(merged);
     try {
-      const rows = await loadErrorsByFilters(merged);
-      setErrors(rows);
+      await loadErrorsByFilters(merged);
       handleClosePatternDrilldown();
     } catch (error) {
       setStatus({ message: error.message, isError: true });
@@ -821,6 +864,7 @@ function App() {
                   <th>Total Questions</th>
                   <th>Correct</th>
                   <th>Incorrect</th>
+                  <th>Accuracy</th>
                   <th>Avg Time / Q</th>
                   <th>Status</th>
                 </tr>
@@ -828,7 +872,7 @@ function App() {
               <tbody>
                 {!categoryRows.length && (
                   <tr>
-                    <td colSpan="7">No category data yet.</td>
+                    <td colSpan="8">No category data yet.</td>
                   </tr>
                 )}
                 {categoryRows.map((row) => (
@@ -838,6 +882,7 @@ function App() {
                     <td>{formatMaybe(row.total_questions)}</td>
                     <td>{formatMaybe(row.correct_count)}</td>
                     <td>{formatMaybe(row.incorrect_count)}</td>
+                    <td>{formatPercent(row.accuracy_pct)}</td>
                     <td>{formatDurationSeconds(row.avg_time_sec)}</td>
                     <td>
                       <Badge
@@ -881,17 +926,14 @@ function App() {
                   <th>Subject</th>
                   <th>Category</th>
                   <th>Subtopic</th>
-                  <th>Total</th>
-                  <th>Correct</th>
                   <th>Incorrect</th>
-                  <th>Accuracy</th>
-                  <th>Avg Time</th>
+                  <th>Avg Time (Incorrect)</th>
                 </tr>
               </thead>
               <tbody>
                 {!filteredSubtopicRows.length && (
                   <tr>
-                    <td colSpan="8">No subtopic data yet.</td>
+                    <td colSpan="5">No subtopic data yet.</td>
                   </tr>
                 )}
                 {filteredSubtopicRows.map((row) => (
@@ -899,10 +941,7 @@ function App() {
                     <td>{formatMaybe(row.subject_family)}</td>
                     <td>{formatMaybe(row.subject_sub)}</td>
                     <td>{formatMaybe(row.subtopic)}</td>
-                    <td>{formatMaybe(row.total_questions)}</td>
-                    <td>{formatMaybe(row.correct_count)}</td>
                     <td>{formatMaybe(row.incorrect_count)}</td>
-                    <td>{formatPercent(row.accuracy_pct)}</td>
                     <td>{formatDurationSeconds(row.avg_time_sec)}</td>
                   </tr>
                 ))}
@@ -978,9 +1017,9 @@ function App() {
                 </th>
                 <th
                   className="sortable"
-                  onClick={() => handleSessionSort('total_q_api')}
+                  onClick={() => handleSessionSort('question_count_display')}
                 >
-                  Questions {sessionSort.key === 'total_q_api' && (sessionSort.order === 'asc' ? '↑' : '↓')}
+                  Questions {sessionSort.key === 'question_count_display' && (sessionSort.order === 'asc' ? '↑' : '↓')}
                 </th>
                 <th
                   className="sortable"
@@ -1007,7 +1046,7 @@ function App() {
               </tr>
             </thead>
             <tbody>
-              {!processedSessions.length && (
+              {processedSessions.length === 0 && (
                 <tr>
                   <td colSpan="10">No sessions found.</td>
                 </tr>
@@ -1016,7 +1055,7 @@ function App() {
                 <tr key={`${row.session_external_id}-${row.run_id}`}>
                   <td>{formatDate(row.session_date)}</td>
                   <td>{formatMaybe(row.subject)}</td>
-                  <td>{formatMaybe(row.total_q_api)}</td>
+                  <td>{formatMaybe(row.question_count_display)}</td>
                   <td>{formatMaybe(row.error_count)}</td>
                   <td>{formatPercent(row.accuracy_pct)}</td>
                   <td>{formatDurationSeconds(row.avg_time_sec)}</td>
@@ -1038,6 +1077,27 @@ function App() {
               ))}
             </tbody>
           </table>
+        </div>
+        <div className="pagination-controls">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={sessionPagination.page <= 1}
+            onClick={() => loadSessions(sessionPagination.page - 1)}
+          >
+            Previous
+          </Button>
+          <span className="pagination-info">
+            Page {sessionPagination.page} of {sessionPagination.totalPages || 1} ({sessionPagination.total} total sessions)
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={sessionPagination.page >= sessionPagination.totalPages}
+            onClick={() => loadSessions(sessionPagination.page + 1)}
+          >
+            Next
+          </Button>
         </div>
       </Card>
 
@@ -1107,7 +1167,7 @@ function App() {
               </tr>
             </thead>
             <tbody>
-              {!errors.length && (
+              {errors.length === 0 && (
                 <tr>
                   <td colSpan="13">No error rows match this filter.</td>
                 </tr>
@@ -1157,6 +1217,27 @@ function App() {
             </tbody>
           </table>
         </div>
+        <div className="pagination-controls">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={errorPagination.page <= 1}
+            onClick={() => loadErrors(errorPagination.page - 1)}
+          >
+            Previous
+          </Button>
+          <span className="pagination-info">
+            Page {errorPagination.page} of {errorPagination.totalPages || 1} ({errorPagination.total} total errors)
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={errorPagination.page >= errorPagination.totalPages}
+            onClick={() => loadErrors(errorPagination.page + 1)}
+          >
+            Next
+          </Button>
+        </div>
       </Card>
 
       {syncCenterOpen && (
@@ -1192,7 +1273,7 @@ function App() {
                   <label>
                     Scrape Period
                     <Select value={scrapeWindow} onChange={(e) => setScrapeWindow(e.target.value)}>
-                      <option value="today">Today (default)</option>
+                      <option value="today">Today (default, with safety buffer)</option>
                       <option value="last3">Last 3 days</option>
                       <option value="last7">Last 7 days</option>
                       <option value="full">Full update</option>
@@ -1201,7 +1282,7 @@ function App() {
                   </label>
                   {scrapeWindow === 'custom' && (
                     <label>
-                      Specific Period (since)
+                      Specific Period (since, ICT UTC+7)
                       <Input
                         type="datetime-local"
                         value={customSince}
@@ -1419,7 +1500,7 @@ function App() {
                   </div>
                   <div className="summary-item">
                     <span>Questions</span>
-                    <strong>{formatMaybe(sessionAnalysis.data.session.total_q_api)}</strong>
+                    <strong>{formatMaybe(getSessionQuestionCount(sessionAnalysis.data.session))}</strong>
                   </div>
                   <div className="summary-item">
                     <span>Overall Accuracy</span>
