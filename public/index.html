@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GMAT Error Log</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Manrope:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero card">
+        <p class="eyebrow">Local GMAT Analytics</p>
+        <h1>Capture Errors From Your Live GMAT Session</h1>
+        <p class="muted">
+          Keep Chrome logged in, run scrape, and review mistakes by topic, difficulty, and confidence.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>1) Trigger Scrape</h2>
+        <form id="scrape-form" class="form-grid">
+          <label>
+            Source
+            <select name="source" id="source-select"></select>
+          </label>
+          <input name="cdpUrl" type="hidden" value="http://127.0.0.1:9222" />
+          <div class="action-row">
+            <button class="btn-secondary" id="open-chrome-btn" type="button">Open Chrome (CDP)</button>
+            <button class="btn-primary" type="submit">Run Scrape + Save to DB</button>
+          </div>
+        </form>
+        <p id="scrape-status" class="status muted"></p>
+      </section>
+
+      <section class="card">
+        <div class="run-header">
+          <h2>2) Review Run</h2>
+          <label>
+            Run
+            <select id="run-select"></select>
+          </label>
+        </div>
+        <div id="run-summary" class="summary-grid"></div>
+      </section>
+
+      <section class="card">
+        <h2>Performance by Session</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Subject</th>
+                <th>Questions</th>
+                <th>Errors</th>
+                <th>Accuracy %</th>
+                <th>Avg Time (sec)</th>
+              </tr>
+            </thead>
+            <tbody id="sessions-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Error Patterns</h2>
+        <div class="pattern-grid">
+          <div>
+            <h3>Top Topics</h3>
+            <ul id="topic-list" class="metric-list"></ul>
+          </div>
+          <div>
+            <h3>By Difficulty</h3>
+            <ul id="difficulty-list" class="metric-list"></ul>
+          </div>
+          <div>
+            <h3>Confidence vs Wrong</h3>
+            <ul id="confidence-list" class="metric-list"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="run-header">
+          <h2>Error Log</h2>
+          <form id="error-filter-form" class="filter-row">
+            <select name="subject">
+              <option value="">All subjects</option>
+              <option value="CR">CR</option>
+              <option value="RC">RC</option>
+              <option value="Verbal Mock">Verbal Mock</option>
+            </select>
+            <select name="difficulty">
+              <option value="">All difficulty</option>
+              <option value="Hard">Hard</option>
+              <option value="Medium">Medium</option>
+              <option value="Easy">Easy</option>
+            </select>
+            <input name="topic" placeholder="Topic (e.g. Weaken)" />
+            <button type="submit" class="btn-secondary">Apply Filter</button>
+          </form>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Session</th>
+                <th>Q Code</th>
+                <th>Subject</th>
+                <th>Difficulty</th>
+                <th>Topic</th>
+                <th>My Ans</th>
+                <th>Correct</th>
+                <th>Open</th>
+                <th>Time (sec)</th>
+              </tr>
+            </thead>
+            <tbody id="errors-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
