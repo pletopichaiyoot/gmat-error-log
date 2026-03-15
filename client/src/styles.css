@@ -77,16 +77,30 @@ body {
     radial-gradient(ellipse at 93% 2%, rgba(47,109,79,0.14) 0%, transparent 24%),
     var(--bg);
   min-height: 100vh;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+#root {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ─── Page shell ─────────────────────────────────────────────── */
 .page-shell {
-  max-width: 1180px;
-  margin: 0 auto;
+  width: 100%;
   padding: var(--s3) var(--s3) var(--s10);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--s4);
   animation: rise var(--t2) var(--ease);
+}
+
+.page-shell > * {
+  min-width: 0;
 }
 
 @keyframes rise {
@@ -671,6 +685,7 @@ textarea {
 /* ─── Tables ─────────────────────────────────────────────────── */
 .table-wrap {
   overflow-x: auto;
+  max-width: 100%;
   -webkit-overflow-scrolling: touch;
   border: 1px solid var(--border);
   border-radius: var(--r-s);
@@ -1094,32 +1109,17 @@ th.sortable:hover {
 }
 
 .error-log-table .annotate-col {
-  position: sticky;
-  right: 112px;
-  z-index: 3;
-  background: var(--surface);
+  position: static;
+  right: auto;
+  z-index: auto;
+  background: inherit;
 }
 
 .error-log-table .open-col {
-  position: sticky;
-  right: 0;
-  z-index: 4;
-  background: var(--surface);
-}
-
-.error-log-table thead .annotate-col,
-.error-log-table thead .open-col {
-  background: var(--surface-2);
-}
-
-.error-log-table tbody tr:nth-child(even) .annotate-col,
-.error-log-table tbody tr:nth-child(even) .open-col {
-  background: rgba(0, 0, 0, 0.018);
-}
-
-.error-log-table tbody tr:hover .annotate-col,
-.error-log-table tbody tr:hover .open-col {
-  background: var(--primary-lt);
+  position: static;
+  right: auto;
+  z-index: auto;
+  background: inherit;
 }
 
 .error-log-table .action-col .readmore-btn {
