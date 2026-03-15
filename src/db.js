@@ -469,7 +469,19 @@ async function countSessions(runId) {
   return row ? row.total : 0;
 }
 
-async function listErrors({ runId, subject, difficulty, topic, confidence, limit, offset }) {
+async function listErrors({ runId, subject, difficulty, topic, confidence, search, sortKey, sortOrder, limit, offset }) {
+  const ALLOWED_SORT = {
+    session_date: 's.session_date',
+    session_external_id: 's.session_external_id',
+    q_code: 'q.q_code',
+    subject: 'subject',
+    difficulty: 'q.difficulty',
+    topic: 'topic',
+    time_sec: 'q.time_sec',
+    mistake_type: 'q.mistake_type',
+  };
+  const sortCol = ALLOWED_SORT[sortKey] || 's.session_date';
+  const sortDir = sortOrder === 'asc' ? 'ASC' : 'DESC';
   const params = [];
   const where = ['q.correct = 0'];
   const normalizedSubExpr = `
@@ -541,6 +553,10 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, limit
     where.push(`COALESCE(NULLIF(q.confidence, ''), 'not selected') = ?`);
     params.push(confidence);
   }
+  if (search) {
+    where.push(`(UPPER(COALESCE(q.topic, '')) LIKE UPPER(?) OR UPPER(COALESCE(q.q_code, '')) LIKE UPPER(?))`);
+    params.push(`%${search}%`, `%${search}%`);
+  }
 
   let limitClause = '';
   if (limit !== undefined && offset !== undefined) {
@@ -576,14 +592,14 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, limit
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
       WHERE ${where.join(' AND ')}
-      ORDER BY s.session_date DESC, s.session_external_id DESC, q.id DESC
+      ORDER BY ${sortCol} ${sortDir}, q.id ${sortDir}
       ${limitClause}
     `,
     params
   );
 }
 
-async function countErrors({ runId, subject, difficulty, topic, confidence }) {
+async function countErrors({ runId, subject, difficulty, topic, confidence, search }) {
   const params = [];
   const where = ['q.correct = 0'];
   // Re-use expressions for subject and topic logic to ensure consistency
@@ -655,6 +671,10 @@ async function countErrors({ runId, subject, difficulty, topic, confidence }) {
   if (confidence) {
     where.push(`COALESCE(NULLIF(q.confidence, ''), 'not selected') = ?`);
     params.push(confidence);
+  }
+  if (search) {
+    where.push(`(UPPER(COALESCE(q.topic, '')) LIKE UPPER(?) OR UPPER(COALESCE(q.q_code, '')) LIKE UPPER(?))`);
+    params.push(`%${search}%`, `%${search}%`);
   }
 
   const row = await get(
@@ -1004,7 +1024,6 @@ async function getSessionAnalysis(sessionId) {
       WHERE q.session_id = ? AND q.correct = 0
       GROUP BY ${topicExpr}
       ORDER BY mistakes DESC, topic ASC
-      LIMIT 8
     `,
     [id]
   );
@@ -1043,7 +1062,6 @@ async function getSessionAnalysis(sessionId) {
       FROM question_attempts q
       WHERE q.session_id = ? AND q.correct = 0
       ORDER BY COALESCE(q.time_sec, 0) DESC, q.id DESC
-      LIMIT 10
     `,
     [id]
   );

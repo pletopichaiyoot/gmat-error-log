@@ -15,7 +15,7 @@ const {
   getSessionAnalysis,
   updateErrorAnnotation,
 } = require('./db');
-const { runScrapeFromOpenBrowser } = require('./scraper-runner');
+const { runScrapeFromOpenBrowser, openUrlInOpenBrowser } = require('./scraper-runner');
 
 const app = express();
 const PORT = Number(process.env.PORT || 4310);
@@ -199,6 +199,14 @@ function clipText(value, maxLen = 3000) {
   return `${text.slice(0, maxLen)}…`;
 }
 
+function normalizeOpenUrl(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return null;
+  if (/^https?:\/\//i.test(value)) return value;
+  if (value.startsWith('/')) return `https://gmatofficialpractice.mba.com${value}`;
+  return null;
+}
+
 app.use(express.json({ limit: '1mb' }));
 if (require('fs').existsSync(clientDistPath)) {
   app.use(express.static(clientDistPath));
@@ -285,6 +293,9 @@ app.get('/api/errors', async (req, res) => {
       difficulty: req.query.difficulty || '',
       topic: req.query.topic || '',
       confidence: req.query.confidence || '',
+      search: req.query.search || '',
+      sortKey: req.query.sortKey || 'session_date',
+      sortOrder: req.query.sortOrder === 'asc' ? 'asc' : 'desc',
     };
 
     const [rows, total] = await Promise.all([
@@ -422,6 +433,38 @@ app.post('/api/open-chrome', async (req, res) => {
     res.status(500).json({
       ok: false,
       error: error.message,
+    });
+  }
+});
+
+app.post('/api/open-question', async (req, res) => {
+  try {
+    const targetUrl = normalizeOpenUrl(req.body?.questionUrl);
+    if (!targetUrl) {
+      res.status(400).json({
+        ok: false,
+        error: 'Invalid question URL. Expected absolute GMAT URL.',
+      });
+      return;
+    }
+
+    const result = await openUrlInOpenBrowser({
+      cdpUrl: req.body?.cdpUrl,
+      url: targetUrl,
+    });
+
+    res.json({
+      ok: true,
+      openedUrl: result.openedUrl,
+      debug: result.debug || null,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+      hint: 'Open Chrome (CDP) first, keep GMAT tab logged in, then try Open again.',
+      details: clipText(error.stack || error.message || String(error), 4000),
+      debug: error.openDebug || null,
     });
   }
 });

@@ -76,6 +76,73 @@ function clipText(value, maxLen = 1000) {
   return `${text.slice(0, maxLen)}…`;
 }
 
+function parseCdpUrl(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return null;
+  try {
+    return new URL(value);
+  } catch (_error) {
+    try {
+      return new URL(`http://${value}`);
+    } catch (_innerError) {
+      return null;
+    }
+  }
+}
+
+function buildCdpUrlCandidates(rawUrl) {
+  const parsed = parseCdpUrl(rawUrl);
+  if (!parsed) return [String(rawUrl || '').trim() || 'http://localhost:9222'];
+
+  const originalHost = String(parsed.hostname || '').replace(/^\[|\]$/g, '');
+  const hostCandidates = [originalHost];
+  if (originalHost === '127.0.0.1') hostCandidates.push('localhost', '::1');
+  if (originalHost === 'localhost') hostCandidates.push('127.0.0.1', '::1');
+  if (originalHost === '::1') hostCandidates.push('localhost', '127.0.0.1');
+
+  const uniqueHosts = [];
+  for (const host of hostCandidates) {
+    if (host && !uniqueHosts.includes(host)) uniqueHosts.push(host);
+  }
+
+  const urls = uniqueHosts.map((host) => {
+    const next = new URL(parsed.toString());
+    next.hostname = host;
+    return next.toString();
+  });
+
+  return urls.length ? urls : [parsed.toString()];
+}
+
+async function connectBrowserOverCdp(rawUrl) {
+  const attemptedUrls = buildCdpUrlCandidates(rawUrl);
+  const attemptErrors = [];
+
+  for (const url of attemptedUrls) {
+    try {
+      const browser = await chromium.connectOverCDP(url);
+      return {
+        browser,
+        connectedUrl: url,
+        attemptedUrls,
+        fallbackUsed: url !== attemptedUrls[0],
+      };
+    } catch (error) {
+      attemptErrors.push({
+        url,
+        message: clipText(error?.message || String(error), 800),
+      });
+    }
+  }
+
+  const error = new Error(
+    `Unable to connect to Chrome CDP. Tried: ${attemptedUrls.join(', ')}. Open Chrome with remote debugging and keep tab logged in.`
+  );
+  error.cdpAttemptedUrls = attemptedUrls;
+  error.cdpAttemptErrors = attemptErrors;
+  throw error;
+}
+
 async function inferClientId(page, fallbackClientId) {
   try {
     const detected = await page.evaluate(() => {
@@ -129,7 +196,7 @@ async function inferReviewCategoryId(page, cfg, fallbackReviewCategoryId) {
 }
 
 async function runScrapeFromOpenBrowser(options = {}) {
-  const cdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://127.0.0.1:9222';
+  const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
   const scraperSource = await loadScraperSource(options.scraperPath);
   const reloadPageBeforeScrape = options.reloadPageBeforeScrape !== false;
 
@@ -141,7 +208,10 @@ async function runScrapeFromOpenBrowser(options = {}) {
     if (target.length > limit) target.shift();
   };
 
-  const browser = await chromium.connectOverCDP(cdpUrl);
+  let browser = null;
+  let connectedCdpUrl = requestedCdpUrl;
+  let attemptedCdpUrls = [requestedCdpUrl];
+  let cdpFallbackUsed = false;
   let gmatPage = null;
   let runtimeConfig = normalizeConfig(options);
   const appSlug = extractAppSlug(options.appUrl);
@@ -155,6 +225,12 @@ async function runScrapeFromOpenBrowser(options = {}) {
   let onConsole = null;
   let onPageError = null;
   try {
+    const cdpConnection = await connectBrowserOverCdp(requestedCdpUrl);
+    browser = cdpConnection.browser;
+    connectedCdpUrl = cdpConnection.connectedUrl;
+    attemptedCdpUrls = cdpConnection.attemptedUrls;
+    cdpFallbackUsed = cdpConnection.fallbackUsed;
+
     const pages = browser.contexts().flatMap((ctx) => ctx.pages());
     const gmatPages = pages.filter((page) => /gmatofficialpractice\.mba\.com/i.test(page.url()));
     gmatPage =
@@ -259,7 +335,10 @@ async function runScrapeFromOpenBrowser(options = {}) {
       debug: {
         startedAt,
         finishedAt: new Date().toISOString(),
-        cdpUrl,
+        cdpUrl: connectedCdpUrl,
+        requestedCdpUrl,
+        attemptedCdpUrls,
+        cdpFallbackUsed,
         appSlug,
         sourceNavigation,
         runtimeConfig,
@@ -270,10 +349,17 @@ async function runScrapeFromOpenBrowser(options = {}) {
       },
     };
   } catch (error) {
+    if (Array.isArray(error?.cdpAttemptedUrls) && error.cdpAttemptedUrls.length) {
+      attemptedCdpUrls = error.cdpAttemptedUrls;
+    }
     error.scrapeDebug = {
       startedAt,
       finishedAt: new Date().toISOString(),
-      cdpUrl,
+      cdpUrl: connectedCdpUrl,
+      requestedCdpUrl,
+      attemptedCdpUrls,
+      cdpFallbackUsed,
+      cdpAttemptErrors: Array.isArray(error?.cdpAttemptErrors) ? error.cdpAttemptErrors : [],
       appSlug,
       sourceNavigation,
       runtimeConfig,
@@ -285,10 +371,70 @@ async function runScrapeFromOpenBrowser(options = {}) {
   } finally {
     if (gmatPage && onConsole) gmatPage.off('console', onConsole);
     if (gmatPage && onPageError) gmatPage.off('pageerror', onPageError);
-    await browser.close();
+    if (browser) await browser.close();
+  }
+}
+
+async function openUrlInOpenBrowser(options = {}) {
+  const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
+  const targetUrl = String(options.url || '').trim();
+  if (!targetUrl) {
+    throw new Error('Missing target URL.');
+  }
+
+  let browser = null;
+  let connectedCdpUrl = requestedCdpUrl;
+  let attemptedCdpUrls = [requestedCdpUrl];
+  let cdpFallbackUsed = false;
+  let page = null;
+  try {
+    const cdpConnection = await connectBrowserOverCdp(requestedCdpUrl);
+    browser = cdpConnection.browser;
+    connectedCdpUrl = cdpConnection.connectedUrl;
+    attemptedCdpUrls = cdpConnection.attemptedUrls;
+    cdpFallbackUsed = cdpConnection.fallbackUsed;
+
+    const contexts = browser.contexts();
+    const pages = contexts.flatMap((ctx) => ctx.pages());
+    const gmatPage = pages.find((entry) => /gmatofficialpractice\.mba\.com/i.test(entry.url()));
+    const context = gmatPage?.context?.() || contexts[0] || null;
+
+    if (!context) {
+      throw new Error('No Chrome browser context found. Open Chrome (CDP) first.');
+    }
+
+    page = await context.newPage();
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+    await page.bringToFront();
+
+    return {
+      ok: true,
+      openedUrl: page.url(),
+      debug: {
+        requestedCdpUrl,
+        cdpUrl: connectedCdpUrl,
+        attemptedCdpUrls,
+        cdpFallbackUsed,
+      },
+    };
+  } catch (error) {
+    const message = error?.message || String(error);
+    const wrapped = new Error(message);
+    wrapped.openDebug = {
+      requestedCdpUrl,
+      cdpUrl: connectedCdpUrl,
+      attemptedCdpUrls: Array.isArray(error?.cdpAttemptedUrls) ? error.cdpAttemptedUrls : attemptedCdpUrls,
+      cdpFallbackUsed,
+      cdpAttemptErrors: Array.isArray(error?.cdpAttemptErrors) ? error.cdpAttemptErrors : [],
+      targetUrl,
+    };
+    throw wrapped;
+  } finally {
+    if (browser) await browser.close();
   }
 }
 
 module.exports = {
+  openUrlInOpenBrowser,
   runScrapeFromOpenBrowser,
 };

@@ -6,7 +6,7 @@ import { Input } from './components/ui/input';
 import { Textarea } from './components/ui/textarea';
 import { Select } from './components/ui/select';
 
-const DEFAULT_CDP_URL = 'http://127.0.0.1:9222';
+const DEFAULT_CDP_URL = 'http://localhost:9222';
 
 function formatDate(value) {
   if (!value) return '-';
@@ -130,7 +130,7 @@ function App() {
     subtopicBreakdown: [],
   });
   const [subtopicScope, setSubtopicScope] = useState('All');
-  const [filters, setFilters] = useState({ subject: '', difficulty: '', topic: '', confidence: '' });
+  const [filters, setFilters] = useState({ subject: '', difficulty: '', topic: '', confidence: '', search: '' });
   const [syncCenterOpen, setSyncCenterOpen] = useState(false);
   const [isOpening, setIsOpening] = useState(false);
   const [isScraping, setIsScraping] = useState(false);
@@ -157,8 +157,11 @@ function App() {
     mistakeType: '',
     notes: '',
   });
+  const [openingQuestionKey, setOpeningQuestionKey] = useState('');
   const [sessionSubjectFilter, setSessionSubjectFilter] = useState('');
   const [sessionSort, setSessionSort] = useState({ key: 'session_date', order: 'desc' });
+  const [sessionAnalysisSort, setSessionAnalysisSort] = useState({ key: 'time_sec', order: 'desc' });
+  const [errorSort, setErrorSort] = useState({ key: 'session_date', order: 'desc' });
   const [sessionDateRange, setSessionDateRange] = useState({ start: '', end: '' });
 
   // Pagination state
@@ -232,7 +235,7 @@ function App() {
     });
   }
 
-  async function loadErrors(page, runId = selectedRunId, customFilters = filters) {
+  async function loadErrors(page, runId = selectedRunId, customFilters = filters, customSort = errorSort) {
     const params = new URLSearchParams();
     if (runId) params.set('runId', runId);
     params.set('page', page);
@@ -241,6 +244,9 @@ function App() {
     if (customFilters.difficulty) params.set('difficulty', customFilters.difficulty);
     if (customFilters.topic) params.set('topic', customFilters.topic);
     if (customFilters.confidence) params.set('confidence', customFilters.confidence);
+    if (customFilters.search) params.set('search', customFilters.search);
+    params.set('sortKey', customSort.key);
+    params.set('sortOrder', customSort.order);
 
     const data = await fetchJson(`/api/errors?${params.toString()}`);
     setErrors(filterDisplayableErrors(data.errors || []));
@@ -532,6 +538,57 @@ function App() {
     return Number(((correct * 100) / total).toFixed(1));
   }, [subjectCards]);
 
+  const totalWrongTopicMistakes = useMemo(
+    () =>
+      (sessionAnalysis.data?.topWrongTopics || []).reduce(
+        (sum, row) => sum + Number(row?.mistakes || 0),
+        0
+      ),
+    [sessionAnalysis.data?.topWrongTopics]
+  );
+
+  const sortedSessionAnalysisWrongQuestions = useMemo(() => {
+    const rows = [...(sessionAnalysis.data?.slowWrongQuestions || [])];
+    const { key, order } = sessionAnalysisSort;
+    const difficultyRank = {
+      unknown: 0,
+      easy: 1,
+      medium: 2,
+      hard: 3,
+    };
+
+    rows.sort((a, b) => {
+      let valA = a?.[key];
+      let valB = b?.[key];
+
+      if (key === 'difficulty') {
+        valA = difficultyRank[String(valA || 'unknown').toLowerCase()] || 0;
+        valB = difficultyRank[String(valB || 'unknown').toLowerCase()] || 0;
+      } else if (key === 'time_sec') {
+        valA = Number.isFinite(Number(valA)) ? Number(valA) : -1;
+        valB = Number.isFinite(Number(valB)) ? Number(valB) : -1;
+      } else if (key === 'q_code') {
+        valA = String(valA || '');
+        valB = String(valB || '');
+      } else {
+        valA = String(valA || '').toLowerCase();
+        valB = String(valB || '').toLowerCase();
+      }
+
+      if (typeof valA === 'number' && typeof valB === 'number') {
+        if (valA < valB) return order === 'asc' ? -1 : 1;
+        if (valA > valB) return order === 'asc' ? 1 : -1;
+      } else {
+        const cmp = String(valA).localeCompare(String(valB), undefined, { numeric: true, sensitivity: 'base' });
+        if (cmp !== 0) return order === 'asc' ? cmp : -cmp;
+      }
+
+      return (Number(a?.id || 0) - Number(b?.id || 0)) * (order === 'asc' ? 1 : -1);
+    });
+
+    return rows;
+  }, [sessionAnalysis.data?.slowWrongQuestions, sessionAnalysisSort]);
+
   const processedSessions = useMemo(() => {
     let list = sessions.map((session) => ({
       ...session,
@@ -580,6 +637,22 @@ function App() {
       key,
       order: prev.key === key && prev.order === 'desc' ? 'asc' : 'desc',
     }));
+  }
+
+  function handleSessionAnalysisSort(key) {
+    setSessionAnalysisSort((prev) => ({
+      key,
+      order: prev.key === key && prev.order === 'desc' ? 'asc' : 'desc',
+    }));
+  }
+
+  function handleErrorSort(key) {
+    const newSort = {
+      key,
+      order: errorSort.key === key && errorSort.order === 'desc' ? 'asc' : 'desc',
+    };
+    setErrorSort(newSort);
+    loadErrors(1, selectedRunId, filters, newSort);
   }
 
   function statusLabelFromAccuracy(accuracyPct) {
@@ -732,6 +805,56 @@ function App() {
     }
   }
 
+  function canonicalQuestionUrl(row) {
+    const rawUrl = String(row?.question_url || '').trim();
+    const sessionId = String(row?.session_external_id || '').trim();
+    const catId = String(row?.cat_id || '').trim();
+    const qId = String(row?.q_id || '').trim();
+    const reviewHash = `#custom-quiz/${sessionId}/review/categories/${catId}/${qId}`;
+
+    if (sessionId && catId && qId) {
+      if (rawUrl) {
+        try {
+          const parsed = new URL(rawUrl);
+          return `${parsed.origin}${parsed.pathname}${reviewHash}`;
+        } catch (_error) {
+          const originPath = rawUrl.replace(/[#?].*$/, '');
+          if (originPath) return `${originPath}${reviewHash}`;
+        }
+      }
+      return `https://gmatofficialpractice.mba.com/${reviewHash}`;
+    }
+    return rawUrl;
+  }
+
+  function questionOpenKey(row, scope = '') {
+    if (!row) return scope || 'unknown';
+    if (row.id) return `${scope}-${row.id}`;
+    return `${scope}-${row.session_external_id || 'session'}-${row.q_code || 'q'}-${row.time_sec || 't'}`;
+  }
+
+  async function handleOpenQuestion(row, scope = '') {
+    const questionUrl = canonicalQuestionUrl(row);
+    if (!questionUrl) return;
+    const key = questionOpenKey(row, scope);
+    setOpeningQuestionKey(key);
+    try {
+      const result = await fetchJson('/api/open-question', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          questionUrl,
+          cdpUrl: DEFAULT_CDP_URL,
+        }),
+      });
+      setStatus({ message: `Opened question in Chrome CDP: ${result.openedUrl || questionUrl}`, isError: false });
+    } catch (error) {
+      setStatus({ message: formatRequestError(error), isError: true });
+    } finally {
+      setOpeningQuestionKey((prev) => (prev === key ? '' : prev));
+    }
+  }
+
   return (
     <main className="page-shell">
       <Card className="hero card">
@@ -851,105 +974,100 @@ function App() {
           </article>
         </div>
 
-        <article className="topic-panel">
-          <div className="panel-head">
-            <h3>Category Detailed Breakdown</h3>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Subject</th>
-                  <th>Category</th>
-                  <th>Total Questions</th>
-                  <th>Correct</th>
-                  <th>Incorrect</th>
-                  <th>Accuracy</th>
-                  <th>Avg Time / Q</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {!categoryRows.length && (
-                  <tr>
-                    <td colSpan="8">No category data yet.</td>
-                  </tr>
-                )}
-                {categoryRows.map((row) => (
-                  <tr key={`${row.subject_family}-${row.subject_sub}`}>
-                    <td>{formatMaybe(row.subject_family)}</td>
-                    <td>{formatMaybe(row.subject_sub)}</td>
-                    <td>{formatMaybe(row.total_questions)}</td>
-                    <td>{formatMaybe(row.correct_count)}</td>
-                    <td>{formatMaybe(row.incorrect_count)}</td>
-                    <td>{formatPercent(row.accuracy_pct)}</td>
-                    <td>{formatDurationSeconds(row.avg_time_sec)}</td>
-                    <td>
-                      <Badge
-                        variant={
-                          statusLabelFromAccuracy(row.accuracy_pct) === 'Strong'
-                            ? 'success'
-                            : statusLabelFromAccuracy(row.accuracy_pct) === 'Improving'
-                              ? 'info'
-                              : 'warning'
-                        }
-                        className="status-pill"
-                      >
-                        {statusLabelFromAccuracy(row.accuracy_pct)}
-                      </Badge>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </article>
+      </Card>
 
-        <article className="topic-panel">
-          <div className="panel-head">
-            <h3>Subtopic Breakdown</h3>
-            <label>
-              Subject Scope
-              <Select value={subtopicScope} onChange={(event) => setSubtopicScope(event.target.value)}>
-                {subtopicScopeOptions.map((scope) => (
-                  <option key={scope} value={scope}>
-                    {scope}
-                  </option>
-                ))}
-              </Select>
-            </label>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
+      <Card className="card">
+        <h2>Category Detailed Breakdown</h2>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Subject</th>
+                <th>Category</th>
+                <th>Total Questions</th>
+                <th>Correct</th>
+                <th>Incorrect</th>
+                <th>Accuracy</th>
+                <th>Avg Time / Q</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!categoryRows.length && (
                 <tr>
-                  <th>Subject</th>
-                  <th>Category</th>
-                  <th>Subtopic</th>
-                  <th>Incorrect</th>
-                  <th>Avg Time (Incorrect)</th>
+                  <td colSpan="8">No category data yet.</td>
                 </tr>
-              </thead>
-              <tbody>
-                {!filteredSubtopicRows.length && (
-                  <tr>
-                    <td colSpan="5">No subtopic data yet.</td>
-                  </tr>
-                )}
-                {filteredSubtopicRows.map((row) => (
-                  <tr key={`${row.subject_family}-${row.subject_sub}-${row.subtopic}`}>
-                    <td>{formatMaybe(row.subject_family)}</td>
-                    <td>{formatMaybe(row.subject_sub)}</td>
-                    <td>{formatMaybe(row.subtopic)}</td>
-                    <td>{formatMaybe(row.incorrect_count)}</td>
-                    <td>{formatDurationSeconds(row.avg_time_sec)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </article>
+              )}
+              {categoryRows.map((row) => (
+                <tr key={`${row.subject_family}-${row.subject_sub}`}>
+                  <td>{formatMaybe(row.subject_family)}</td>
+                  <td>{formatMaybe(row.subject_sub)}</td>
+                  <td>{formatMaybe(row.total_questions)}</td>
+                  <td>{formatMaybe(row.correct_count)}</td>
+                  <td>{formatMaybe(row.incorrect_count)}</td>
+                  <td>{formatPercent(row.accuracy_pct)}</td>
+                  <td>{formatDurationSeconds(row.avg_time_sec)}</td>
+                  <td>
+                    <Badge
+                      variant={
+                        statusLabelFromAccuracy(row.accuracy_pct) === 'Strong'
+                          ? 'success'
+                          : statusLabelFromAccuracy(row.accuracy_pct) === 'Improving'
+                            ? 'info'
+                            : 'warning'
+                      }
+                      className="status-pill"
+                    >
+                      {statusLabelFromAccuracy(row.accuracy_pct)}
+                    </Badge>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
 
+      <Card className="card">
+        <div className="section-header-filters">
+          <h2>Subtopic Breakdown</h2>
+          <Select className="filter-select" value={subtopicScope} onChange={(event) => setSubtopicScope(event.target.value)}>
+            {subtopicScopeOptions.map((scope) => (
+              <option key={scope} value={scope}>
+                {scope}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Subject</th>
+                <th>Category</th>
+                <th>Subtopic</th>
+                <th>Incorrect</th>
+                <th>Avg Time (Incorrect)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!filteredSubtopicRows.length && (
+                <tr>
+                  <td colSpan="5">No subtopic data yet.</td>
+                </tr>
+              )}
+              {filteredSubtopicRows.map((row) => (
+                <tr key={`${row.subject_family}-${row.subject_sub}-${row.subtopic}`}>
+                  <td>{formatMaybe(row.subject_family)}</td>
+                  <td>{formatMaybe(row.subject_sub)}</td>
+                  <td>{formatMaybe(row.subtopic)}</td>
+                  <td>{formatMaybe(row.incorrect_count)}</td>
+                  <td>{formatDurationSeconds(row.avg_time_sec)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </Card>
 
       <Card className="card">
@@ -1011,6 +1129,12 @@ function App() {
                 </th>
                 <th
                   className="sortable"
+                  onClick={() => handleSessionSort('session_external_id')}
+                >
+                  Session ID {sessionSort.key === 'session_external_id' && (sessionSort.order === 'asc' ? '↑' : '↓')}
+                </th>
+                <th
+                  className="sortable"
                   onClick={() => handleSessionSort('subject')}
                 >
                   Subject {sessionSort.key === 'subject' && (sessionSort.order === 'asc' ? '↑' : '↓')}
@@ -1048,12 +1172,13 @@ function App() {
             <tbody>
               {processedSessions.length === 0 && (
                 <tr>
-                  <td colSpan="10">No sessions found.</td>
+                  <td colSpan="11">No sessions found.</td>
                 </tr>
               )}
               {processedSessions.map((row) => (
                 <tr key={`${row.session_external_id}-${row.run_id}`}>
                   <td>{formatDate(row.session_date)}</td>
+                  <td>{formatMaybe(row.session_external_id)}</td>
                   <td>{formatMaybe(row.subject)}</td>
                   <td>{formatMaybe(row.question_count_display)}</td>
                   <td>{formatMaybe(row.error_count)}</td>
@@ -1138,32 +1263,48 @@ function App() {
               <option value="not selected">not selected</option>
             </Select>
             <Input
-              placeholder="Topic (e.g. Weaken)"
-              value={filters.topic}
-              onChange={(event) => setFilters((prev) => ({ ...prev, topic: event.target.value }))}
+              placeholder="Topic or Q Code (e.g. Weaken, V01234)"
+              value={filters.search}
+              onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))}
             />
             <Button variant="outline" type="submit">
               Apply Filter
             </Button>
         </form>
 
-        <div className="table-wrap">
-          <table>
+        <div className="table-wrap error-log-table-wrap">
+          <table className="error-log-table">
             <thead>
               <tr>
-                <th>Date</th>
-                <th>Session</th>
-                <th>Q Code</th>
-                <th>Subject</th>
-                <th>Difficulty</th>
-                <th>Topic</th>
+                <th className="sortable" onClick={() => handleErrorSort('session_date')}>
+                  Date {errorSort.key === 'session_date' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                </th>
+                <th className="sortable" onClick={() => handleErrorSort('session_external_id')}>
+                  Session {errorSort.key === 'session_external_id' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                </th>
+                <th className="sortable" onClick={() => handleErrorSort('q_code')}>
+                  Q Code {errorSort.key === 'q_code' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                </th>
+                <th className="sortable" onClick={() => handleErrorSort('subject')}>
+                  Subject {errorSort.key === 'subject' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                </th>
+                <th className="sortable" onClick={() => handleErrorSort('difficulty')}>
+                  Difficulty {errorSort.key === 'difficulty' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                </th>
+                <th className="sortable topic-col" onClick={() => handleErrorSort('topic')}>
+                  Topic {errorSort.key === 'topic' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                </th>
                 <th>My Ans</th>
                 <th>Correct</th>
-                <th>Open</th>
-                <th>Time (min:sec)</th>
-                <th>Mistake Type</th>
-                <th>Notes</th>
-                <th>Annotate</th>
+                <th className="sortable" onClick={() => handleErrorSort('time_sec')}>
+                  Time (min:sec) {errorSort.key === 'time_sec' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                </th>
+                <th className="sortable" onClick={() => handleErrorSort('mistake_type')}>
+                  Mistake Type {errorSort.key === 'mistake_type' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                </th>
+                <th className="notes-col">Notes</th>
+                <th className="action-col annotate-col">Annotate</th>
+                <th className="action-col open-col">Open</th>
               </tr>
             </thead>
             <tbody>
@@ -1179,29 +1320,15 @@ function App() {
                   <td>{formatMaybe(row.q_code)}</td>
                   <td>{formatMaybe(row.subject)}</td>
                   <td>{formatMaybe(row.difficulty)}</td>
-                  <td>{formatMaybe(row.topic)}</td>
+                  <td className="topic-col">{formatMaybe(row.topic)}</td>
                   <td>{formatMaybe(row.my_answer)}</td>
                   <td>{formatMaybe(row.correct_answer)}</td>
-                  <td>
-                    {row.question_url ? (
-                      <a
-                        className="open-btn"
-                        href={row.question_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        Open
-                      </a>
-                    ) : (
-                      <span className="muted">-</span>
-                    )}
-                  </td>
                   <td>{formatDurationSeconds(row.time_sec)}</td>
                   <td>{formatMaybe(row.mistake_type)}</td>
-                  <td className="notes-cell" title={row.notes || ''}>
+                  <td className="notes-cell notes-col" title={row.notes || ''}>
                     {formatNotePreview(row.notes)}
                   </td>
-                  <td>
+                  <td className="action-col annotate-col">
                     <Button
                       variant="outline"
                       size="sm"
@@ -1211,6 +1338,22 @@ function App() {
                     >
                       Annotate
                     </Button>
+                  </td>
+                  <td className="action-col open-col">
+                    {row.question_url ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        type="button"
+                        className="readmore-btn"
+                        onClick={() => handleOpenQuestion(row, 'error-log')}
+                        disabled={openingQuestionKey === questionOpenKey(row, 'error-log')}
+                      >
+                        {openingQuestionKey === questionOpenKey(row, 'error-log') ? 'Opening...' : 'Open'}
+                      </Button>
+                    ) : (
+                      <span className="muted">-</span>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -1368,7 +1511,7 @@ function App() {
           aria-label="Pattern Drilldown"
           onClick={handleClosePatternDrilldown}
         >
-          <div className="analysis-dialog" onClick={(event) => event.stopPropagation()}>
+          <div className="analysis-dialog session-analysis-dialog" onClick={(event) => event.stopPropagation()}>
             <div className="analysis-shell">
               <div className="analysis-header">
                 <h2>{patternDrilldown.title}</h2>
@@ -1427,14 +1570,16 @@ function App() {
                             <td>{formatMaybe(row.correct_answer)}</td>
                             <td>
                               {row.question_url ? (
-                                <a
-                                  className="open-btn"
-                                  href={row.question_url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  type="button"
+                                  className="readmore-btn"
+                                  onClick={() => handleOpenQuestion(row, 'drilldown')}
+                                  disabled={openingQuestionKey === questionOpenKey(row, 'drilldown')}
                                 >
-                                  Open
-                                </a>
+                                  {openingQuestionKey === questionOpenKey(row, 'drilldown') ? 'Opening...' : 'Open'}
+                                </Button>
                               ) : (
                                 <span className="muted">-</span>
                               )}
@@ -1469,13 +1614,13 @@ function App() {
 
       {sessionAnalysis.open && (
         <div
-          className="analysis-overlay"
+          className="analysis-overlay session-analysis-overlay"
           role="dialog"
           aria-modal="true"
           aria-label="Session Analysis"
           onClick={handleCloseSessionAnalysis}
         >
-          <div className="analysis-dialog" onClick={(event) => event.stopPropagation()}>
+          <div className="analysis-dialog session-analysis-dialog" onClick={(event) => event.stopPropagation()}>
             <div className="analysis-shell">
             <div className="analysis-header">
               <h2>Session Analysis</h2>
@@ -1565,13 +1710,20 @@ function App() {
 
                 <div className="pattern-grid">
                   <div>
-                    <h3>Top Wrong Topics</h3>
+                    <h3>Wrong Topics (All)</h3>
                     <ul className="metric-list">
-                      {!sessionAnalysis.data.topWrongTopics?.length && <li>No wrong-topic data</li>}
+                      {!sessionAnalysis.data.topWrongTopics?.length && <li className="metric-empty">No wrong-topic data</li>}
                       {(sessionAnalysis.data.topWrongTopics || []).map((row) => (
                         <li key={row.topic}>
-                          <span>{row.topic}</span>
-                          <strong>{row.mistakes}</strong>
+                          <span className="metric-label">{row.topic}</span>
+                          <span className="metric-values">
+                            <strong>{row.mistakes}</strong>
+                            <small>
+                              {totalWrongTopicMistakes
+                                ? `${((Number(row.mistakes || 0) * 100) / totalWrongTopicMistakes).toFixed(1)}%`
+                                : '0.0%'}
+                            </small>
+                          </span>
                         </li>
                       ))}
                     </ul>
@@ -1580,11 +1732,14 @@ function App() {
                   <div>
                     <h3>Confidence Performance</h3>
                     <ul className="metric-list">
-                      {!sessionAnalysis.data.confidencePerformance?.length && <li>No confidence data</li>}
+                      {!sessionAnalysis.data.confidencePerformance?.length && <li className="metric-empty">No confidence data</li>}
                       {(sessionAnalysis.data.confidencePerformance || []).map((row) => (
                         <li key={row.confidence}>
-                          <span>{row.confidence}</span>
-                          <strong>{`${row.total} / ${formatPercent(row.accuracy_pct)}`}</strong>
+                          <span className="metric-label">{row.confidence}</span>
+                          <span className="metric-values">
+                            <strong>{`${row.wrong}/${row.total} wrong`}</strong>
+                            <small>{`Acc ${formatPercent(row.accuracy_pct)}`}</small>
+                          </span>
                         </li>
                       ))}
                     </ul>
@@ -1592,21 +1747,37 @@ function App() {
                 </div>
 
                 <div className="analysis-block">
-                  <h3>Slowest Wrong Questions</h3>
-                  <div className="table-wrap">
-                    <table>
+                  <h3>{`All Wrong Questions (${sortedSessionAnalysisWrongQuestions.length})`}</h3>
+                  <div className="table-wrap session-analysis-questions-wrap">
+                    <table className="session-analysis-questions-table">
                       <thead>
                         <tr>
-                          <th>Q Code</th>
-                          <th>Difficulty</th>
-                          <th>Topic</th>
-                          <th>My Ans</th>
-                          <th>Correct</th>
-                          <th>Time</th>
-                          <th>Open</th>
-                          <th>Mistake Type</th>
-                          <th>Notes</th>
-                          <th>Annotate</th>
+                          <th className="sortable" onClick={() => handleSessionAnalysisSort('q_code')}>
+                            Q Code {sessionAnalysisSort.key === 'q_code' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
+                          </th>
+                          <th className="sortable" onClick={() => handleSessionAnalysisSort('difficulty')}>
+                            Difficulty {sessionAnalysisSort.key === 'difficulty' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
+                          </th>
+                          <th className="sortable topic-col" onClick={() => handleSessionAnalysisSort('topic')}>
+                            Topic {sessionAnalysisSort.key === 'topic' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
+                          </th>
+                          <th className="sortable" onClick={() => handleSessionAnalysisSort('my_answer')}>
+                            My Ans {sessionAnalysisSort.key === 'my_answer' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
+                          </th>
+                          <th className="sortable" onClick={() => handleSessionAnalysisSort('correct_answer')}>
+                            Correct {sessionAnalysisSort.key === 'correct_answer' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
+                          </th>
+                          <th className="sortable" onClick={() => handleSessionAnalysisSort('time_sec')}>
+                            Time {sessionAnalysisSort.key === 'time_sec' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
+                          </th>
+                          <th className="sortable" onClick={() => handleSessionAnalysisSort('mistake_type')}>
+                            Mistake Type {sessionAnalysisSort.key === 'mistake_type' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
+                          </th>
+                          <th className="sortable notes-col" onClick={() => handleSessionAnalysisSort('notes')}>
+                            Notes {sessionAnalysisSort.key === 'notes' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
+                          </th>
+                          <th className="action-col annotate-col">Annotate</th>
+                          <th className="action-col open-col">Open</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1615,33 +1786,19 @@ function App() {
                             <td colSpan="10">No wrong questions found.</td>
                           </tr>
                         )}
-                        {(sessionAnalysis.data.slowWrongQuestions || []).map((row, idx) => (
+                        {sortedSessionAnalysisWrongQuestions.map((row, idx) => (
                           <tr key={`${row.q_code || 'q'}-${idx}`}>
                             <td>{formatMaybe(row.q_code)}</td>
                             <td>{formatMaybe(row.difficulty)}</td>
-                            <td>{formatMaybe(row.topic)}</td>
+                            <td className="topic-col">{formatMaybe(row.topic)}</td>
                             <td>{formatMaybe(row.my_answer)}</td>
                             <td>{formatMaybe(row.correct_answer)}</td>
                             <td>{formatDurationSeconds(row.time_sec)}</td>
-                            <td>
-                              {row.question_url ? (
-                                <a
-                                  className="open-btn"
-                                  href={row.question_url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                >
-                                  Open
-                                </a>
-                              ) : (
-                                <span className="muted">-</span>
-                              )}
-                            </td>
                             <td>{formatMaybe(row.mistake_type)}</td>
-                            <td className="notes-cell" title={row.notes || ''}>
+                            <td className="notes-cell notes-col" title={row.notes || ''}>
                               {formatNotePreview(row.notes)}
                             </td>
-                            <td>
+                            <td className="action-col annotate-col">
                               <Button
                                 variant="outline"
                                 size="sm"
@@ -1651,6 +1808,24 @@ function App() {
                               >
                                 Annotate
                               </Button>
+                            </td>
+                            <td className="action-col open-col">
+                              {row.question_url ? (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  type="button"
+                                  className="readmore-btn"
+                                  onClick={() => handleOpenQuestion(row, 'session-analysis')}
+                                  disabled={openingQuestionKey === questionOpenKey(row, 'session-analysis')}
+                                >
+                                  {openingQuestionKey === questionOpenKey(row, 'session-analysis')
+                                    ? 'Opening...'
+                                    : 'Open'}
+                                </Button>
+                              ) : (
+                                <span className="muted">-</span>
+                              )}
                             </td>
                           </tr>
                         ))}

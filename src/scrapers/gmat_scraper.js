@@ -972,10 +972,94 @@ function extractCategorySubCodesFromCurrentPage(sessionId) {
   return out;
 }
 
-async function scrapeCategoryRowsFromCurrentPage(cfg = CONFIG) {
+async function scrapeCategoryRowsFromCurrentPage(cfg = CONFIG, sessionId = null) {
   const catQs = [];
+  const seenRouteRows = new Set();
+  const parseDifficulty = (text) => {
+    const match = String(text || '').match(/\b(hard|medium|easy)\b/i);
+    if (!match) return null;
+    return match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
+  };
+  const extractRowFromReviewNode = (node) => {
+    if (!node) return null;
+    let current = node;
+    for (let i = 0; i < 10; i += 1) {
+      if (!current) break;
+      const hasPreview = Boolean(current.querySelector?.('[class*="preview"]'));
+      const hasCorrectness = Boolean(current.querySelector?.('[class*="correctness"]'));
+      const hasDifficulty = Boolean(current.querySelector?.('[class*="difficulty"]'));
+      if (hasPreview && hasCorrectness && hasDifficulty) return current;
+      current = current.parentElement;
+    }
+    return null;
+  };
+  const parseRouteFromNode = (node) => {
+    if (!node?.getAttribute) return null;
+    const attrs = ['href', 'data-href', 'data-url', 'data-link', 'onclick'];
+    for (const attr of attrs) {
+      const value = node.getAttribute(attr);
+      const parsed = parseReviewRoute(value);
+      if (parsed) return parsed;
+    }
+    return null;
+  };
+  const pushRow = (row) => {
+    if (!row) return;
+    const key = [
+      String(row.q_id || ''),
+      String(row.cat_id || ''),
+      String(row.q_code || ''),
+      String(row.difficulty || ''),
+      String(row.time_sec ?? ''),
+      String(row.correct ? 1 : 0),
+      String(row.confidence || ''),
+    ].join('|');
+    if (seenRouteRows.has(key)) return;
+    seenRouteRows.add(key);
+    catQs.push(row);
+  };
 
   while (true) {
+    const reviewNodes = Array.from(
+      document.querySelectorAll(
+        'a[href*="review/categories/"],[data-href*="review/categories/"],[data-url*="review/categories/"],[data-link*="review/categories/"],[onclick*="review/categories/"]'
+      )
+    );
+
+    for (const node of reviewNodes) {
+      const reviewRef = parseRouteFromNode(node);
+      if (!reviewRef?.q_id) continue;
+      if (sessionId && Number(reviewRef.session_id) !== Number(sessionId)) continue;
+
+      const row = extractRowFromReviewNode(node) || node.parentElement || null;
+      if (!row) continue;
+
+      const preview = row.querySelector('[class*="preview"]')?.innerText?.trim() ?? '';
+      const q_code = preview.match(/^(\d{6})\b/)?.[1] ?? null;
+      const timeStr = row.querySelector('[class*="time"]')?.innerText?.trim() ?? '';
+      const confidence = row.querySelector('[class*="confidence"]')?.getAttribute('data-confidence') ?? 'not selected';
+      const correctnessEl = row.querySelector('[class*="correctness"]');
+      const correct = !correctnessEl?.className?.includes('incorrect');
+      const diffText =
+        row.querySelector('[class*="difficulty"][class*="li-cell"]')?.className ||
+        row.querySelector('[class*="difficulty"]')?.className ||
+        row.querySelector('[class*="difficulty"]')?.innerText ||
+        '';
+      const difficulty = parseDifficulty(diffText);
+      if (!difficulty) continue;
+
+      pushRow({
+        q_code,
+        correct,
+        difficulty,
+        confidence,
+        time_sec: parseTimeSec(timeStr),
+        q_id: reviewRef.q_id || null,
+        cat_id: reviewRef.cat_id || null,
+        question_url: toAbsoluteQuestionUrl(`#custom-quiz/${reviewRef.session_id}/review/categories/${reviewRef.cat_id}/${reviewRef.q_id}`),
+      });
+    }
+
     const diffEls = document.querySelectorAll('[class*="difficulty"][class*="li-cell"]');
     diffEls.forEach(diffEl => {
       const diff = diffEl.className.match(/\b(hard|medium|easy)\b/i)?.[1];
@@ -995,7 +1079,7 @@ async function scrapeCategoryRowsFromCurrentPage(cfg = CONFIG) {
       const q_code     = preview.match(/^(\d{6})\b/)?.[1] ?? null;
       const reviewRef  = extractReviewTargetFromRow(row);
 
-      catQs.push({
+      pushRow({
         q_code,
         correct,
         difficulty:  diff.charAt(0).toUpperCase() + diff.slice(1),
@@ -1271,7 +1355,7 @@ async function scrapePart1(cfg = CONFIG) {
         detectSubSubjectCodeFromCurrentPage() ||
         null;
       const pageSubGroup = subSubjectGroup(pageSubCode) || subGroupByCategory.get(Number(candidate)) || null;
-      const rows = (await scrapeCategoryRowsFromCurrentPage(cfg)).map((row) => {
+      const rows = (await scrapeCategoryRowsFromCurrentPage(cfg, sid)).map((row) => {
         const fromApi = row?.q_id ? apiByQId.get(String(row.q_id)) : null;
         const rowCatId = Number(row?.cat_id);
         const rowParentCatId = parentCategoryFromQuestionCategory(rowCatId);
@@ -1346,7 +1430,7 @@ async function scrapePart1(cfg = CONFIG) {
         pageSubCodeHints.get(Number(reviewCategoryId)) ||
         detectSubSubjectCodeFromCurrentPage();
       const fallbackPageGroup = subSubjectGroup(fallbackPageCode);
-      catQs = (await scrapeCategoryRowsFromCurrentPage(cfg)).map((row) => {
+      catQs = (await scrapeCategoryRowsFromCurrentPage(cfg, sid)).map((row) => {
         const fromApi = row?.q_id ? apiByQId.get(String(row.q_id)) : null;
         const rowCatId = Number(row?.cat_id);
         const rowParentCatId = parentCategoryFromQuestionCategory(rowCatId);
@@ -1776,44 +1860,86 @@ async function runScraper(cfg = CONFIG) {
     const detailByQCode = {};
     const detailByQId = {};
     for (const w of part2.wrong_answers) {
-      detailByQId[`${w.session_id}_${w.q_id}`] = w;
-      if (!w.q_code) continue;
-      const key = `${w.session_id}_${w.q_code}`;
-      if (!detailByQCode[key]) detailByQCode[key] = [];
-      detailByQCode[key].push(w);
+      if (w?.q_id) {
+        const qIdKey = `${w.session_id}_${w.q_id}`;
+        if (!detailByQId[qIdKey]) detailByQId[qIdKey] = [];
+        detailByQId[qIdKey].push(w);
+      }
+      if (!w?.q_code) continue;
+      const codeKey = `${w.session_id}_${w.q_code}`;
+      if (!detailByQCode[codeKey]) detailByQCode[codeKey] = [];
+      detailByQCode[codeKey].push(w);
     }
+    const consumedDetails = new Set();
+    const unconsumed = (items = []) => items.filter((item) => item && !consumedDetails.has(item));
+    const pickDetailForQuestion = (sessionId, q = {}) => {
+      const qId = q?.q_id ? String(q.q_id) : '';
+      const qCode = q?.q_code ? String(q.q_code) : '';
+
+      if (qId) {
+        const idKey = `${sessionId}_${qId}`;
+        const idCandidates = unconsumed(detailByQId[idKey] || []);
+        if (idCandidates.length) {
+          if (qCode) {
+            const exactCode = idCandidates.find((item) => String(item?.q_code || '') === qCode);
+            if (exactCode) return exactCode;
+          }
+          return idCandidates[0];
+        }
+      }
+
+      if (qCode) {
+        const codeKey = `${sessionId}_${qCode}`;
+        const codeCandidates = unconsumed(detailByQCode[codeKey] || []);
+        if (codeCandidates.length) {
+          if (qId) {
+            const exactQId = codeCandidates.find((item) => String(item?.q_id || '') === qId);
+            if (exactQId) return exactQId;
+          }
+          return codeCandidates[0];
+        }
+      }
+
+      return null;
+    };
 
     for (const s of part1.sessions) {
-      const byCodeCounter = {};
       for (const q of s.questions) {
         if (q.correct) continue;
 
-        let detail = null;
-
-        // Primary match by question code, which exists in categories rows + review page.
-        if (q.q_code) {
-          const codeKey = `${s.session_id}_${q.q_code}`;
-          const idx = byCodeCounter[codeKey] || 0;
-          detail = detailByQCode[codeKey]?.[idx] || null;
-          if (detailByQCode[codeKey]?.length) byCodeCounter[codeKey] = idx + 1;
-        }
-
-        // Fallback: use first unmatched detail by q_id for this session.
-        if (!detail) {
-          const fallback = (s.wrong_q_ids || []).find(x => detailByQId[`${s.session_id}_${x.q_id}`]);
-          if (fallback) {
-            detail = detailByQId[`${s.session_id}_${fallback.q_id}`];
-            delete detailByQId[`${s.session_id}_${fallback.q_id}`];
-          }
-        }
+        const detail = pickDetailForQuestion(s.session_id, q);
+        if (detail) consumedDetails.add(detail);
 
         if (detail) {
+          const existingQId = q.q_id ? String(q.q_id) : null;
+          const existingCatId = q.cat_id ? String(q.cat_id) : null;
+          const detailQId = detail.q_id ? String(detail.q_id) : null;
+          const detailCatId = detail.cat_id ? String(detail.cat_id) : null;
+
+          if (existingQId && detailQId && existingQId !== detailQId) {
+            console.warn(
+              `  ↷ Merge mismatch ${s.session_id}/${q.q_code || '-'}: keeping category q_id ${existingQId}, detail q_id=${detailQId}`
+            );
+          }
+          if (existingCatId && detailCatId && existingCatId !== detailCatId) {
+            console.warn(
+              `  ↷ Merge mismatch ${s.session_id}/${q.q_code || '-'}: keeping category cat_id ${existingCatId}, detail cat_id=${detailCatId}`
+            );
+          }
+
+          const finalQId = existingQId || detailQId || null;
+          const finalCatId = existingCatId || detailCatId || null;
+          const fallbackUrl =
+            finalQId && finalCatId
+              ? toAbsoluteQuestionUrl(`#custom-quiz/${s.session_id}/review/categories/${finalCatId}/${finalQId}`)
+              : null;
+
           q.my_answer      = detail.my_answer;
           q.correct_answer = detail.correct_answer;
           q.topic          = detail.topic || q.topic || null;
-          q.q_id           = detail.q_id || null;
-          q.cat_id         = detail.cat_id || null;
-          q.question_url   = detail.question_url || null;
+          q.q_id           = finalQId;
+          q.cat_id         = finalCatId;
+          q.question_url   = q.question_url || detail.question_url || fallbackUrl;
         }
       }
 
@@ -1824,7 +1950,10 @@ async function runScraper(cfg = CONFIG) {
           .map((id) => String(id))
       );
       const unmatchedWrongDetails = (part2.wrong_answers || []).filter(
-        (w) => w.session_id === s.session_id && (!w.q_id || !existingQIds.has(String(w.q_id)))
+        (w) =>
+          w.session_id === s.session_id &&
+          !consumedDetails.has(w) &&
+          (!w.q_id || !existingQIds.has(String(w.q_id)))
       );
       for (const detail of unmatchedWrongDetails) {
         s.questions.push({
