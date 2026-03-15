@@ -152,6 +152,25 @@ function isCompletedAnswerActivity(activity) {
   return true;
 }
 
+function isCompletedAnswerPayload(data) {
+  const incompleteValue = data?.incomplete;
+  if (incompleteValue === true) return false;
+  if (String(incompleteValue || '').toLowerCase() === 'true') return false;
+  return true;
+}
+
+function answerPayloadDedupKey(data = {}) {
+  const answerId = Number(data?.id);
+  if (Number.isInteger(answerId) && answerId > 0) return `id:${answerId}`;
+  const sid = String(data?.user_configured_quiz_session_id || '');
+  const loc = String(data?.content_location || '');
+  const created = String(data?.client_created_at || '');
+  const qcat = String(data?.question_category_id || '');
+  const taken = String(data?.time_taken || '');
+  const userAnswer = String(data?.user_answer || '');
+  return `sid:${sid}|loc:${loc}|at:${created}|cat:${qcat}|time:${taken}|ans:${userAnswer}`;
+}
+
 function normalizeSubSubject(question) {
   const direct = String(question?.subject_sub_raw || question?.subject_sub || '')
     .trim()
@@ -216,12 +235,31 @@ function detectSubSubjectGroupFromText(rawValue) {
 }
 
 function detectSubSubjectCodeFromCurrentPage() {
+  const hashCategoryId = Number(
+    String(window.location.hash || '').match(/\/categories\/(\d+)/i)?.[1]
+  );
+  if (Number.isInteger(hashCategoryId) && hashCategoryId > 0) {
+    const scopedRows = Array.from(
+      document.querySelectorAll(
+        `[data-id="${hashCategoryId}"],[data-id="${hashCategoryId}"].category.content,[data-id="${hashCategoryId}"][class*="category"][class*="content"]`
+      )
+    );
+    for (const row of scopedRows) {
+      const text = String(row?.innerText || row?.textContent || '').trim();
+      if (!text) continue;
+      const detected = detectSubSubjectCodeFromText(text);
+      if (detected) return detected;
+    }
+  }
+
   const selector =
-    'h1,h2,h3,[class*="title"],[class*="heading"],[class*="breadcrumb"],[class*="header"],[class*="category"],[class*="subtitle"]';
-  const nodes = Array.from(document.querySelectorAll(selector)).slice(0, 40);
+    'h1,h2,h3,[class*="question-set-title"],[class*="page-title"],[class*="breadcrumb"],[class*="header"]';
+  const nodes = Array.from(document.querySelectorAll(selector)).slice(0, 30);
   for (const node of nodes) {
-    const text = node?.innerText?.trim();
+    const text = String(node?.innerText || node?.textContent || '').trim();
     if (!text) continue;
+    if (text.length > 240) continue;
+    if ((text.match(/\n/g) || []).length > 2) continue;
     const detected = detectSubSubjectCodeFromText(text);
     if (detected) return detected;
   }
@@ -230,14 +268,12 @@ function detectSubSubjectCodeFromCurrentPage() {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .slice(0, 80);
+    .slice(0, 30);
   for (const line of lines) {
+    if (line.length > 180) continue;
     const detected = detectSubSubjectCodeFromText(line);
     if (detected) return detected;
   }
-
-  const bodyDetected = detectSubSubjectCodeFromText(document.body?.innerText || '');
-  if (bodyDetected) return bodyDetected;
   return null;
 }
 
@@ -828,6 +864,53 @@ function extractCategoryCandidatesFromCurrentPage(sessionId) {
   return dedupeNumeric(values);
 }
 
+function extractCategoryStructureFromCurrentPage(sessionId) {
+  const rowNodes = Array.from(
+    document.querySelectorAll('[data-id].category.content,[data-id][class*="category"][class*="content"]')
+  );
+  const rowEntries = rowNodes
+    .map((row) => {
+      const id = Number(row.getAttribute('data-id'));
+      if (!Number.isInteger(id) || id <= 0) return null;
+      const className = String(row.className || '').toLowerCase();
+      const hasParentMarker =
+        className.includes(' parent') ||
+        className.startsWith('parent') ||
+        Boolean(row.querySelector('[class*="parent-name"]'));
+      const hasChildMarker =
+        className.includes(' child') ||
+        className.startsWith('child') ||
+        Boolean(row.querySelector('[class*="child-name"],[class*="indented"]'));
+      return {
+        id,
+        isParent: hasParentMarker,
+        isChild: hasChildMarker,
+      };
+    })
+    .filter(Boolean);
+
+  const fromRows = dedupeNumeric(rowEntries.map((entry) => entry.id));
+  const fromRoutes = extractCategoryCandidatesFromCurrentPage(sessionId);
+  const allIds = dedupeNumeric([...fromRows, ...fromRoutes]);
+  const parentIds = dedupeNumeric(rowEntries.filter((entry) => entry.isParent).map((entry) => entry.id));
+  const childIds = dedupeNumeric(rowEntries.filter((entry) => entry.isChild).map((entry) => entry.id));
+
+  return {
+    allIds,
+    parentIds,
+    childIds,
+    preferredIds: childIds.length ? childIds : allIds,
+  };
+}
+
+function filterParentAggregateIds(values = [], parentIds = [], childIds = []) {
+  const normalized = dedupeNumeric(values);
+  if (!childIds.length || !parentIds.length) return normalized;
+  const parentSet = new Set(parentIds.map((id) => Number(id)));
+  const childSet = new Set(childIds.map((id) => Number(id)));
+  return normalized.filter((id) => !parentSet.has(Number(id)) || childSet.has(Number(id)));
+}
+
 function extractCategorySubCodesFromCurrentPage(sessionId) {
   const out = new Map();
 
@@ -1012,10 +1095,51 @@ async function scrapePart1(cfg = CONFIG) {
   if (!res.ok) throw new Error(`Activities API error: ${res.status}`);
   const allActivities = await res.json();
 
-  const rawAnswers = allActivities.filter(a => a.activity_type === 'answer');
-  const answers = rawAnswers.filter(isCompletedAnswerActivity);
-  const skippedIncomplete = rawAnswers.length - answers.length;
-  const sampleTimestamp = answers.find((item) => item?.activity_data?.client_created_at)?.activity_data?.client_created_at;
+  const directAnswerPayloads = allActivities
+    .filter((a) => a?.activity_type === 'answer')
+    .map((a) => a?.activity_data || {})
+    .filter((d) => d && typeof d === 'object');
+  const sessionSnapshotAnswerPayloads = allActivities
+    .filter((a) => a?.activity_type === 'user_configured_quiz_session')
+    .flatMap((a) => {
+      const sessionData = a?.activity_data || {};
+      const sessionId = Number(sessionData?.id);
+      const answers = Array.isArray(sessionData?.answers) ? sessionData.answers : [];
+      return answers.map((ans) => ({
+        ...ans,
+        user_configured_quiz_session_id:
+          ans?.user_configured_quiz_session_id ||
+          (Number.isInteger(sessionId) ? sessionId : null),
+        content_package_id: ans?.content_package_id || sessionData?.content_package_id || null,
+      }));
+    })
+    .filter((d) => d && typeof d === 'object');
+
+  const mergedAnswerPayloads = [...directAnswerPayloads, ...sessionSnapshotAnswerPayloads];
+  const dedupedAnswerPayloads = [];
+  const dedupedByKey = new Map();
+  for (const payload of mergedAnswerPayloads) {
+    const key = answerPayloadDedupKey(payload);
+    const current = dedupedByKey.get(key);
+    if (!current) {
+      dedupedByKey.set(key, payload);
+      continue;
+    }
+    const currentIncomplete = !isCompletedAnswerPayload(current);
+    const nextIncomplete = !isCompletedAnswerPayload(payload);
+    if (currentIncomplete && !nextIncomplete) {
+      dedupedByKey.set(key, payload);
+      continue;
+    }
+    const currentTs = Date.parse(current?.client_created_at || '') || 0;
+    const nextTs = Date.parse(payload?.client_created_at || '') || 0;
+    if (nextTs > currentTs) dedupedByKey.set(key, payload);
+  }
+  for (const payload of dedupedByKey.values()) dedupedAnswerPayloads.push(payload);
+
+  const answers = dedupedAnswerPayloads.filter(isCompletedAnswerPayload);
+  const skippedIncomplete = dedupedAnswerPayloads.length - answers.length;
+  const sampleTimestamp = answers.find((item) => item?.client_created_at)?.client_created_at;
   const gmatTimestampTimezone = inferTimestampTimezoneLabel(sampleTimestamp);
   console.log(
     `  ${answers.length} answer activities found` +
@@ -1027,9 +1151,9 @@ async function scrapePart1(cfg = CONFIG) {
 
   // Group by session: build sid → {date, avgSec, total, errors, catIds, questions[]}
   const apiSessions = {};
-  for (const a of answers) {
-    const d = a.activity_data;
+  for (const d of answers) {
     const sid = d.user_configured_quiz_session_id;
+    if (!sid) continue;
     if (!apiSessions[sid]) apiSessions[sid] = { sid, questions: [], catIds: new Set() };
     const s = apiSessions[sid];
     const idCandidates = extractIdCandidatesFromActivity(d);
@@ -1094,20 +1218,36 @@ async function scrapePart1(cfg = CONFIG) {
     }
 
     await navigateHashSafe(`custom-quiz/${sid}`, cfg.pageWaitMs);
-    const discoveredCategoryIds = extractCategoryCandidatesFromCurrentPage(sid);
+    const rootCategoryStructure = extractCategoryStructureFromCurrentPage(sid);
+    const discoveredCategoryIds = rootCategoryStructure.allIds;
+    const preferredRootCategoryIds = rootCategoryStructure.preferredIds;
+    const parentRootCategoryIds = rootCategoryStructure.parentIds;
+    const childRootCategoryIds = rootCategoryStructure.childIds;
     const pageSubCodeHints = extractCategorySubCodesFromCurrentPage(sid);
 
-    const apiCatIds = Array.from(apiS.catIds || [])
+    const rawApiCatIds = Array.from(apiS.catIds || [])
       .map((id) => Number(id))
       .filter((id) => Number.isInteger(id))
       .sort((a, b) => a - b);
+    const apiCatIds = filterParentAggregateIds(rawApiCatIds, parentRootCategoryIds, childRootCategoryIds);
     const derivedParents = apiCatIds.map(parentCategoryFromQuestionCategory).filter(Boolean);
+    const hintedCategoryIds = filterParentAggregateIds(
+      Array.from(pageSubCodeHints.keys()),
+      parentRootCategoryIds,
+      childRootCategoryIds
+    );
+    const derivedParentCandidates = filterParentAggregateIds(
+      derivedParents,
+      parentRootCategoryIds,
+      childRootCategoryIds
+    );
     const initialCategoryCandidates = dedupeNumeric([
       cfg.reviewCategoryId,
-      ...discoveredCategoryIds,
-      ...Array.from(pageSubCodeHints.keys()),
+      ...preferredRootCategoryIds,
+      ...filterParentAggregateIds(discoveredCategoryIds, parentRootCategoryIds, childRootCategoryIds),
+      ...hintedCategoryIds,
       ...apiCatIds,
-      ...derivedParents,
+      ...derivedParentCandidates,
     ]);
 
     let reviewCategoryId = null;
@@ -1153,7 +1293,7 @@ async function scrapePart1(cfg = CONFIG) {
         )
           .trim()
           .toUpperCase();
-        const resolvedSubCode = rowHintCode || apiSubCode || pageSubCode || '';
+        const resolvedSubCode = rowHintCode || pageSubCode || apiSubCode || '';
         const resolvedGroup =
           subSubjectGroup(resolvedSubCode) ||
           subSubjectGroup(fromApi?.subject_sub || normalizeSubSubject(fromApi)) ||
@@ -1168,9 +1308,17 @@ async function scrapePart1(cfg = CONFIG) {
           topic: currentTopic || diTopic || null,
         };
       });
-      const discoveredNestedIds = extractCategoryCandidatesFromCurrentPage(sid);
+      const nestedStructure = extractCategoryStructureFromCurrentPage(sid);
+      const discoveredNestedIds = nestedStructure.preferredIds.length
+        ? nestedStructure.preferredIds
+        : nestedStructure.allIds;
       enqueueCategoryCandidates(categoryQueue, seenQueuedCategories, discoveredNestedIds);
       mergeCategorySubCodeHints(pageSubCodeHints, extractCategorySubCodesFromCurrentPage(sid));
+      enqueueCategoryCandidates(
+        categoryQueue,
+        seenQueuedCategories,
+        Array.from(pageSubCodeHints.keys())
+      );
       if (navResult.hadPageError && !rows.length) {
         console.warn(`  ⚠️ ${sid} — category ${candidate} caused page error (${navResult.newPageErrors}), trying next.`);
         continue;
@@ -1220,7 +1368,7 @@ async function scrapePart1(cfg = CONFIG) {
         )
           .trim()
           .toUpperCase();
-        const resolvedSubCode = rowHintCode || apiSubCode || fallbackPageCode || '';
+        const resolvedSubCode = rowHintCode || fallbackPageCode || apiSubCode || '';
         const resolvedGroup =
           subSubjectGroup(resolvedSubCode) ||
           subSubjectGroup(fromApi?.subject_sub || normalizeSubSubject(fromApi)) ||
