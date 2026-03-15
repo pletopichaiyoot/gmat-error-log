@@ -448,9 +448,12 @@ app.post('/api/open-question', async (req, res) => {
       return;
     }
 
+    const rawSource = String(req.body?.source || '').trim();
+    const sourcePreset = rawSource ? resolveSourcePreset(rawSource) : null;
     const result = await openUrlInOpenBrowser({
       cdpUrl: req.body?.cdpUrl,
       url: targetUrl,
+      appUrl: sourcePreset?.appUrl || '',
     });
 
     res.json({

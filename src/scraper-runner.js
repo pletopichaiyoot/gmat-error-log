@@ -60,6 +60,31 @@ function trimTrailingSlash(value) {
   return String(value || '').replace(/\/+$/, '');
 }
 
+function isAppPath(pathname) {
+  return /^\/app\/[^/]+/i.test(String(pathname || ''));
+}
+
+function resolveNavigationTargetUrl(targetUrl, appUrl) {
+  const targetParsed = parseUrlSafe(targetUrl);
+  if (!targetParsed) return targetUrl;
+
+  const hashRoute = String(targetParsed.hash || '').replace(/^#/, '');
+  const isCustomQuizHash = /^custom-quiz\/\d+/i.test(hashRoute);
+  const targetPath = trimTrailingSlash(targetParsed.pathname || '/');
+  const isRootPath = !targetPath;
+  if (!isCustomQuizHash || !isRootPath) return targetUrl;
+
+  const appParsed = parseUrlSafe(appUrl);
+  if (!appParsed) return targetUrl;
+  if (targetParsed.origin !== appParsed.origin) return targetUrl;
+  if (!isAppPath(appParsed.pathname)) return targetUrl;
+
+  const next = new URL(targetParsed.toString());
+  next.pathname = appParsed.pathname;
+  next.search = '';
+  return next.toString();
+}
+
 function matchesAppEntry(pageUrl, appUrl) {
   const pageParsed = parseUrlSafe(pageUrl);
   const appParsed = parseUrlSafe(appUrl);
@@ -378,6 +403,7 @@ async function runScrapeFromOpenBrowser(options = {}) {
 async function openUrlInOpenBrowser(options = {}) {
   const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
   const targetUrl = String(options.url || '').trim();
+  const appUrlHint = String(options.appUrl || '').trim();
   if (!targetUrl) {
     throw new Error('Missing target URL.');
   }
@@ -396,21 +422,35 @@ async function openUrlInOpenBrowser(options = {}) {
 
     const contexts = browser.contexts();
     const pages = contexts.flatMap((ctx) => ctx.pages());
-    const gmatPage = pages.find((entry) => /gmatofficialpractice\.mba\.com/i.test(entry.url()));
+    const gmatPages = pages.filter((entry) => /gmatofficialpractice\.mba\.com/i.test(entry.url()));
+    const appPage = gmatPages.find((entry) => {
+      const parsed = parseUrlSafe(entry.url());
+      return parsed ? isAppPath(parsed.pathname) : false;
+    });
+    const gmatPage = appPage || gmatPages[0] || null;
     const context = gmatPage?.context?.() || contexts[0] || null;
 
     if (!context) {
       throw new Error('No Chrome browser context found. Open Chrome (CDP) first.');
     }
 
+    const resolvedTargetUrl = resolveNavigationTargetUrl(
+      targetUrl,
+      gmatPage?.url?.() || appUrlHint
+    );
+
     page = await context.newPage();
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+    await page.goto(resolvedTargetUrl, { waitUntil: 'domcontentloaded' });
     await page.bringToFront();
 
     return {
       ok: true,
       openedUrl: page.url(),
       debug: {
+        targetUrl,
+        resolvedTargetUrl,
+        appUrlHint: appUrlHint || null,
+        activeGmatPageUrl: gmatPage?.url?.() || null,
         requestedCdpUrl,
         cdpUrl: connectedCdpUrl,
         attemptedCdpUrls,

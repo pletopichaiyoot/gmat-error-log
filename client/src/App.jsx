@@ -19,18 +19,6 @@ function formatMaybe(value) {
   return value === null || value === undefined || value === '' ? '-' : value;
 }
 
-function isDisplayableErrorRow(row) {
-  if (!row) return false;
-  const myAnswer = String(row.my_answer || '').trim();
-  const correctAnswer = String(row.correct_answer || '').trim();
-  return Boolean(myAnswer || correctAnswer);
-}
-
-function filterDisplayableErrors(rows) {
-  if (!Array.isArray(rows)) return [];
-  return rows.filter(isDisplayableErrorRow);
-}
-
 function formatDurationSeconds(value) {
   if (value === null || value === undefined || value === '') return '-';
 
@@ -184,6 +172,16 @@ function App() {
     };
   }, [runs, selectedRunId]);
 
+  const sourceAppUrlByLabel = useMemo(() => {
+    const map = new Map();
+    for (const source of sources) {
+      const label = String(source?.label || '').trim().toLowerCase();
+      const appUrl = String(source?.appUrl || '').trim();
+      if (label && appUrl) map.set(label, appUrl);
+    }
+    return map;
+  }, [sources]);
+
   async function loadSources() {
     const data = await fetchJson('/api/sources');
     const rows = data.sources || [];
@@ -249,7 +247,7 @@ function App() {
     params.set('sortOrder', customSort.order);
 
     const data = await fetchJson(`/api/errors?${params.toString()}`);
-    setErrors(filterDisplayableErrors(data.errors || []));
+    setErrors(Array.isArray(data.errors) ? data.errors : []);
     setErrorPagination({
       page: data.page,
       pageSize: data.pageSize,
@@ -699,7 +697,9 @@ function App() {
       const nextAnalysis = analysis
         ? {
             ...analysis,
-            slowWrongQuestions: filterDisplayableErrors(analysis.slowWrongQuestions || []),
+            slowWrongQuestions: Array.isArray(analysis.slowWrongQuestions)
+              ? analysis.slowWrongQuestions
+              : [],
           }
         : null;
       setSessionAnalysis({
@@ -810,16 +810,34 @@ function App() {
     const sessionId = String(row?.session_external_id || '').trim();
     const catId = String(row?.cat_id || '').trim();
     const qId = String(row?.q_id || '').trim();
+    const sourceLabel = String(row?.source || '').trim().toLowerCase();
     const reviewHash = `#custom-quiz/${sessionId}/review/categories/${catId}/${qId}`;
 
     if (sessionId && catId && qId) {
       if (rawUrl) {
         try {
           const parsed = new URL(rawUrl);
+          if (parsed.pathname && parsed.pathname !== '/') {
+            return `${parsed.origin}${parsed.pathname}${reviewHash}`;
+          }
+          const sourceAppUrl = sourceAppUrlByLabel.get(sourceLabel);
+          if (sourceAppUrl) {
+            const sourceParsed = new URL(sourceAppUrl);
+            return `${sourceParsed.origin}${sourceParsed.pathname}${reviewHash}`;
+          }
           return `${parsed.origin}${parsed.pathname}${reviewHash}`;
         } catch (_error) {
           const originPath = rawUrl.replace(/[#?].*$/, '');
           if (originPath) return `${originPath}${reviewHash}`;
+        }
+      }
+      const sourceAppUrl = sourceAppUrlByLabel.get(sourceLabel);
+      if (sourceAppUrl) {
+        try {
+          const parsed = new URL(sourceAppUrl);
+          return `${parsed.origin}${parsed.pathname}${reviewHash}`;
+        } catch (_error) {
+          // Fallback below.
         }
       }
       return `https://gmatofficialpractice.mba.com/${reviewHash}`;
@@ -845,6 +863,7 @@ function App() {
         body: JSON.stringify({
           questionUrl,
           cdpUrl: DEFAULT_CDP_URL,
+          source: row?.source || '',
         }),
       });
       setStatus({ message: `Opened question in Chrome CDP: ${result.openedUrl || questionUrl}`, isError: false });
@@ -867,34 +886,16 @@ function App() {
           <Button type="button" onClick={() => setSyncCenterOpen(true)}>
             Sync GMAT Practice
           </Button>
-          <p className={`status${status.isError ? ' error' : ''}`}>{status.message}</p>
-        </div>
-      </Card>
-
-      <Card className="card sync-summary-card">
-        <div className="sync-summary-head">
-          <h2>Current Dataset</h2>
-          <Button variant="outline" type="button" onClick={() => setSyncCenterOpen(true)}>
-            Manage Sync
+          <Button variant="outline" asChild>
+            <a
+              href="https://gmat.targettestprep.com/gmat_focus_score_chart_and_calculator"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Open Score Calculator
+            </a>
           </Button>
-        </div>
-        <div className="summary-grid">
-          <div className="summary-item">
-            <span>Run ID</span>
-            <strong>{summary.id}</strong>
-          </div>
-          <div className="summary-item">
-            <span>Sessions</span>
-            <strong>{summary.total_sessions || 0}</strong>
-          </div>
-          <div className="summary-item">
-            <span>Questions</span>
-            <strong>{summary.total_questions || 0}</strong>
-          </div>
-          <div className="summary-item">
-            <span>Errors</span>
-            <strong>{summary.total_errors || 0}</strong>
-          </div>
+          <p className={`status${status.isError ? ' error' : ''}`}>{status.message}</p>
         </div>
       </Card>
 
@@ -1866,6 +1867,7 @@ function App() {
                     <option value="">Not set</option>
                     <option value="Conceptual Gap">Conceptual Gap</option>
                     <option value="Misread Question">Misread Question</option>
+                    <option value="Misread Passage">Misread Passage</option>
                     <option value="Logic Breakdown">Logic Breakdown</option>
                     <option value="Careless Error">Careless Error</option>
                     <option value="Timing Pressure">Timing Pressure</option>

@@ -142,6 +142,77 @@ function boolToInt(value) {
   return value ? 1 : 0;
 }
 
+function normalizedTextOrNull(value) {
+  const text = String(value || '').trim();
+  return text || null;
+}
+
+function pushIndexedAnnotation(map, key, value) {
+  if (!key) return;
+  const current = map.get(key) || [];
+  current.push(value);
+  map.set(key, current);
+}
+
+function buildAnnotationIndex(rows = []) {
+  const byQid = new Map();
+  const byQcodeCat = new Map();
+  const byQcode = new Map();
+
+  for (const row of rows) {
+    const mistakeType = normalizedTextOrNull(row?.mistake_type);
+    const notes = normalizedTextOrNull(row?.notes);
+    if (!mistakeType && !notes) continue;
+
+    const item = {
+      mistake_type: mistakeType,
+      notes,
+      used: false,
+    };
+
+    const qid = String(row?.q_id || '').trim();
+    const qcode = String(row?.q_code || '').trim();
+    const catId = String(row?.cat_id || '').trim();
+
+    if (qid) pushIndexedAnnotation(byQid, qid, item);
+    if (qcode && catId) pushIndexedAnnotation(byQcodeCat, `${qcode}|${catId}`, item);
+    if (qcode) pushIndexedAnnotation(byQcode, qcode, item);
+  }
+
+  return { byQid, byQcodeCat, byQcode };
+}
+
+function takeUnused(items = []) {
+  const hit = items.find((item) => item && !item.used);
+  if (!hit) return null;
+  hit.used = true;
+  return hit;
+}
+
+function pickPreservedAnnotation(index, question = {}) {
+  if (!index) return null;
+
+  const qid = String(question?.q_id || '').trim();
+  if (qid) {
+    const fromQid = takeUnused(index.byQid.get(qid) || []);
+    if (fromQid) return fromQid;
+  }
+
+  const qcode = String(question?.q_code || '').trim();
+  const catId = String(question?.cat_id || '').trim();
+  if (qcode && catId) {
+    const fromQcodeCat = takeUnused(index.byQcodeCat.get(`${qcode}|${catId}`) || []);
+    if (fromQcodeCat) return fromQcodeCat;
+  }
+
+  if (qcode) {
+    const fromQcode = takeUnused(index.byQcode.get(qcode) || []);
+    if (fromQcode) return fromQcode;
+  }
+
+  return null;
+}
+
 async function saveScrapeResult(data, scrapeOptions = {}) {
   const sessions = Array.isArray(data.sessions) ? data.sessions : [];
   const totalQuestions = sessions.reduce((sum, session) => sum + (session.stats?.total_q_api || 0), 0);
@@ -175,6 +246,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
   for (const session of sessions) {
     const stats = session.stats || {};
     let sessionId = null;
+    let preservedAnnotationIndex = null;
 
     const existing = await get(
       `
@@ -189,6 +261,20 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     );
 
     if (existing?.id) {
+      const existingAnnotations = await all(
+        `
+          SELECT q_id, q_code, cat_id, mistake_type, notes
+          FROM question_attempts
+          WHERE session_id = ?
+            AND (
+              COALESCE(TRIM(mistake_type), '') <> ''
+              OR COALESCE(TRIM(notes), '') <> ''
+            )
+        `,
+        [existing.id]
+      );
+      preservedAnnotationIndex = buildAnnotationIndex(existingAnnotations);
+
       await run(
         `
           UPDATE sessions
@@ -265,6 +351,10 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     const attempts = Array.isArray(session.questions) ? session.questions : [];
 
     for (const q of attempts) {
+      const preserved = pickPreservedAnnotation(preservedAnnotationIndex, q);
+      const mistakeType = normalizedTextOrNull(q.mistake_type) || preserved?.mistake_type || null;
+      const notes = normalizedTextOrNull(q.notes) || preserved?.notes || null;
+
       await run(
         `
           INSERT INTO question_attempts (
@@ -282,8 +372,10 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
             time_sec,
             my_answer,
             correct_answer,
-            topic
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            topic,
+            mistake_type,
+            notes
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         [
           runId,
@@ -301,6 +393,8 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           q.my_answer || null,
           q.correct_answer || null,
           q.topic || null,
+          mistakeType,
+          notes,
         ]
       );
     }
@@ -1049,17 +1143,19 @@ async function getSessionAnalysis(sessionId) {
   const slowWrongQuestions = await all(
     `
       SELECT
-        id,
-        q_code,
-        difficulty,
+        q.id,
+        q.q_code,
+        q.difficulty,
         ${topicExpr} AS topic,
-        my_answer,
-        correct_answer,
-        time_sec,
-        question_url,
-        mistake_type,
-        notes
+        q.my_answer,
+        q.correct_answer,
+        q.time_sec,
+        q.question_url,
+        q.mistake_type,
+        q.notes,
+        s.source
       FROM question_attempts q
+      INNER JOIN sessions s ON s.id = q.session_id
       WHERE q.session_id = ? AND q.correct = 0
       ORDER BY COALESCE(q.time_sec, 0) DESC, q.id DESC
     `,

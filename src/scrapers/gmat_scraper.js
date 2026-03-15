@@ -673,10 +673,18 @@ function toAbsoluteQuestionUrl(routeOrUrl) {
   if (!routeOrUrl) return null;
   const raw = String(routeOrUrl).trim().replace(/##+/g, '#');
   if (!raw) return null;
+  const appPath = String(window?.location?.pathname || '').trim();
+  const appPrefix = /^\/app\/[^/]+/i.test(appPath) ? appPath : '';
   if (/^https?:\/\//i.test(raw)) return raw;
-  if (raw.startsWith('#')) return `https://gmatofficialpractice.mba.com/${raw}`;
+  if (raw.startsWith('#')) {
+    if (appPrefix) return `https://gmatofficialpractice.mba.com${appPrefix}${raw}`;
+    return `https://gmatofficialpractice.mba.com/${raw}`;
+  }
   if (raw.startsWith('/')) return `https://gmatofficialpractice.mba.com${raw}`;
-  if (raw.startsWith('custom-quiz/')) return `https://gmatofficialpractice.mba.com/#${raw}`;
+  if (raw.startsWith('custom-quiz/')) {
+    if (appPrefix) return `https://gmatofficialpractice.mba.com${appPrefix}#${raw}`;
+    return `https://gmatofficialpractice.mba.com/#${raw}`;
+  }
   return null;
 }
 
@@ -1667,6 +1675,99 @@ async function scrapePart2(sessions, cfg = CONFIG) {
   let skippedNotReady = 0;
   let skippedNotWrong = 0;
   let skippedMismatchedCode = 0;
+  const parseReviewRouteFromNode = (node) => {
+    if (!node?.getAttribute) return null;
+    const attrs = ['href', 'data-href', 'data-url', 'data-link', 'onclick'];
+    for (const attr of attrs) {
+      const value = node.getAttribute(attr);
+      const parsed = parseReviewRoute(value);
+      if (parsed) return parsed;
+    }
+    return null;
+  };
+
+  const findReviewRouteByQCodeOnCurrentPage = (sessionId, expectedQCode) => {
+    const wanted = String(expectedQCode || '').trim();
+    if (!wanted) return null;
+
+    const reviewNodes = Array.from(
+      document.querySelectorAll(
+        'a[href*="review/categories/"],[data-href*="review/categories/"],[data-url*="review/categories/"],[data-link*="review/categories/"],[onclick*="review/categories/"]'
+      )
+    );
+
+    for (const node of reviewNodes) {
+      const route = parseReviewRouteFromNode(node);
+      if (!route?.q_id) continue;
+      if (Number(route.session_id) !== Number(sessionId)) continue;
+
+      let row = node;
+      for (let depth = 0; depth < 10; depth += 1) {
+        if (!row) break;
+        const preview = String(row.querySelector?.('[class*="preview"]')?.innerText || '').trim();
+        const qCodeFromPreview = preview.match(/\b(\d{6})\b/)?.[1] ?? null;
+        if (qCodeFromPreview) {
+          if (qCodeFromPreview === wanted) return route;
+          break;
+        }
+        row = row.parentElement;
+      }
+
+      const qCodeFromNode = String(node.innerText || node.textContent || '').match(/\b(\d{6})\b/)?.[1] ?? null;
+      if (qCodeFromNode === wanted) return route;
+    }
+
+    return null;
+  };
+
+  const tryOpenReviewByQCodeFallback = async ({
+    sessionId,
+    reviewCatCandidates,
+    expectedQCode,
+  }) => {
+    const wanted = String(expectedQCode || '').trim();
+    if (!wanted) return null;
+
+    for (const candidateCat of reviewCatCandidates) {
+      await navigateHashSafe(`custom-quiz/${sessionId}/categories/${candidateCat}`, cfg.pageWaitMs);
+
+      const route = findReviewRouteByQCodeOnCurrentPage(sessionId, wanted);
+      if (!route?.q_id || !route?.cat_id) continue;
+
+      const reviewHash = `custom-quiz/${sessionId}/review/categories/${route.cat_id}/${route.q_id}`;
+      let navResult = await navigateHashSafe(reviewHash, cfg.pageWaitMs);
+      let readyState = await waitForReviewReady(
+        sessionId,
+        route.cat_id,
+        route.q_id,
+        cfg,
+        wanted
+      );
+
+      if (!readyState?.ready && navResult.hadPageError) {
+        console.warn(
+          `  ↻ Retry ${sessionId}/${route.q_id}: reopening q_code fallback URL after page error (${navResult.newPageErrors})`
+        );
+        navResult = await navigateHashSafe(reviewHash, cfg.pageWaitMs);
+        readyState = await waitForReviewReady(
+          sessionId,
+          route.cat_id,
+          route.q_id,
+          cfg,
+          wanted
+        );
+      }
+
+      if (readyState?.ready) {
+        return {
+          routeQId: readyState.routeQId || String(route.q_id),
+          routeCatId: readyState.routeCatId || Number(route.cat_id),
+        };
+      }
+    }
+
+    return null;
+  };
 
   for (let i = 0; i < toScrape.length; i++) {
     const {
@@ -1682,10 +1783,14 @@ async function scrapePart2(sessions, cfg = CONFIG) {
       api_user_answer: apiUserAnswer,
     } = toScrape[i];
     const diContext = isDiReviewContext(source, session_subject, cat_id, review_category_id);
-    const qIdCandidates = Array.from(
-      new Set([q_id, ...(Array.isArray(q_id_candidates) ? q_id_candidates : [])].filter(Boolean).map((id) => String(id)))
-    );
     const savedRoute = parseReviewRoute(savedQuestionUrl);
+    const qIdCandidates = Array.from(
+      new Set(
+        [q_id, savedRoute?.q_id, ...(Array.isArray(q_id_candidates) ? q_id_candidates : [])]
+          .filter(Boolean)
+          .map((id) => String(id))
+      )
+    );
     const reviewCatCandidates = dedupeNumeric([
       savedRoute?.cat_id,
       cat_id,
@@ -1744,6 +1849,22 @@ async function scrapePart2(sessions, cfg = CONFIG) {
         }
       }
       if (ready) break;
+    }
+
+    if (!ready && expectedQCode) {
+      const fallbackReady = await tryOpenReviewByQCodeFallback({
+        sessionId: session_id,
+        reviewCatCandidates,
+        expectedQCode,
+      });
+      if (fallbackReady?.routeQId && fallbackReady?.routeCatId) {
+        ready = true;
+        usedQId = fallbackReady.routeQId;
+        usedReviewCatId = fallbackReady.routeCatId;
+        console.warn(
+          `  ↻ Recovered ${session_id}/${q_id} via q_code fallback (q_code=${expectedQCode}, q_id=${usedQId}, cat=${usedReviewCatId})`
+        );
+      }
     }
 
     if (!ready || !usedReviewCatId || !usedQId) {
