@@ -132,6 +132,7 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_questions_correct ON question_attempts(correct)');
   await run('CREATE INDEX IF NOT EXISTS idx_questions_topic ON question_attempts(topic)');
   await run('CREATE INDEX IF NOT EXISTS idx_questions_difficulty ON question_attempts(difficulty)');
+  await backfillSparseQuestionAttempts();
 }
 
 function safeInt(value) {
@@ -145,6 +146,182 @@ function boolToInt(value) {
 function normalizedTextOrNull(value) {
   const text = String(value || '').trim();
   return text || null;
+}
+
+function toNullableInteger(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) return null;
+  return parsed;
+}
+
+function parseReviewRouteFromUrl(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return null;
+  const match = value.match(/custom-quiz\/(\d+)\/review\/categories\/(\d+)\/([^/?#]+)/i);
+  if (!match) return null;
+  return {
+    sessionExternalId: match[1],
+    catId: toNullableInteger(match[2]),
+    qId: String(match[3] || '').trim() || null,
+  };
+}
+
+function baseUrlWithoutHash(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return '';
+  return value.split('#')[0].trim();
+}
+
+function buildReviewUrl(baseUrl, sessionExternalId, catId, qId) {
+  const base = String(baseUrl || '').trim();
+  const session = String(sessionExternalId || '').trim();
+  const questionId = String(qId || '').trim();
+  const categoryId = toNullableInteger(catId);
+  if (!base || !session || !questionId || !Number.isInteger(categoryId)) return '';
+  return `${base}#custom-quiz/${session}/review/categories/${categoryId}/${questionId}`;
+}
+
+function fallbackTopicFromSubjectSubCodes(subjectSubRaw, subjectSub) {
+  const code = String(subjectSubRaw || subjectSub || '').trim().toUpperCase();
+  if (!code) return null;
+  if (code === 'PS') return 'Problem Solving';
+  if (code === 'DS') return 'Data Sufficiency';
+  if (code === 'MSR') return 'Multi-Source Reasoning';
+  if (code === 'TA') return 'Table Analysis';
+  if (code === 'GI') return 'Graphics Interpretation';
+  if (code === 'TPA') return 'Two-Part Analysis';
+  return null;
+}
+
+async function backfillSparseQuestionAttempts({ sessionIds = [] } = {}) {
+  const scopedSessionIds = Array.isArray(sessionIds)
+    ? Array.from(
+        new Set(
+          sessionIds
+            .map((id) => toNullableInteger(id))
+            .filter((id) => Number.isInteger(id) && id > 0)
+        )
+      )
+    : [];
+
+  const scopeClause = scopedSessionIds.length
+    ? `AND q.session_id IN (${scopedSessionIds.map(() => '?').join(', ')})`
+    : '';
+
+  const sparseRows = await all(
+    `
+      SELECT
+        q.id,
+        q.session_id,
+        q.q_id,
+        q.q_code,
+        q.cat_id,
+        q.subject_sub,
+        q.subject_sub_raw,
+        q.topic,
+        q.question_url,
+        s.source,
+        s.session_external_id
+      FROM question_attempts q
+      INNER JOIN sessions s ON s.id = q.session_id
+      WHERE COALESCE(TRIM(q.q_id), '') <> ''
+        AND (
+          COALESCE(TRIM(q.q_code), '') = ''
+          OR COALESCE(TRIM(q.topic), '') = ''
+          OR COALESCE(TRIM(q.question_url), '') = ''
+        )
+      ${scopeClause}
+      ORDER BY q.id ASC
+    `,
+    scopedSessionIds
+  );
+
+  let updated = 0;
+
+  for (const row of sparseRows) {
+    const donor = await get(
+      `
+        SELECT
+          q2.q_code,
+          q2.cat_id,
+          q2.topic,
+          q2.question_url,
+          s2.source
+        FROM question_attempts q2
+        INNER JOIN sessions s2 ON s2.id = q2.session_id
+        WHERE q2.id <> ?
+          AND q2.q_id = ?
+          AND (
+            COALESCE(TRIM(q2.q_code), '') <> ''
+            OR COALESCE(TRIM(q2.topic), '') <> ''
+            OR COALESCE(TRIM(q2.question_url), '') <> ''
+            OR q2.cat_id IS NOT NULL
+          )
+        ORDER BY
+          CASE WHEN COALESCE(s2.source, '') = COALESCE(?, '') THEN 0 ELSE 1 END,
+          CASE WHEN COALESCE(TRIM(q2.question_url), '') <> '' THEN 0 ELSE 1 END,
+          q2.id DESC
+        LIMIT 1
+      `,
+      [row.id, row.q_id, row.source || null]
+    );
+
+    const currentQCode = normalizedTextOrNull(row.q_code);
+    const currentTopic = normalizedTextOrNull(row.topic);
+    const currentUrl = normalizedTextOrNull(row.question_url);
+    const currentCatId = toNullableInteger(row.cat_id);
+
+    const donorQCode = normalizedTextOrNull(donor?.q_code);
+    const donorTopic = normalizedTextOrNull(donor?.topic);
+    const donorUrl = normalizedTextOrNull(donor?.question_url);
+    const donorRoute = parseReviewRouteFromUrl(donorUrl);
+    const donorCatId = toNullableInteger(donor?.cat_id) || donorRoute?.catId || null;
+    const donorBaseUrl = baseUrlWithoutHash(donorUrl);
+    const fallbackTopic = fallbackTopicFromSubjectSubCodes(row.subject_sub_raw, row.subject_sub);
+
+    const nextQCode = currentQCode || donorQCode || null;
+    const nextTopic = currentTopic || donorTopic || fallbackTopic || null;
+    let nextCatId = currentCatId;
+    if (Number.isInteger(donorCatId) && (!Number.isInteger(nextCatId) || !currentUrl)) {
+      nextCatId = donorCatId;
+    }
+
+    let nextUrl = currentUrl;
+    if (!nextUrl) {
+      const rebuilt = buildReviewUrl(donorBaseUrl, row.session_external_id, nextCatId, row.q_id);
+      nextUrl = rebuilt || donorUrl || null;
+    }
+
+    const catChanged =
+      (Number.isInteger(nextCatId) ? nextCatId : null) !==
+      (Number.isInteger(currentCatId) ? currentCatId : null);
+    const changed =
+      nextQCode !== currentQCode ||
+      nextTopic !== currentTopic ||
+      (nextUrl || null) !== (currentUrl || null) ||
+      catChanged;
+
+    if (!changed) continue;
+
+    await run(
+      `
+        UPDATE question_attempts
+        SET
+          q_code = ?,
+          cat_id = ?,
+          topic = ?,
+          question_url = ?
+        WHERE id = ?
+      `,
+      [nextQCode, nextCatId, nextTopic, nextUrl, row.id]
+    );
+    updated += 1;
+  }
+
+  return {
+    scanned: sparseRows.length,
+    updated,
+  };
 }
 
 function pushIndexedAnnotation(map, key, value) {
@@ -242,6 +419,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
   );
 
   const runId = runInsert.lastID;
+  const touchedSessionIds = [];
 
   for (const session of sessions) {
     const stats = session.stats || {};
@@ -348,6 +526,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
       );
       sessionId = sessionInsert.lastID;
     }
+    if (Number.isInteger(sessionId) && sessionId > 0) touchedSessionIds.push(sessionId);
     const attempts = Array.isArray(session.questions) ? session.questions : [];
 
     for (const q of attempts) {
@@ -399,6 +578,8 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
       );
     }
   }
+
+  await backfillSparseQuestionAttempts({ sessionIds: touchedSessionIds });
 
   return get('SELECT * FROM scrape_runs WHERE id = ?', [runId]);
 }
@@ -622,7 +803,9 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'GI' THEN 'Graphics Interpretation'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TPA' THEN 'Two-Part Analysis'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'PS' THEN 'Problem Solving'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'PS' THEN 'Problem Solving'
       ELSE 'Unknown'
     END
   `;
@@ -741,7 +924,9 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'GI' THEN 'Graphics Interpretation'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TPA' THEN 'Two-Part Analysis'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'PS' THEN 'Problem Solving'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'PS' THEN 'Problem Solving'
       ELSE 'Unknown'
     END
   `;
@@ -859,7 +1044,9 @@ async function getPatterns(runId) {
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'GI' THEN 'Graphics Interpretation'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TPA' THEN 'Two-Part Analysis'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'PS' THEN 'Problem Solving'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'PS' THEN 'Problem Solving'
       ELSE 'Unknown'
     END
   `;
@@ -1076,7 +1263,9 @@ async function getSessionAnalysis(sessionId) {
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'GI' THEN 'Graphics Interpretation'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TPA' THEN 'Two-Part Analysis'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'PS' THEN 'Problem Solving'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'Data Sufficiency'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'PS' THEN 'Problem Solving'
       ELSE 'Unknown'
     END
   `;
@@ -1222,6 +1411,7 @@ async function getLatestRunForSource(source) {
 module.exports = {
   dbPath,
   initDb,
+  backfillSparseQuestionAttempts,
   saveScrapeResult,
   listRuns,
   listSessions,

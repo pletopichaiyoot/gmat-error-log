@@ -130,6 +130,13 @@ function shouldInferTopic(source, sessionSubject) {
   return subject === 'CR' || subject === 'RC' || subject === 'VERBAL';
 }
 
+function isQuantReviewContext(source, sessionSubject) {
+  const family = sourceFamily(source);
+  if (family === 'Quant') return true;
+  const subject = String(sessionSubject || '').trim().toUpperCase();
+  return subject === 'QUANT' || subject === 'PS' || subject === 'QUANTITATIVE';
+}
+
 function extractIdCandidatesFromActivity(activityData = {}) {
   const ids = [];
   const contentLocation = String(activityData.content_location || '');
@@ -390,6 +397,12 @@ function topicFromLineLabel(text) {
   return '';
 }
 
+function extractTypedLabelFromText(text) {
+  if (!text) return '';
+  const typed = String(text).match(/(?:question\s*type|type|category|subtopic|topic)\s*:\s*([^\n\r]+)/i)?.[1];
+  return typed ? String(typed).trim() : '';
+}
+
 function extractExplanationText() {
   const selectors = [
     '[class*="explanation"]',
@@ -446,6 +459,12 @@ function fallbackTopicFromExplanation(explanationText) {
 
 function detectTopic(text) {
   const explanationText = extractExplanationText();
+  const explicitFromExplanation = extractTypedLabelFromText(explanationText);
+  if (explicitFromExplanation) {
+    const normalizedFromExplanation = normalizeTopicLabel(explicitFromExplanation);
+    if (normalizedFromExplanation) return normalizedFromExplanation;
+  }
+
   const combined = [explanationText, text].filter(Boolean).join('\n');
 
   const explicitLabel = topicFromLineLabel(combined);
@@ -458,6 +477,100 @@ function detectTopic(text) {
   if (explanationFallback) return explanationFallback;
 
   return '';
+}
+
+function normalizeQuantTopicLabel(rawValue) {
+  if (!rawValue) return '';
+  const text = String(rawValue).toLowerCase();
+  if (!text.trim()) return '';
+
+  if (
+    /probab|combinat|permut|arrangement|counting principle|at least one|exactly one|at most/i.test(text)
+  ) {
+    return 'Counting & Probability';
+  }
+  if (/statistics?\b|data analysis|descriptive statistics/i.test(text)) {
+    return 'Statistics';
+  }
+  if (/geometry\b|coordinate geometry|plane geometry|solid geometry/i.test(text)) {
+    return 'Geometry';
+  }
+  if (/number properties|integers?\b/i.test(text)) {
+    return 'Number Properties';
+  }
+  if (/algebra\b|linear equations?|quadratic/i.test(text)) {
+    return 'Algebra';
+  }
+  if (/arithmetic\b/i.test(text)) {
+    return 'Arithmetic';
+  }
+  if (/word problems?\b|applied problems?\b/i.test(text)) {
+    return 'Word Problems';
+  }
+  if (
+    /mean|median|mode|standard deviation|variance|distribution|quartile|percentile|box-?and-?whisker|histogram/i.test(
+      text
+    )
+  ) {
+    return 'Statistics';
+  }
+  if (
+    /triangle|circle|radius|diameter|circumference|polygon|angle|perimeter|area|volume|parallel|perpendicular|coordinate geometry|slope|distance formula/i.test(
+      text
+    )
+  ) {
+    return 'Geometry';
+  }
+  if (
+    /prime|factor|multiple|divisible|divisibility|remainder|integer|odd|even|greatest common factor|least common multiple|units digit/i.test(
+      text
+    )
+  ) {
+    return 'Number Properties';
+  }
+  if (
+    /rate|work|speed|distance|time|per hour|together.*work|machine.*hour|mixture rate/i.test(text)
+  ) {
+    return 'Rates & Work';
+  }
+  if (
+    /ratio|proportion|percent|percentage|markup|discount|profit|interest|mixture concentration/i.test(
+      text
+    )
+  ) {
+    return 'Ratios & Percents';
+  }
+  if (/exponent|power of|square root|cube root|radical notation/i.test(text)) {
+    return 'Exponents & Roots';
+  }
+  if (/function|f\(x\)|domain|range|sequence|geometric sequence|arithmetic sequence/i.test(text)) {
+    return 'Functions & Sequences';
+  }
+  if (/inequal|equation|system of equations|linear equation|quadratic|absolute value|solve for/i.test(text)) {
+    return 'Algebra';
+  }
+  if (/fraction|decimal|average|weighted average|sum|difference|product|quotient/i.test(text)) {
+    return 'Arithmetic';
+  }
+  if (/word problem|consecutive integer|age problem|mixture problem|digit problem/i.test(text)) {
+    return 'Word Problems';
+  }
+  if (/problem solving|\bps\b/.test(text)) {
+    return 'Problem Solving';
+  }
+  return '';
+}
+
+function detectQuantTopic(text) {
+  const explanationText = extractExplanationText();
+  const explicitFromExplanation = extractTypedLabelFromText(explanationText);
+  if (explicitFromExplanation) {
+    const normalizedFromExplanation = normalizeQuantTopicLabel(explicitFromExplanation);
+    if (normalizedFromExplanation) return normalizedFromExplanation;
+  }
+
+  const combined = [explanationText, text].filter(Boolean).join('\n');
+  return normalizeQuantTopicLabel(combined);
 }
 
 function normalizeAnswerLetter(rawValue) {
@@ -1927,8 +2040,11 @@ async function scrapePart2(sessions, cfg = CONFIG) {
       null;
     const pageSubCode = hintedSubCode || detectSubSubjectCodeFromCurrentPage();
     const diTopicFromPage = diSubtopicFromSubSubject(pageSubCode);
-    const inferredTopic = shouldInferTopic(source, session_subject) ? detectTopic(document.body.innerText) : '';
-    const topic = inferredTopic || diTopicFromPage || '';
+    const verbalTopic = shouldInferTopic(source, session_subject) ? detectTopic(document.body.innerText) : '';
+    const quantTopic = isQuantReviewContext(source, session_subject)
+      ? detectQuantTopic(document.body.innerText)
+      : '';
+    const topic = verbalTopic || quantTopic || diTopicFromPage || '';
 
     wrongAnswers.push({
       session_id,
