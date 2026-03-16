@@ -140,14 +140,40 @@ function isQuantReviewContext(source, sessionSubject) {
 function extractIdCandidatesFromActivity(activityData = {}) {
   const ids = [];
   const contentLocation = String(activityData.content_location || '');
+  const pushId = (value) => {
+    const text = String(value || '').trim();
+    if (text) ids.push(text);
+  };
 
   const questionIdFromLocation = contentLocation.match(/questions:([^/]+)/i)?.[1];
-  if (questionIdFromLocation) ids.push(String(questionIdFromLocation));
+  pushId(questionIdFromLocation);
 
   const answerIdFromLocation = contentLocation.match(/answers:([^/]+)/i)?.[1];
-  if (answerIdFromLocation) ids.push(String(answerIdFromLocation));
+  pushId(answerIdFromLocation);
+  pushId(activityData.question_id);
+  pushId(activityData.questionId);
+  pushId(activityData.answer_id);
+  pushId(activityData.answerId);
+  pushId(activityData.content_item_id);
+  pushId(activityData.contentItemId);
 
   return Array.from(new Set(ids.filter(Boolean))).slice(0, 2);
+}
+
+function toPositiveInteger(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function normalizeCorrectValue(value) {
+  if (value === true || value === false) return value;
+  if (value === 1 || value === '1') return true;
+  if (value === 0 || value === '0') return false;
+  const text = String(value || '').trim().toLowerCase();
+  if (text === 'true') return true;
+  if (text === 'false') return false;
+  return null;
 }
 
 function isCompletedAnswerActivity(activity) {
@@ -164,6 +190,18 @@ function isCompletedAnswerPayload(data) {
   if (incompleteValue === true) return false;
   if (String(incompleteValue || '').toLowerCase() === 'true') return false;
   return true;
+}
+
+function isUsableIncompleteAnswerPayload(data) {
+  if (isCompletedAnswerPayload(data)) return false;
+  const hasSessionId = toPositiveInteger(data?.user_configured_quiz_session_id) !== null;
+  const hasCategoryId = toPositiveInteger(data?.question_category_id) !== null;
+  const hasScoredCorrect = normalizeCorrectValue(data?.correct) !== null;
+  return hasSessionId && hasCategoryId && hasScoredCorrect;
+}
+
+function shouldKeepAnswerPayload(data) {
+  return isCompletedAnswerPayload(data) || isUsableIncompleteAnswerPayload(data);
 }
 
 function answerPayloadDedupKey(data = {}) {
@@ -782,6 +820,56 @@ function parseCategoryRoute(value) {
   };
 }
 
+function extractQuestionCode(rawValue) {
+  const text = String(rawValue || '').replace(/\u00a0/g, ' ').trim();
+  if (!text) return null;
+  return text.match(/\b(\d{6})\b/)?.[1] ?? null;
+}
+
+function extractQuestionCodeFromRow(row, node = null) {
+  const candidates = [];
+  const pushCandidate = (value) => {
+    const text = String(value || '').trim();
+    if (text) candidates.push(text);
+  };
+
+  pushCandidate(row?.querySelector('[class*="preview"]')?.innerText);
+  pushCandidate(row?.querySelector('[class*="preview"]')?.textContent);
+  pushCandidate(node?.innerText);
+  pushCandidate(row?.innerText);
+
+  const attrNames = [
+    'data-preview',
+    'aria-label',
+    'title',
+    'href',
+    'data-href',
+    'data-url',
+    'data-link',
+    'onclick',
+  ];
+  const attrNodes = [
+    row,
+    node,
+    row?.querySelector?.('a[href*="review/categories/"]'),
+    row?.querySelector?.('[data-href*="review/categories/"]'),
+    row?.querySelector?.('[data-url*="review/categories/"]'),
+  ].filter(Boolean);
+
+  for (const candidateNode of attrNodes) {
+    for (const attrName of attrNames) {
+      pushCandidate(candidateNode.getAttribute?.(attrName));
+    }
+  }
+
+  for (const candidate of candidates) {
+    const parsed = extractQuestionCode(candidate);
+    if (parsed) return parsed;
+  }
+
+  return null;
+}
+
 function toAbsoluteQuestionUrl(routeOrUrl) {
   if (!routeOrUrl) return null;
   const raw = String(routeOrUrl).trim().replace(/##+/g, '#');
@@ -1155,8 +1243,7 @@ async function scrapeCategoryRowsFromCurrentPage(cfg = CONFIG, sessionId = null)
       const row = extractRowFromReviewNode(node) || node.parentElement || null;
       if (!row) continue;
 
-      const preview = row.querySelector('[class*="preview"]')?.innerText?.trim() ?? '';
-      const q_code = preview.match(/^(\d{6})\b/)?.[1] ?? null;
+      const q_code = extractQuestionCodeFromRow(row, node);
       const timeStr = row.querySelector('[class*="time"]')?.innerText?.trim() ?? '';
       const confidence = row.querySelector('[class*="confidence"]')?.getAttribute('data-confidence') ?? 'not selected';
       const correctnessEl = row.querySelector('[class*="correctness"]');
@@ -1195,9 +1282,8 @@ async function scrapeCategoryRowsFromCurrentPage(cfg = CONFIG, sessionId = null)
 
       const correct    = !row.querySelector('[class*="correctness"]')?.className?.includes('incorrect');
       const confidence = row.querySelector('[class*="confidence"]')?.getAttribute('data-confidence') ?? 'not selected';
-      const preview    = row.querySelector('[class*="preview"]')?.innerText?.trim() ?? '';
       const timeStr    = row.querySelector('[class*="time"]')?.innerText?.trim() ?? '';
-      const q_code     = preview.match(/^(\d{6})\b/)?.[1] ?? null;
+      const q_code     = extractQuestionCodeFromRow(row, null);
       const reviewRef  = extractReviewTargetFromRow(row);
 
       pushRow({
@@ -1330,6 +1416,15 @@ async function scrapePart1(cfg = CONFIG) {
       dedupedByKey.set(key, payload);
       continue;
     }
+    const currentKeepable = shouldKeepAnswerPayload(current);
+    const nextKeepable = shouldKeepAnswerPayload(payload);
+    if (!currentKeepable && nextKeepable) {
+      dedupedByKey.set(key, payload);
+      continue;
+    }
+    if (currentKeepable && !nextKeepable) {
+      continue;
+    }
     const currentIncomplete = !isCompletedAnswerPayload(current);
     const nextIncomplete = !isCompletedAnswerPayload(payload);
     if (currentIncomplete && !nextIncomplete) {
@@ -1342,13 +1437,17 @@ async function scrapePart1(cfg = CONFIG) {
   }
   for (const payload of dedupedByKey.values()) dedupedAnswerPayloads.push(payload);
 
-  const answers = dedupedAnswerPayloads.filter(isCompletedAnswerPayload);
-  const skippedIncomplete = dedupedAnswerPayloads.length - answers.length;
+  const answers = dedupedAnswerPayloads.filter(shouldKeepAnswerPayload);
+  const completedCount = answers.filter(isCompletedAnswerPayload).length;
+  const incompleteKeptCount = answers.length - completedCount;
+  const droppedCount = dedupedAnswerPayloads.length - answers.length;
   const sampleTimestamp = answers.find((item) => item?.client_created_at)?.client_created_at;
   const gmatTimestampTimezone = inferTimestampTimezoneLabel(sampleTimestamp);
   console.log(
-    `  ${answers.length} answer activities found` +
-      (skippedIncomplete > 0 ? ` (${skippedIncomplete} incomplete skipped)` : '')
+    `  ${answers.length} answer activities found (${completedCount} complete` +
+      (incompleteKeptCount > 0 ? `, ${incompleteKeptCount} ended-early kept` : '') +
+      (droppedCount > 0 ? `, ${droppedCount} dropped` : '') +
+      ')'
   );
   console.log(
     `  Timestamp basis: GMAT client_created_at=${gmatTimestampTimezone}; normalizing session dates to ${THAI_TIME_ZONE}.`
@@ -1359,6 +1458,8 @@ async function scrapePart1(cfg = CONFIG) {
   for (const d of answers) {
     const sid = d.user_configured_quiz_session_id;
     if (!sid) continue;
+    const normalizedCorrect = normalizeCorrectValue(d.correct);
+    if (normalizedCorrect === null) continue;
     if (!apiSessions[sid]) apiSessions[sid] = { sid, questions: [], catIds: new Set() };
     const s = apiSessions[sid];
     const idCandidates = extractIdCandidatesFromActivity(d);
@@ -1372,7 +1473,7 @@ async function scrapePart1(cfg = CONFIG) {
     s.questions.push({
       q_id:       idCandidates[0] || null,
       q_id_candidates: idCandidates,
-      correct:    d.correct,
+      correct:    normalizedCorrect,
       user_answer: d.user_answer ?? null,
       time_sec:   d.time_taken ?? 0,
       cat_id:     d.question_category_id,
@@ -1605,6 +1706,14 @@ async function scrapePart1(cfg = CONFIG) {
       console.warn(
         `  ⚠️ ${sid} — API window appears partial (${apiS.questions.length}) vs category rows (${catQsRaw.length}); preserving category rows.`
       );
+    }
+    if (catQs.length) {
+      const missingQCodeCount = catQs.filter((q) => !String(q?.q_code || '').trim()).length;
+      if (missingQCodeCount === catQs.length) {
+        console.warn(`  ⚠️ ${sid} — all ${catQs.length} category rows missing q_code (parser fallback will rely on q_id).`);
+      } else if (missingQCodeCount > 0) {
+        console.warn(`  ⚠️ ${sid} — ${missingQCodeCount}/${catQs.length} category rows missing q_code.`);
+      }
     }
 
     // Parse session-level stats from the Results header
@@ -1987,7 +2096,10 @@ async function scrapePart2(sessions, cfg = CONFIG) {
     }
 
     // Question code (6-digit OG number)
-    const q_code = document.body.innerText.match(/\b(\d{6})\b/)?.[1] ?? null;
+    const q_code =
+      extractQuestionCode(document.body.innerText) ||
+      extractQuestionCode(document.title) ||
+      null;
     if (expectedQCode && q_code && String(q_code) !== String(expectedQCode)) {
       skippedMismatchedCode += 1;
       console.warn(
@@ -2174,6 +2286,7 @@ async function runScraper(cfg = CONFIG) {
           q.my_answer      = detail.my_answer;
           q.correct_answer = detail.correct_answer;
           q.topic          = detail.topic || q.topic || null;
+          q.q_code         = q.q_code || detail.q_code || null;
           q.q_id           = finalQId;
           q.cat_id         = finalCatId;
           q.question_url   = q.question_url || detail.question_url || fallbackUrl;

@@ -45,14 +45,82 @@ function formatDifficultyStat(total, accuracy, avgTimeSec) {
   return `${count} (${formatPercent(accuracy)} / ${formatDurationSeconds(avgTimeSec)})`;
 }
 
-function getSessionQuestionCount(session) {
+function getSessionPlannedTotal(session) {
   const categories = Number(session?.total_q_categories);
-  if (Number.isFinite(categories) && categories > 0) return categories;
-
   const api = Number(session?.total_q_api);
-  if (Number.isFinite(api)) return api;
+  const candidates = [categories, api].filter((value) => Number.isFinite(value) && value > 0);
+  if (!candidates.length) return null;
+  return Math.max(...candidates);
+}
+
+function getSessionQuestionCount(session) {
+  const answered = getSessionAnsweredCount(session);
+  if (Number.isFinite(answered) && answered >= 0) return answered;
+  return getSessionPlannedTotal(session);
+}
+
+function getSessionAnsweredCount(session) {
+  const attempts = Number(session?.attempt_total);
+  if (Number.isFinite(attempts) && attempts > 0) return attempts;
+
+  const correct = Number(session?.correct_count);
+  const wrong = Number(session?.error_count);
+  const safeCorrect = Number.isFinite(correct) && correct >= 0 ? correct : 0;
+  const safeWrong = Number.isFinite(wrong) && wrong >= 0 ? wrong : 0;
+  const total = safeCorrect + safeWrong;
+  if (total > 0) return total;
 
   return null;
+}
+
+function getSessionCorrectCount(session) {
+  const attemptsCorrect = Number(session?.attempt_correct);
+  if (Number.isFinite(attemptsCorrect) && attemptsCorrect >= 0) return attemptsCorrect;
+
+  const correct = Number(session?.correct_count);
+  if (Number.isFinite(correct) && correct >= 0) return correct;
+
+  return null;
+}
+
+function getSessionErrorCount(session) {
+  const attemptsWrong = Number(session?.attempt_wrong);
+  if (Number.isFinite(attemptsWrong) && attemptsWrong >= 0) return attemptsWrong;
+
+  const errors = Number(session?.error_count);
+  if (Number.isFinite(errors) && errors >= 0) return errors;
+
+  return null;
+}
+
+function getSessionUnansweredCount(session) {
+  const total = getSessionPlannedTotal(session);
+  if (!Number.isFinite(total) || total < 0) return null;
+
+  const answered = getSessionAnsweredCount(session);
+  if (!Number.isFinite(answered) || answered < 0) return total;
+
+  return Math.max(0, total - answered);
+}
+
+function getSessionAnsweredAccuracy(session) {
+  const answered = getSessionAnsweredCount(session);
+  const correct = getSessionCorrectCount(session);
+  if (Number.isFinite(answered) && answered > 0 && Number.isFinite(correct) && correct >= 0) {
+    return Number(((correct * 100) / answered).toFixed(1));
+  }
+
+  const fallback = Number(session?.accuracy_pct);
+  if (Number.isFinite(fallback)) return fallback;
+  return null;
+}
+
+function getSessionCompletionRate(session) {
+  const total = getSessionPlannedTotal(session);
+  const answered = getSessionAnsweredCount(session);
+  if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(answered) || answered < 0) return null;
+  const boundedAnswered = Math.min(answered, total);
+  return Number(((boundedAnswered * 100) / total).toFixed(1));
 }
 
 function formatNotePreview(value, maxLength = 42) {
@@ -591,6 +659,11 @@ function App() {
     let list = sessions.map((session) => ({
       ...session,
       question_count_display: getSessionQuestionCount(session),
+      answered_count_display: getSessionAnsweredCount(session),
+      unanswered_count_display: getSessionUnansweredCount(session),
+      error_count_display: getSessionErrorCount(session),
+      answered_accuracy_pct: getSessionAnsweredAccuracy(session),
+      completion_rate_pct: getSessionCompletionRate(session),
     }));
 
     // Filter by subject
@@ -1148,15 +1221,15 @@ function App() {
                 </th>
                 <th
                   className="sortable"
-                  onClick={() => handleSessionSort('error_count')}
+                  onClick={() => handleSessionSort('error_count_display')}
                 >
-                  Errors {sessionSort.key === 'error_count' && (sessionSort.order === 'asc' ? '↑' : '↓')}
+                  Errors {sessionSort.key === 'error_count_display' && (sessionSort.order === 'asc' ? '↑' : '↓')}
                 </th>
                 <th
                   className="sortable"
-                  onClick={() => handleSessionSort('accuracy_pct')}
+                  onClick={() => handleSessionSort('answered_accuracy_pct')}
                 >
-                  Accuracy % {sessionSort.key === 'accuracy_pct' && (sessionSort.order === 'asc' ? '↑' : '↓')}
+                  Accuracy % {sessionSort.key === 'answered_accuracy_pct' && (sessionSort.order === 'asc' ? '↑' : '↓')}
                 </th>
                 <th
                   className="sortable"
@@ -1182,8 +1255,8 @@ function App() {
                   <td>{formatMaybe(row.session_external_id)}</td>
                   <td>{formatMaybe(row.subject)}</td>
                   <td>{formatMaybe(row.question_count_display)}</td>
-                  <td>{formatMaybe(row.error_count)}</td>
-                  <td>{formatPercent(row.accuracy_pct)}</td>
+                  <td>{formatMaybe(row.error_count_display)}</td>
+                  <td>{formatPercent(row.answered_accuracy_pct)}</td>
                   <td>{formatDurationSeconds(row.avg_time_sec)}</td>
                   <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>
                   <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>
@@ -1297,6 +1370,7 @@ function App() {
                 </th>
                 <th>My Ans</th>
                 <th>Correct</th>
+                <th>Redo</th>
                 <th className="sortable" onClick={() => handleErrorSort('time_sec')}>
                   Time (min:sec) {errorSort.key === 'time_sec' && (errorSort.order === 'asc' ? '↑' : '↓')}
                 </th>
@@ -1311,7 +1385,7 @@ function App() {
             <tbody>
               {errors.length === 0 && (
                 <tr>
-                  <td colSpan="13">No error rows match this filter.</td>
+                  <td colSpan="14">No error rows match this filter.</td>
                 </tr>
               )}
               {errors.map((row) => (
@@ -1324,6 +1398,15 @@ function App() {
                   <td className="topic-col">{formatMaybe(row.topic)}</td>
                   <td>{formatMaybe(row.my_answer)}</td>
                   <td>{formatMaybe(row.correct_answer)}</td>
+                  <td className="redo-col">
+                    {Number(row.corrected_later || 0) === 1 ? (
+                      <Badge variant="success" className="redo-pill">
+                        Corrected
+                      </Badge>
+                    ) : (
+                      <span className="muted">Not yet</span>
+                    )}
+                  </td>
                   <td>{formatDurationSeconds(row.time_sec)}</td>
                   <td>{formatMaybe(row.mistake_type)}</td>
                   <td className="notes-cell notes-col" title={row.notes || ''}>
@@ -1545,6 +1628,7 @@ function App() {
                           <th>Confidence</th>
                           <th>My Ans</th>
                           <th>Correct</th>
+                          <th>Redo</th>
                           <th>Open</th>
                           <th>Time</th>
                           <th>Mistake Type</th>
@@ -1555,7 +1639,7 @@ function App() {
                       <tbody>
                         {!patternDrilldown.rows.length && (
                           <tr>
-                            <td colSpan="14">No rows match this pattern.</td>
+                            <td colSpan="15">No rows match this pattern.</td>
                           </tr>
                         )}
                         {patternDrilldown.rows.map((row) => (
@@ -1569,6 +1653,15 @@ function App() {
                             <td>{formatMaybe(row.confidence)}</td>
                             <td>{formatMaybe(row.my_answer)}</td>
                             <td>{formatMaybe(row.correct_answer)}</td>
+                            <td>
+                              {Number(row.corrected_later || 0) === 1 ? (
+                                <Badge variant="success" className="redo-pill">
+                                  Corrected
+                                </Badge>
+                              ) : (
+                                <span className="muted">Not yet</span>
+                              )}
+                            </td>
                             <td>
                               {row.question_url ? (
                                 <Button
@@ -1649,8 +1742,16 @@ function App() {
                     <strong>{formatMaybe(getSessionQuestionCount(sessionAnalysis.data.session))}</strong>
                   </div>
                   <div className="summary-item">
-                    <span>Overall Accuracy</span>
-                    <strong>{formatPercent(sessionAnalysis.data.session.accuracy_pct)}</strong>
+                    <span>Unanswered</span>
+                    <strong>{formatMaybe(getSessionUnansweredCount(sessionAnalysis.data.session))}</strong>
+                  </div>
+                  <div className="summary-item">
+                    <span>Answered Accuracy</span>
+                    <strong>{formatPercent(getSessionAnsweredAccuracy(sessionAnalysis.data.session))}</strong>
+                  </div>
+                  <div className="summary-item">
+                    <span>Completion</span>
+                    <strong>{formatPercent(getSessionCompletionRate(sessionAnalysis.data.session))}</strong>
                   </div>
                   <div className="summary-item">
                     <span>Avg Time</span>

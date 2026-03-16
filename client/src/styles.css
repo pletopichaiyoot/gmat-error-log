@@ -1076,7 +1076,7 @@ th.sortable:hover {
 
 .error-log-table {
   width: 100%;
-  min-width: 1360px;
+  min-width: 1460px;
 }
 
 .error-log-table th,
@@ -1098,6 +1098,16 @@ th.sortable:hover {
 .error-log-table .notes-col {
   min-width: 220px;
   max-width: 360px;
+}
+
+.error-log-table .redo-col {
+  min-width: 112px;
+}
+
+.redo-pill {
+  min-height: 22px;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
 }
 
 .error-log-table .action-col {

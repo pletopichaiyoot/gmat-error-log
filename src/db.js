@@ -130,6 +130,8 @@ async function initDb() {
   );
   await run('CREATE INDEX IF NOT EXISTS idx_questions_run_id ON question_attempts(run_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_questions_correct ON question_attempts(correct)');
+  await run('CREATE INDEX IF NOT EXISTS idx_questions_q_code ON question_attempts(q_code)');
+  await run('CREATE INDEX IF NOT EXISTS idx_questions_q_id ON question_attempts(q_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_questions_topic ON question_attempts(topic)');
   await run('CREATE INDEX IF NOT EXISTS idx_questions_difficulty ON question_attempts(difficulty)');
   await backfillSparseQuestionAttempts();
@@ -152,6 +154,18 @@ function toNullableInteger(value) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed)) return null;
   return parsed;
+}
+
+function unansweredPlaceholderExpr(alias = 'q') {
+  const prefix = alias ? `${alias}.` : '';
+  return `(
+    COALESCE(TRIM(${prefix}q_code), '') = ''
+    AND COALESCE(TRIM(${prefix}difficulty), '') = ''
+    AND COALESCE(TRIM(${prefix}question_url), '') = ''
+    AND COALESCE(TRIM(${prefix}my_answer), '') = ''
+    AND COALESCE(TRIM(${prefix}correct_answer), '') = ''
+    AND COALESCE(${prefix}time_sec, 0) <= 1
+  )`;
 }
 
 function parseReviewRouteFromUrl(rawUrl) {
@@ -390,6 +404,76 @@ function pickPreservedAnnotation(index, question = {}) {
   return null;
 }
 
+function scoreAttemptSnapshot(snapshot = {}) {
+  let score = 0;
+  if (snapshot.q_code) score += 2;
+  if (snapshot.question_url) score += 2;
+  if (snapshot.topic) score += 1;
+  if (Number.isInteger(snapshot.cat_id)) score += 1;
+  if (snapshot.mistake_type) score += 1;
+  if (snapshot.notes) score += 1;
+  return score;
+}
+
+function setSnapshotIfBetter(map, key, snapshot) {
+  if (!key) return;
+  const current = map.get(key);
+  if (!current || scoreAttemptSnapshot(snapshot) > scoreAttemptSnapshot(current)) {
+    map.set(key, snapshot);
+  }
+}
+
+function buildAttemptSnapshotIndex(rows = []) {
+  const byQid = new Map();
+  const byQcodeCat = new Map();
+  const byQcode = new Map();
+
+  for (const row of rows || []) {
+    const snapshot = {
+      q_code: normalizedTextOrNull(row?.q_code),
+      cat_id: toNullableInteger(row?.cat_id),
+      topic: normalizedTextOrNull(row?.topic),
+      question_url: normalizedTextOrNull(row?.question_url),
+      mistake_type: normalizedTextOrNull(row?.mistake_type),
+      notes: normalizedTextOrNull(row?.notes),
+    };
+
+    const qid = String(row?.q_id || '').trim();
+    const qcode = String(row?.q_code || '').trim();
+    const catId = String(row?.cat_id || '').trim();
+
+    if (qid) setSnapshotIfBetter(byQid, qid, snapshot);
+    if (qcode && catId) setSnapshotIfBetter(byQcodeCat, `${qcode}|${catId}`, snapshot);
+    if (qcode) setSnapshotIfBetter(byQcode, qcode, snapshot);
+  }
+
+  return { byQid, byQcodeCat, byQcode };
+}
+
+function pickAttemptSnapshot(index, question = {}) {
+  if (!index) return null;
+
+  const qid = String(question?.q_id || '').trim();
+  if (qid) {
+    const fromQid = index.byQid.get(qid);
+    if (fromQid) return fromQid;
+  }
+
+  const qcode = String(question?.q_code || '').trim();
+  const catId = String(question?.cat_id || '').trim();
+  if (qcode && catId) {
+    const fromQcodeCat = index.byQcodeCat.get(`${qcode}|${catId}`);
+    if (fromQcodeCat) return fromQcodeCat;
+  }
+
+  if (qcode) {
+    const fromQcode = index.byQcode.get(qcode);
+    if (fromQcode) return fromQcode;
+  }
+
+  return null;
+}
+
 async function saveScrapeResult(data, scrapeOptions = {}) {
   const sessions = Array.isArray(data.sessions) ? data.sessions : [];
   const totalQuestions = sessions.reduce((sum, session) => sum + (session.stats?.total_q_api || 0), 0);
@@ -425,6 +509,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     const stats = session.stats || {};
     let sessionId = null;
     let preservedAnnotationIndex = null;
+    let preservedSnapshotIndex = null;
 
     const existing = await get(
       `
@@ -439,19 +524,16 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     );
 
     if (existing?.id) {
-      const existingAnnotations = await all(
+      const existingAttempts = await all(
         `
-          SELECT q_id, q_code, cat_id, mistake_type, notes
+          SELECT q_id, q_code, cat_id, topic, question_url, mistake_type, notes
           FROM question_attempts
           WHERE session_id = ?
-            AND (
-              COALESCE(TRIM(mistake_type), '') <> ''
-              OR COALESCE(TRIM(notes), '') <> ''
-            )
         `,
         [existing.id]
       );
-      preservedAnnotationIndex = buildAnnotationIndex(existingAnnotations);
+      preservedAnnotationIndex = buildAnnotationIndex(existingAttempts);
+      preservedSnapshotIndex = buildAttemptSnapshotIndex(existingAttempts);
 
       await run(
         `
@@ -531,8 +613,21 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
 
     for (const q of attempts) {
       const preserved = pickPreservedAnnotation(preservedAnnotationIndex, q);
-      const mistakeType = normalizedTextOrNull(q.mistake_type) || preserved?.mistake_type || null;
-      const notes = normalizedTextOrNull(q.notes) || preserved?.notes || null;
+      const preservedSnapshot = pickAttemptSnapshot(preservedSnapshotIndex, q);
+      const mistakeType =
+        normalizedTextOrNull(q.mistake_type) ||
+        preserved?.mistake_type ||
+        preservedSnapshot?.mistake_type ||
+        null;
+      const notes =
+        normalizedTextOrNull(q.notes) ||
+        preserved?.notes ||
+        preservedSnapshot?.notes ||
+        null;
+      const qCode = normalizedTextOrNull(q.q_code) || preservedSnapshot?.q_code || null;
+      const catId = toNullableInteger(q.cat_id) ?? preservedSnapshot?.cat_id ?? null;
+      const topic = normalizedTextOrNull(q.topic) || preservedSnapshot?.topic || null;
+      const questionUrl = normalizedTextOrNull(q.question_url) || preservedSnapshot?.question_url || null;
 
       await run(
         `
@@ -559,19 +654,19 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
         [
           runId,
           sessionId,
-          q.q_code || null,
+          qCode,
           q.q_id || null,
-          safeInt(q.cat_id),
+          catId,
           q.subject_sub || null,
           q.subject_sub_raw || null,
-          q.question_url || null,
+          questionUrl,
           boolToInt(Boolean(q.correct)),
           q.difficulty || null,
           q.confidence || null,
           safeInt(q.time_sec),
           q.my_answer || null,
           q.correct_answer || null,
-          q.topic || null,
+          topic,
           mistakeType,
           notes,
         ]
@@ -605,6 +700,10 @@ async function listSessions(runId, { limit, offset } = {}) {
   const params = [];
   const whereClause = runId ? 'WHERE s.run_id = ?' : '';
   if (runId) params.push(runId);
+  const unansweredExpr = unansweredPlaceholderExpr('q');
+  const answeredCountExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) THEN 1 ELSE 0 END)`;
+  const answeredCorrectExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN 1 ELSE 0 END)`;
+  const answeredWrongExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN 1 ELSE 0 END)`;
 
   let limitClause = '';
   if (limit !== undefined && offset !== undefined) {
@@ -625,13 +724,16 @@ async function listSessions(runId, { limit, offset } = {}) {
         s.total_q_categories,
         s.correct_count,
         s.error_count,
+        ${answeredCountExpr} AS attempt_total,
+        COALESCE(${answeredCorrectExpr}, 0) AS attempt_correct,
+        COALESCE(${answeredWrongExpr}, 0) AS attempt_wrong,
         ROUND(
           CASE
-            WHEN COUNT(q.id) > 0
+            WHEN ${answeredCountExpr} > 0
               THEN
                 100.0
-                * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END)
-                / COUNT(q.id)
+                * ${answeredCorrectExpr}
+                / ${answeredCountExpr}
             WHEN (COALESCE(s.correct_count, 0) + COALESCE(s.error_count, 0)) > 0
               THEN
                 100.0
@@ -758,7 +860,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
   const sortCol = ALLOWED_SORT[sortKey] || 's.session_date';
   const sortDir = sortOrder === 'asc' ? 'ASC' : 'DESC';
   const params = [];
-  const where = ['q.correct = 0'];
+  const where = ['q.correct = 0', `NOT (${unansweredPlaceholderExpr('q')})`];
   const normalizedSubExpr = `
     CASE
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'DS'
@@ -864,6 +966,40 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
         q.time_sec,
         q.my_answer,
         q.correct_answer,
+        CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM question_attempts q2
+            INNER JOIN sessions s2 ON s2.id = q2.session_id
+            WHERE q2.correct = 1
+              AND COALESCE(NULLIF(TRIM(q.q_code), ''), '') <> ''
+              AND COALESCE(NULLIF(TRIM(q2.q_code), ''), '') = COALESCE(NULLIF(TRIM(q.q_code), ''), '')
+              AND (
+                COALESCE(s2.session_date, '') > COALESCE(s.session_date, '')
+                OR (
+                  COALESCE(s2.session_date, '') = COALESCE(s.session_date, '')
+                  AND q2.id > q.id
+                )
+              )
+          ) THEN 1
+          WHEN EXISTS (
+            SELECT 1
+            FROM question_attempts q2
+            INNER JOIN sessions s2 ON s2.id = q2.session_id
+            WHERE q2.correct = 1
+              AND COALESCE(NULLIF(TRIM(q.q_code), ''), '') = ''
+              AND COALESCE(NULLIF(TRIM(q.q_id), ''), '') <> ''
+              AND COALESCE(NULLIF(TRIM(q2.q_id), ''), '') = COALESCE(NULLIF(TRIM(q.q_id), ''), '')
+              AND (
+                COALESCE(s2.session_date, '') > COALESCE(s.session_date, '')
+                OR (
+                  COALESCE(s2.session_date, '') = COALESCE(s.session_date, '')
+                  AND q2.id > q.id
+                )
+              )
+          ) THEN 1
+          ELSE 0
+        END AS corrected_later,
         q.mistake_type,
         q.notes
       FROM question_attempts q
@@ -878,7 +1014,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
 
 async function countErrors({ runId, subject, difficulty, topic, confidence, search }) {
   const params = [];
-  const where = ['q.correct = 0'];
+  const where = ['q.correct = 0', `NOT (${unansweredPlaceholderExpr('q')})`];
   // Re-use expressions for subject and topic logic to ensure consistency
   const normalizedSubExpr = `
     CASE
@@ -969,9 +1105,10 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
 }
 
 async function getPatterns(runId) {
-  const runClause = runId ? 'run_id = ? AND ' : '';
+  const runClause = runId ? 'q.run_id = ? AND ' : '';
   const runParams = runId ? [runId] : [];
   const runJoinClause = runId ? 'q.run_id = ? AND ' : '';
+  const answeredWhere = `NOT (${unansweredPlaceholderExpr('q')})`;
   const normalizedSubExpr = `
     CASE
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'DS'
@@ -1066,7 +1203,7 @@ async function getPatterns(runId) {
         ${topicExpr} AS topic,
         COUNT(*) AS mistakes
       FROM question_attempts q
-      WHERE ${runClause}q.correct = 0
+      WHERE ${runClause}q.correct = 0 AND ${answeredWhere}
       GROUP BY ${topicExpr}
       ORDER BY mistakes DESC, topic ASC
       LIMIT 20
@@ -1077,17 +1214,17 @@ async function getPatterns(runId) {
   const byDifficulty = await all(
     `
       SELECT
-        COALESCE(NULLIF(difficulty, ''), 'Unknown') AS difficulty,
+        COALESCE(NULLIF(q.difficulty, ''), 'Unknown') AS difficulty,
         COUNT(*) AS total,
-        SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS correct,
-        SUM(CASE WHEN correct = 0 THEN 1 ELSE 0 END) AS wrong,
+        SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) AS correct,
+        SUM(CASE WHEN q.correct = 0 THEN 1 ELSE 0 END) AS wrong,
         ROUND(
-          100.0 * SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
+          100.0 * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
           1
         ) AS accuracy_pct
-      FROM question_attempts
-      WHERE ${runClause}1 = 1
-      GROUP BY COALESCE(NULLIF(difficulty, ''), 'Unknown')
+      FROM question_attempts q
+      WHERE ${runClause}${answeredWhere}
+      GROUP BY COALESCE(NULLIF(q.difficulty, ''), 'Unknown')
       ORDER BY total DESC
     `,
     runParams
@@ -1100,7 +1237,7 @@ async function getPatterns(runId) {
         COUNT(*) AS mistakes
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
-      WHERE ${runJoinClause}q.correct = 0
+      WHERE ${runJoinClause}q.correct = 0 AND ${answeredWhere}
       GROUP BY ${subjectExpr}
       ORDER BY mistakes DESC, subject ASC
     `,
@@ -1115,7 +1252,7 @@ async function getPatterns(runId) {
         COUNT(*) AS mistakes
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
-      WHERE ${runJoinClause}q.correct = 0
+      WHERE ${runJoinClause}q.correct = 0 AND ${answeredWhere}
       GROUP BY ${subjectExpr}, ${topicExpr}
       ORDER BY subject ASC, mistakes DESC, topic ASC
     `,
@@ -1125,11 +1262,11 @@ async function getPatterns(runId) {
   const confidenceMismatch = await all(
     `
       SELECT
-        COALESCE(NULLIF(confidence, ''), 'not selected') AS confidence,
+        COALESCE(NULLIF(q.confidence, ''), 'not selected') AS confidence,
         COUNT(*) AS wrong_answers
-      FROM question_attempts
-      WHERE ${runClause}correct = 0
-      GROUP BY COALESCE(NULLIF(confidence, ''), 'not selected')
+      FROM question_attempts q
+      WHERE ${runClause}q.correct = 0 AND ${answeredWhere}
+      GROUP BY COALESCE(NULLIF(q.confidence, ''), 'not selected')
       ORDER BY wrong_answers DESC
     `,
     runParams
@@ -1150,7 +1287,7 @@ async function getPatterns(runId) {
         ROUND(AVG(q.time_sec), 0) AS avg_time_sec
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
-      WHERE ${runJoinClause}1 = 1
+      WHERE ${runJoinClause}${answeredWhere}
       GROUP BY ${subjectFamilyExpr}, ${subjectSubExpr}
       ORDER BY ${subjectSortExpr}, total DESC, subject_sub ASC
     `,
@@ -1172,7 +1309,7 @@ async function getPatterns(runId) {
         ROUND(AVG(q.time_sec), 0) AS avg_time_sec
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
-      WHERE ${runJoinClause}1 = 1
+      WHERE ${runJoinClause}${answeredWhere}
       GROUP BY ${subjectFamilyExpr}, ${subjectSubExpr}
       ORDER BY ${subjectSortExpr}, total_questions DESC, subject_sub ASC
     `,
@@ -1189,7 +1326,7 @@ async function getPatterns(runId) {
         ROUND(AVG(q.time_sec), 0) AS avg_time_sec
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
-      WHERE ${runJoinClause}q.correct = 0
+      WHERE ${runJoinClause}q.correct = 0 AND ${answeredWhere}
       GROUP BY ${subjectFamilyExpr}, ${subjectSubExpr}, ${topicExpr}
       ORDER BY ${subjectSortExpr}, subject_sub ASC, incorrect_count DESC, subtopic ASC
       LIMIT 250
@@ -1212,6 +1349,10 @@ async function getPatterns(runId) {
 async function getSessionAnalysis(sessionId) {
   const id = Number(sessionId);
   if (!Number.isInteger(id) || id <= 0) return null;
+  const unansweredExpr = unansweredPlaceholderExpr('q');
+  const answeredCountExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) THEN 1 ELSE 0 END)`;
+  const answeredCorrectExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN 1 ELSE 0 END)`;
+  const answeredWrongExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN 1 ELSE 0 END)`;
 
   const session = await get(
     `
@@ -1226,13 +1367,16 @@ async function getSessionAnalysis(sessionId) {
         s.total_q_categories,
         s.correct_count,
         s.error_count,
+        ${answeredCountExpr} AS attempt_total,
+        COALESCE(${answeredCorrectExpr}, 0) AS attempt_correct,
+        COALESCE(${answeredWrongExpr}, 0) AS attempt_wrong,
         ROUND(
           CASE
-            WHEN COUNT(q.id) > 0
+            WHEN ${answeredCountExpr} > 0
               THEN
                 100.0
-                * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END)
-                / COUNT(q.id)
+                * ${answeredCorrectExpr}
+                / ${answeredCountExpr}
             WHEN (COALESCE(s.correct_count, 0) + COALESCE(s.error_count, 0)) > 0
               THEN
                 100.0
@@ -1285,7 +1429,7 @@ async function getSessionAnalysis(sessionId) {
         ROUND(AVG(CASE WHEN q.correct = 1 THEN q.time_sec END), 0) AS avg_correct_time_sec,
         ROUND(AVG(CASE WHEN q.correct = 0 THEN q.time_sec END), 0) AS avg_incorrect_time_sec
       FROM question_attempts q
-      WHERE q.session_id = ?
+      WHERE q.session_id = ? AND NOT (${unansweredExpr})
       GROUP BY COALESCE(NULLIF(q.difficulty, ''), 'Unknown')
       ORDER BY
         CASE COALESCE(NULLIF(q.difficulty, ''), 'Unknown')
@@ -1304,7 +1448,7 @@ async function getSessionAnalysis(sessionId) {
         ${topicExpr} AS topic,
         COUNT(*) AS mistakes
       FROM question_attempts q
-      WHERE q.session_id = ? AND q.correct = 0
+      WHERE q.session_id = ? AND q.correct = 0 AND NOT (${unansweredExpr})
       GROUP BY ${topicExpr}
       ORDER BY mistakes DESC, topic ASC
     `,
@@ -1314,16 +1458,16 @@ async function getSessionAnalysis(sessionId) {
   const confidencePerformance = await all(
     `
       SELECT
-        COALESCE(NULLIF(confidence, ''), 'not selected') AS confidence,
+        COALESCE(NULLIF(q.confidence, ''), 'not selected') AS confidence,
         COUNT(*) AS total,
-        SUM(CASE WHEN correct = 0 THEN 1 ELSE 0 END) AS wrong,
+        SUM(CASE WHEN q.correct = 0 THEN 1 ELSE 0 END) AS wrong,
         ROUND(
-          100.0 * SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
+          100.0 * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
           1
         ) AS accuracy_pct
-      FROM question_attempts
-      WHERE session_id = ?
-      GROUP BY COALESCE(NULLIF(confidence, ''), 'not selected')
+      FROM question_attempts q
+      WHERE q.session_id = ? AND NOT (${unansweredExpr})
+      GROUP BY COALESCE(NULLIF(q.confidence, ''), 'not selected')
       ORDER BY total DESC, confidence ASC
     `,
     [id]
@@ -1345,7 +1489,7 @@ async function getSessionAnalysis(sessionId) {
         s.source
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
-      WHERE q.session_id = ? AND q.correct = 0
+      WHERE q.session_id = ? AND q.correct = 0 AND NOT (${unansweredExpr})
       ORDER BY COALESCE(q.time_sec, 0) DESC, q.id DESC
     `,
     [id]
