@@ -1,6 +1,7 @@
 const path = require('path');
 const { spawn } = require('child_process');
 const express = require('express');
+require('dotenv').config();
 
 const {
   dbPath,
@@ -15,6 +16,7 @@ const {
   getSessionAnalysis,
   updateErrorAnnotation,
 } = require('./db');
+const { LlmConfigError, generatePerformanceReview, answerCoachQuestion } = require('./llm-coach-agent');
 const { runScrapeFromOpenBrowser, openUrlInOpenBrowser } = require('./scraper-runner');
 
 const app = express();
@@ -207,6 +209,13 @@ function normalizeOpenUrl(rawUrl) {
   return null;
 }
 
+function parseOptionalRunId(rawValue) {
+  if (rawValue === null || rawValue === undefined || rawValue === '') return null;
+  const runId = Number(rawValue);
+  if (!Number.isInteger(runId) || runId <= 0) return null;
+  return runId;
+}
+
 app.use(express.json({ limit: '1mb' }));
 if (require('fs').existsSync(clientDistPath)) {
   app.use(express.static(clientDistPath));
@@ -321,6 +330,76 @@ app.get('/api/patterns', async (req, res) => {
     const patterns = await getPatterns(runId);
     res.json(patterns);
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/ai/review', async (req, res) => {
+  try {
+    const runIdRaw = req.body?.runId;
+    const runId =
+      runIdRaw === null || runIdRaw === undefined || runIdRaw === ''
+        ? null
+        : parseOptionalRunId(runIdRaw);
+    if (runIdRaw !== null && runIdRaw !== undefined && runIdRaw !== '' && runId === null) {
+      res.status(400).json({ error: 'Invalid run id.' });
+      return;
+    }
+
+    const focus = String(req.body?.focus || '').trim();
+    const result = await generatePerformanceReview({ runId, focus });
+
+    res.json({
+      ok: true,
+      review: result.text,
+      contextMeta: result.contextMeta || null,
+    });
+  } catch (error) {
+    if (error instanceof LlmConfigError || Number.isInteger(error?.statusCode)) {
+      res.status(Number(error.statusCode || 400)).json({
+        error: error.message,
+        hint: error.hint || '',
+      });
+      return;
+    }
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/ai/chat', async (req, res) => {
+  try {
+    const runIdRaw = req.body?.runId;
+    const runId =
+      runIdRaw === null || runIdRaw === undefined || runIdRaw === ''
+        ? null
+        : parseOptionalRunId(runIdRaw);
+    if (runIdRaw !== null && runIdRaw !== undefined && runIdRaw !== '' && runId === null) {
+      res.status(400).json({ error: 'Invalid run id.' });
+      return;
+    }
+
+    const question = String(req.body?.question || '').trim();
+    if (!question) {
+      res.status(400).json({ error: 'Question is required.' });
+      return;
+    }
+
+    const history = Array.isArray(req.body?.history) ? req.body.history : [];
+    const result = await answerCoachQuestion({ runId, question, history });
+
+    res.json({
+      ok: true,
+      answer: result.text,
+      contextMeta: result.contextMeta || null,
+    });
+  } catch (error) {
+    if (error instanceof LlmConfigError || Number.isInteger(error?.statusCode)) {
+      res.status(Number(error.statusCode || 400)).json({
+        error: error.message,
+        hint: error.hint || '',
+      });
+      return;
+    }
     res.status(500).json({ error: error.message });
   }
 });

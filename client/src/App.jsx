@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Card } from './components/ui/card';
 import { Button } from './components/ui/button';
 import { Badge } from './components/ui/badge';
@@ -165,6 +165,20 @@ function formatRequestError(error) {
   return parts.join(' ');
 }
 
+const AI_COACH_QUICK_PROMPTS = [
+  'What are my top 3 weak areas right now?',
+  'Give me a 45-minute drill for today.',
+  'How should I improve timing without hurting accuracy?',
+  'Which mistakes should I fix first for score gain?',
+];
+
+function buildCoachGreeting(scopeLabel) {
+  return {
+    role: 'assistant',
+    content: `I’m your GMAT coach for ${scopeLabel}. Ask about weak topics, timing, drill plans, or score-improvement strategy.`,
+  };
+}
+
 function App() {
   const [status, setStatus] = useState({ message: 'Loading...', isError: false });
   const [sources, setSources] = useState([]);
@@ -219,6 +233,13 @@ function App() {
   const [sessionAnalysisSort, setSessionAnalysisSort] = useState({ key: 'time_sec', order: 'desc' });
   const [errorSort, setErrorSort] = useState({ key: 'session_date', order: 'desc' });
   const [sessionDateRange, setSessionDateRange] = useState({ start: '', end: '' });
+  const [aiReview, setAiReview] = useState('');
+  const [isGeneratingAiReview, setIsGeneratingAiReview] = useState(false);
+  const [aiFocus, setAiFocus] = useState('');
+  const [aiQuestion, setAiQuestion] = useState('');
+  const [aiMessages, setAiMessages] = useState([]);
+  const [isAskingAi, setIsAskingAi] = useState(false);
+  const aiChatEndRef = useRef(null);
 
   // Pagination state
   const [sessionPagination, setSessionPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
@@ -249,6 +270,14 @@ function App() {
     }
     return map;
   }, [sources]);
+
+  const aiRunId = useMemo(() => {
+    if (!selectedRunId) return null;
+    const parsed = Number(selectedRunId);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }, [selectedRunId]);
+
+  const aiScopeLabel = aiRunId ? `Run ${aiRunId}` : 'All runs';
 
   async function loadSources() {
     const data = await fetchJson('/api/sources');
@@ -354,6 +383,16 @@ function App() {
       document.body.style.overflow = previous;
     };
   }, [sessionAnalysis.open, patternDrilldown.open, syncCenterOpen, annotation.open]);
+
+  useEffect(() => {
+    setAiReview('');
+    setAiQuestion('');
+    setAiMessages([buildCoachGreeting(aiScopeLabel)]);
+  }, [aiScopeLabel]);
+
+  useEffect(() => {
+    aiChatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [aiMessages, isAskingAi]);
 
   async function handleOpenChrome() {
     if (!selectedSource) return;
@@ -947,6 +986,80 @@ function App() {
     }
   }
 
+  async function handleGenerateAiReview() {
+    if (isGeneratingAiReview) return;
+    setIsGeneratingAiReview(true);
+    try {
+      const result = await fetchJson('/api/ai/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          runId: aiRunId,
+          focus: aiFocus,
+        }),
+      });
+
+      const reviewText = String(result.review || '').trim();
+      setAiReview(reviewText || 'No review generated.');
+      setStatus({ message: `AI review ready for ${aiScopeLabel}.`, isError: false });
+    } catch (error) {
+      setStatus({ message: formatRequestError(error), isError: true });
+    } finally {
+      setIsGeneratingAiReview(false);
+    }
+  }
+
+  function handleResetAiChat() {
+    setAiMessages([buildCoachGreeting(aiScopeLabel)]);
+    setAiQuestion('');
+  }
+
+  function handleAiComposerKeyDown(event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      handleAskAi();
+    }
+  }
+
+  async function handleAskAi(questionOverride = '') {
+    if (isAskingAi) return;
+    const question = String(questionOverride || aiQuestion || '').trim();
+    if (!question) return;
+
+    const nextUserMessage = { role: 'user', content: question };
+    const nextHistory = [...aiMessages, nextUserMessage];
+
+    setAiMessages(nextHistory);
+    setAiQuestion('');
+    setIsAskingAi(true);
+
+    try {
+      const result = await fetchJson('/api/ai/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          runId: aiRunId,
+          question,
+          history: nextHistory.slice(-8),
+        }),
+      });
+
+      const answer = String(result.answer || '').trim() || 'No answer generated.';
+      setAiMessages((prev) => [...prev, { role: 'assistant', content: answer }]);
+    } catch (error) {
+      setStatus({ message: formatRequestError(error), isError: true });
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `Error: ${formatRequestError(error)}`,
+        },
+      ]);
+    } finally {
+      setIsAskingAi(false);
+    }
+  }
+
   return (
     <main className="page-shell">
       <Card className="hero card">
@@ -969,6 +1082,82 @@ function App() {
             </a>
           </Button>
           <p className={`status${status.isError ? ' error' : ''}`}>{status.message}</p>
+        </div>
+      </Card>
+
+      <Card className="card ai-coach-card">
+        <div className="ai-coach-head">
+          <div>
+            <p className="eyebrow">LangGraph Agent</p>
+            <h2>AI Performance Reviewer + Q&A Coach</h2>
+            <p className="muted">{`Scope: ${aiScopeLabel}`}</p>
+          </div>
+          <Button type="button" onClick={handleGenerateAiReview} disabled={isGeneratingAiReview}>
+            {isGeneratingAiReview ? 'Generating Review...' : 'Generate Review'}
+          </Button>
+        </div>
+
+        <label>
+          Review focus (optional)
+          <Textarea
+            rows={2}
+            value={aiFocus}
+            placeholder="Example: Focus on Data Insights timing and low-confidence misses."
+            onChange={(event) => setAiFocus(event.target.value)}
+          />
+        </label>
+
+        <div className="ai-review-block">
+          <h3>Performance Review</h3>
+          <div className="ai-review-output">
+            {aiReview ? <pre>{aiReview}</pre> : <p className="muted">Generate a review to get personalized recommendations.</p>}
+          </div>
+        </div>
+
+        <div className="ai-chat-block">
+          <h3>Ask Follow-up Questions</h3>
+          <div className="ai-chat-shell">
+            <div className="ai-chat-toolbar">
+              <p className="muted">Chat with your coach about weak areas, timing, and daily drills.</p>
+              <Button variant="outline" size="sm" type="button" onClick={handleResetAiChat}>
+                Clear Chat
+              </Button>
+            </div>
+            <div className="ai-chat-log" role="log" aria-live="polite">
+              {aiMessages.map((message, idx) => (
+                <article key={`ai-${idx}`} className={`ai-message ${message.role === 'assistant' ? 'assistant' : 'user'}`}>
+                  <strong>{message.role === 'assistant' ? 'Coach' : 'You'}</strong>
+                  <p>{message.content}</p>
+                </article>
+              ))}
+              {isAskingAi && (
+                <article className="ai-message assistant typing">
+                  <strong>Coach</strong>
+                  <p>Thinking...</p>
+                </article>
+              )}
+              <div ref={aiChatEndRef} />
+            </div>
+            <div className="ai-chat-quick">
+              {AI_COACH_QUICK_PROMPTS.map((prompt) => (
+                <button key={prompt} type="button" className="ai-chip" onClick={() => handleAskAi(prompt)}>
+                  {prompt}
+                </button>
+              ))}
+            </div>
+            <div className="ai-chat-composer">
+              <Textarea
+                rows={2}
+                value={aiQuestion}
+                placeholder="Type your question and press Enter to send (Shift+Enter for new line)"
+                onChange={(event) => setAiQuestion(event.target.value)}
+                onKeyDown={handleAiComposerKeyDown}
+              />
+              <Button type="button" onClick={() => handleAskAi()} disabled={isAskingAi || !String(aiQuestion || '').trim()}>
+                {isAskingAi ? 'Sending...' : 'Send'}
+              </Button>
+            </div>
+          </div>
         </div>
       </Card>
 

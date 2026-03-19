@@ -19,6 +19,7 @@ It connects to an already logged-in GMAT tab via Chrome CDP, runs the in-page sc
 - Topic/pattern analysis by subject/category/subtopic
 - Session analysis modal with sortable wrong-question table
 - One-click "Open question" inside the same CDP Chrome session
+- LangGraph AI coach for performance review + Q&A over your GMAT data
 
 ## Tech Stack
 
@@ -46,7 +47,7 @@ data/
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 20+ (LangChain/OpenAI package requirement)
 - macOS if you want auto-launch via `Open Chrome (CDP)` button
 - Google Chrome installed and able to log in to GMAT Official Practice
 
@@ -149,6 +150,8 @@ Each preset includes:
 - `POST /api/open-chrome` (macOS Chrome launch helper)
 - `POST /api/open-question` (open URL in connected CDP Chrome)
 - `POST /api/scrape`
+- `POST /api/ai/review` (LLM performance review for selected run/all runs)
+- `POST /api/ai/chat` (LLM Q&A chatbot grounded on selected run/all runs)
 
 ## Database Model
 
@@ -196,6 +199,17 @@ Upsert behavior:
 - `HOST` (default `127.0.0.1`)
 - `CHROME_CDP_URL` (default `http://localhost:9222`)
 - `SCRAPE_TODAY_BUFFER_HOURS` (default `36`)
+- `LLM_PROVIDER` (`openai` | `zai`, optional; auto-detect if omitted)
+- `OPENAI_API_KEY` (required when provider is OpenAI)
+- `OPENAI_MODEL` (optional, default `gpt-4o-mini`)
+- `OPENAI_API_BASE` (optional custom OpenAI-compatible endpoint)
+- `ZAI_API_KEY` (required when provider is Z AI)
+- `ZAI_API_BASE` (optional for Z AI; default `https://api.z.ai/api/paas/v4/`)
+- `ZAI_MODEL` (optional for Z AI, default `glm-5`)
+- `LLM_TEMPERATURE` (optional, default `0.2`)
+- `LLM_MAX_TOKENS` (optional, default `1000`)
+
+Example setup is included in `.env.example`.
 
 ## Troubleshooting
 
@@ -213,6 +227,12 @@ open -na "Google Chrome" --args --remote-debugging-port=9222
 ### `No open GMAT tab found`
 
 - Open any GMAT Official Practice page in the same CDP Chrome instance.
+
+### AI review says `No response generated.`
+
+- This is usually output-token exhaustion on long prompts.
+- Remove or increase `LLM_MAX_TOKENS` in `.env`.
+- Keep `LLM_DEBUG=1` temporarily to log response diagnostics in server console.
 
 ### Question "Open" goes to wrong context
 
