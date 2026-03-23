@@ -911,6 +911,14 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
       ELSE 'Unknown'
     END
   `;
+  const difficultyExpr = `
+    CASE
+      WHEN LOWER(COALESCE(NULLIF(q.difficulty, ''), '')) = 'hard' THEN 'Hard'
+      WHEN LOWER(COALESCE(NULLIF(q.difficulty, ''), '')) = 'medium' THEN 'Medium'
+      WHEN LOWER(COALESCE(NULLIF(q.difficulty, ''), '')) = 'easy' THEN 'Easy'
+      ELSE 'Unknown'
+    END
+  `;
   if (runId) {
     where.push('q.run_id = ?');
     params.push(runId);
@@ -1187,6 +1195,14 @@ async function getPatterns(runId) {
       ELSE 'Unknown'
     END
   `;
+  const difficultyExpr = `
+    CASE
+      WHEN LOWER(COALESCE(NULLIF(q.difficulty, ''), '')) = 'hard' THEN 'Hard'
+      WHEN LOWER(COALESCE(NULLIF(q.difficulty, ''), '')) = 'medium' THEN 'Medium'
+      WHEN LOWER(COALESCE(NULLIF(q.difficulty, ''), '')) = 'easy' THEN 'Easy'
+      ELSE 'Unknown'
+    END
+  `;
 
   const subjectSortExpr = `
     CASE ${subjectFamilyExpr}
@@ -1218,6 +1234,7 @@ async function getPatterns(runId) {
         COUNT(*) AS total,
         SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) AS correct,
         SUM(CASE WHEN q.correct = 0 THEN 1 ELSE 0 END) AS wrong,
+        ROUND(AVG(q.time_sec), 0) AS avg_time_sec,
         ROUND(
           100.0 * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
           1
@@ -1306,7 +1323,43 @@ async function getPatterns(runId) {
           100.0 * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
           1
         ) AS accuracy_pct,
-        ROUND(AVG(q.time_sec), 0) AS avg_time_sec
+        ROUND(AVG(q.time_sec), 0) AS avg_time_sec,
+        SUM(CASE WHEN (${difficultyExpr}) = 'Hard' THEN 1 ELSE 0 END) AS hard_total,
+        ROUND(
+          CASE
+            WHEN SUM(CASE WHEN (${difficultyExpr}) = 'Hard' THEN 1 ELSE 0 END) > 0 THEN
+              100.0
+              * SUM(CASE WHEN (${difficultyExpr}) = 'Hard' AND q.correct = 1 THEN 1 ELSE 0 END)
+              / SUM(CASE WHEN (${difficultyExpr}) = 'Hard' THEN 1 ELSE 0 END)
+            ELSE NULL
+          END,
+          1
+        ) AS hard_accuracy_pct,
+        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Hard' THEN q.time_sec END), 0) AS hard_avg_time_sec,
+        SUM(CASE WHEN (${difficultyExpr}) = 'Medium' THEN 1 ELSE 0 END) AS medium_total,
+        ROUND(
+          CASE
+            WHEN SUM(CASE WHEN (${difficultyExpr}) = 'Medium' THEN 1 ELSE 0 END) > 0 THEN
+              100.0
+              * SUM(CASE WHEN (${difficultyExpr}) = 'Medium' AND q.correct = 1 THEN 1 ELSE 0 END)
+              / SUM(CASE WHEN (${difficultyExpr}) = 'Medium' THEN 1 ELSE 0 END)
+            ELSE NULL
+          END,
+          1
+        ) AS medium_accuracy_pct,
+        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Medium' THEN q.time_sec END), 0) AS medium_avg_time_sec,
+        SUM(CASE WHEN (${difficultyExpr}) = 'Easy' THEN 1 ELSE 0 END) AS easy_total,
+        ROUND(
+          CASE
+            WHEN SUM(CASE WHEN (${difficultyExpr}) = 'Easy' THEN 1 ELSE 0 END) > 0 THEN
+              100.0
+              * SUM(CASE WHEN (${difficultyExpr}) = 'Easy' AND q.correct = 1 THEN 1 ELSE 0 END)
+              / SUM(CASE WHEN (${difficultyExpr}) = 'Easy' THEN 1 ELSE 0 END)
+            ELSE NULL
+          END,
+          1
+        ) AS easy_accuracy_pct,
+        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Easy' THEN q.time_sec END), 0) AS easy_avg_time_sec
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
       WHERE ${runJoinClause}${answeredWhere}

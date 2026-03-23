@@ -25,6 +25,12 @@ const CONFIG = {
   pageWaitMs:        3200,               // ms to wait after hash navigation
   nextPageWaitMs:    2600,               // ms to wait after clicking "Next" in pagination
   reviewReadyTimeoutMs: 18000,           // ms to wait for review answer DOM to stabilize
+  reviewReadyFastTimeoutMs: 9000,        // ms for fallback candidate attempts (Part 2)
+  reviewNavWaitMs: 1200,                 // ms to wait right after review-hash navigation (Part 2)
+  maxReviewCatCandidates: 4,             // max category candidates per wrong question (Part 2)
+  maxQIdCandidates: 2,                   // max q_id candidates per wrong question (Part 2)
+  maxReviewAttemptsPerQuestion: 6,       // hard cap on candidate route attempts per wrong question
+  retrySameUrlOnPageError: false,        // retry same review URL once after page error
 };
 const THAI_TIME_ZONE = 'Asia/Bangkok';
 
@@ -1324,8 +1330,18 @@ function countAnswerChoiceNodes() {
   return 0;
 }
 
-async function waitForReviewReady(sessionId, reviewCatId, qId, cfg = CONFIG, expectedQCode = null) {
-  const timeoutMs = Number(cfg.reviewReadyTimeoutMs) || Math.max(Number(cfg.pageWaitMs || 0) * 4, 10000);
+async function waitForReviewReady(
+  sessionId,
+  reviewCatId,
+  qId,
+  cfg = CONFIG,
+  expectedQCode = null,
+  timeoutOverrideMs = null
+) {
+  const timeoutMs =
+    (Number(timeoutOverrideMs) > 0
+      ? Number(timeoutOverrideMs)
+      : Number(cfg.reviewReadyTimeoutMs)) || Math.max(Number(cfg.pageWaitMs || 0) * 4, 10000);
   const start = Date.now();
   const expectedRoutePart = `custom-quiz/${sessionId}/review/categories/${reviewCatId}/`;
   const normalizedExpectedQCode = expectedQCode ? String(expectedQCode) : null;
@@ -1897,6 +1913,24 @@ async function scrapePart2(sessions, cfg = CONFIG) {
   let skippedNotReady = 0;
   let skippedNotWrong = 0;
   let skippedMismatchedCode = 0;
+  const configuredPageWaitMs = Number(cfg.pageWaitMs || 0);
+  const reviewNavWaitMs = Math.max(
+    200,
+    Number(cfg.reviewNavWaitMs || Math.min(configuredPageWaitMs || 1200, 1200))
+  );
+  const fullReadyTimeoutMs = Math.max(
+    2000,
+    Number(cfg.reviewReadyTimeoutMs || Math.max(configuredPageWaitMs * 4, 10000))
+  );
+  const fastReadyTimeoutMs = Math.max(
+    2000,
+    Number(cfg.reviewReadyFastTimeoutMs || Math.min(fullReadyTimeoutMs, 9000))
+  );
+  const maxReviewCatCandidates = Math.max(1, Number(cfg.maxReviewCatCandidates || 4));
+  const maxQIdCandidates = Math.max(1, Number(cfg.maxQIdCandidates || 2));
+  const maxReviewAttemptsPerQuestion = Math.max(1, Number(cfg.maxReviewAttemptsPerQuestion || 6));
+  const retrySameUrlOnPageError = cfg.retrySameUrlOnPageError !== false;
+  const preferredReviewCatBySession = new Map();
   const parseReviewRouteFromNode = (node) => {
     if (!node?.getAttribute) return null;
     const attrs = ['href', 'data-href', 'data-url', 'data-link', 'onclick'];
@@ -1946,37 +1980,44 @@ async function scrapePart2(sessions, cfg = CONFIG) {
     sessionId,
     reviewCatCandidates,
     expectedQCode,
+    remainingAttempts = Number.POSITIVE_INFINITY,
   }) => {
     const wanted = String(expectedQCode || '').trim();
     if (!wanted) return null;
+    let attemptsLeft = Number(remainingAttempts);
+    if (!Number.isFinite(attemptsLeft)) attemptsLeft = Number.POSITIVE_INFINITY;
 
     for (const candidateCat of reviewCatCandidates) {
+      if (attemptsLeft <= 0) break;
       await navigateHashSafe(`custom-quiz/${sessionId}/categories/${candidateCat}`, cfg.pageWaitMs);
 
       const route = findReviewRouteByQCodeOnCurrentPage(sessionId, wanted);
       if (!route?.q_id || !route?.cat_id) continue;
 
+      attemptsLeft -= 1;
       const reviewHash = `custom-quiz/${sessionId}/review/categories/${route.cat_id}/${route.q_id}`;
-      let navResult = await navigateHashSafe(reviewHash, cfg.pageWaitMs);
+      let navResult = await navigateHashSafe(reviewHash, reviewNavWaitMs);
       let readyState = await waitForReviewReady(
         sessionId,
         route.cat_id,
         route.q_id,
         cfg,
-        wanted
+        wanted,
+        fastReadyTimeoutMs
       );
 
-      if (!readyState?.ready && navResult.hadPageError) {
+      if (!readyState?.ready && navResult.hadPageError && retrySameUrlOnPageError) {
         console.warn(
           `  ↻ Retry ${sessionId}/${route.q_id}: reopening q_code fallback URL after page error (${navResult.newPageErrors})`
         );
-        navResult = await navigateHashSafe(reviewHash, cfg.pageWaitMs);
+        navResult = await navigateHashSafe(reviewHash, reviewNavWaitMs);
         readyState = await waitForReviewReady(
           sessionId,
           route.cat_id,
           route.q_id,
           cfg,
-          wanted
+          wanted,
+          fastReadyTimeoutMs
         );
       }
 
@@ -2006,14 +2047,17 @@ async function scrapePart2(sessions, cfg = CONFIG) {
     } = toScrape[i];
     const diContext = isDiReviewContext(source, session_subject, cat_id, review_category_id);
     const savedRoute = parseReviewRoute(savedQuestionUrl);
+    const sessionKey = String(session_id);
+    const preferredReviewCatId = preferredReviewCatBySession.get(sessionKey);
     const qIdCandidates = Array.from(
       new Set(
         [q_id, savedRoute?.q_id, ...(Array.isArray(q_id_candidates) ? q_id_candidates : [])]
           .filter(Boolean)
           .map((id) => String(id))
       )
-    );
+    ).slice(0, maxQIdCandidates);
     const reviewCatCandidates = dedupeNumeric([
+      preferredReviewCatId,
       savedRoute?.cat_id,
       cat_id,
       parentCategoryFromQuestionCategory(cat_id),
@@ -2021,63 +2065,110 @@ async function scrapePart2(sessions, cfg = CONFIG) {
       parentCategoryFromQuestionCategory(review_category_id),
       parentCategoryFromQuestionCategory(savedRoute?.cat_id),
       cfg.reviewCategoryId,
-    ]);
+    ]).slice(0, maxReviewCatCandidates);
 
-    if (!reviewCatCandidates.length) {
+    if (!qIdCandidates.length || !reviewCatCandidates.length) {
       skippedNotReady += 1;
-      console.warn(`  ⚠️  Skipped ${session_id}/${q_id}: no valid review category id`);
+      console.warn(`  ⚠️  Skipped ${session_id}/${q_id}: missing review category or q_id candidates`);
       continue;
     }
 
     let ready = false;
     let usedReviewCatId = null;
     let usedQId = null;
-    for (const reviewCatId of reviewCatCandidates) {
-      for (const candidateQId of qIdCandidates) {
-        const reviewHash = `custom-quiz/${session_id}/review/categories/${reviewCatId}/${candidateQId}`;
-        let navResult = await navigateHashSafe(reviewHash, cfg.pageWaitMs);
-        let readyState = await waitForReviewReady(
+    let attemptsUsed = 0;
+    const attemptedPairs = new Set();
+    const tryReviewAttempt = async ({ reviewCatId, candidateQId, timeoutMs }) => {
+      if (!Number.isInteger(Number(reviewCatId)) || !candidateQId) {
+        return { ready: false, navResult: null, readyState: null, exhausted: false };
+      }
+      const attemptKey = `${reviewCatId}:${candidateQId}`;
+      if (attemptedPairs.has(attemptKey)) {
+        return { ready: false, navResult: null, readyState: null, exhausted: false };
+      }
+      if (attemptsUsed >= maxReviewAttemptsPerQuestion) {
+        return { ready: false, navResult: null, readyState: null, exhausted: true };
+      }
+
+      attemptedPairs.add(attemptKey);
+      attemptsUsed += 1;
+      const reviewHash = `custom-quiz/${session_id}/review/categories/${reviewCatId}/${candidateQId}`;
+      let navResult = await navigateHashSafe(reviewHash, reviewNavWaitMs);
+      let readyState = await waitForReviewReady(
+        session_id,
+        reviewCatId,
+        candidateQId,
+        cfg,
+        expectedQCode,
+        timeoutMs
+      );
+
+      if (!readyState?.ready && navResult.hadPageError && retrySameUrlOnPageError) {
+        console.warn(
+          `  ↻ Retry ${session_id}/${candidateQId}: reopening same review URL after page error (${navResult.newPageErrors})`
+        );
+        navResult = await navigateHashSafe(reviewHash, reviewNavWaitMs);
+        readyState = await waitForReviewReady(
           session_id,
           reviewCatId,
           candidateQId,
           cfg,
-          expectedQCode
+          expectedQCode,
+          timeoutMs
         );
+      }
 
-        if (!readyState?.ready && navResult.hadPageError) {
-          console.warn(
-            `  ↻ Retry ${session_id}/${candidateQId}: reopening same review URL after page error (${navResult.newPageErrors})`
-          );
-          navResult = await navigateHashSafe(reviewHash, cfg.pageWaitMs);
-          readyState = await waitForReviewReady(
-            session_id,
-            reviewCatId,
-            candidateQId,
-            cfg,
-            expectedQCode
-          );
-        }
+      return {
+        ready: Boolean(readyState?.ready),
+        navResult,
+        readyState,
+        exhausted: attemptsUsed >= maxReviewAttemptsPerQuestion,
+      };
+    };
 
-        ready = Boolean(readyState?.ready);
-        if (ready) {
-          usedReviewCatId = readyState?.routeCatId || reviewCatId;
-          usedQId = readyState?.routeQId || candidateQId;
+    if (savedRoute?.cat_id && savedRoute?.q_id) {
+      const directAttempt = await tryReviewAttempt({
+        reviewCatId: Number(savedRoute.cat_id),
+        candidateQId: String(savedRoute.q_id),
+        timeoutMs: fullReadyTimeoutMs,
+      });
+      if (directAttempt.ready) {
+        ready = true;
+        usedReviewCatId = directAttempt.readyState?.routeCatId || Number(savedRoute.cat_id);
+        usedQId = directAttempt.readyState?.routeQId || String(savedRoute.q_id);
+      }
+    }
+
+    for (const reviewCatId of reviewCatCandidates) {
+      if (ready || attemptsUsed >= maxReviewAttemptsPerQuestion) break;
+      for (const candidateQId of qIdCandidates) {
+        const attempt = await tryReviewAttempt({
+          reviewCatId,
+          candidateQId,
+          timeoutMs: fastReadyTimeoutMs,
+        });
+        if (attempt.ready) {
+          ready = true;
+          usedReviewCatId = attempt.readyState?.routeCatId || reviewCatId;
+          usedQId = attempt.readyState?.routeQId || candidateQId;
           break;
         }
-        if (navResult.hadPageError) {
+        if (attempt.navResult?.hadPageError) {
           console.warn(
-            `  ⚠️  ${session_id}/${candidateQId} cat ${reviewCatId} triggered page error (${navResult.newPageErrors}), trying next candidate.`
+            `  ⚠️  ${session_id}/${candidateQId} cat ${reviewCatId} triggered page error (${attempt.navResult.newPageErrors}), trying next candidate.`
           );
         }
+        if (attempt.exhausted) break;
       }
       if (ready) break;
     }
 
-    if (!ready && expectedQCode) {
+    if (!ready && expectedQCode && attemptsUsed < maxReviewAttemptsPerQuestion) {
       const fallbackReady = await tryOpenReviewByQCodeFallback({
         sessionId: session_id,
         reviewCatCandidates,
         expectedQCode,
+        remainingAttempts: Math.max(0, maxReviewAttemptsPerQuestion - attemptsUsed),
       });
       if (fallbackReady?.routeQId && fallbackReady?.routeCatId) {
         ready = true;
@@ -2094,6 +2185,7 @@ async function scrapePart2(sessions, cfg = CONFIG) {
       console.warn(`  ⚠️  Skipped ${session_id}/${q_id}: review page did not load in time`);
       continue;
     }
+    preferredReviewCatBySession.set(sessionKey, Number(usedReviewCatId));
 
     // Question code (6-digit OG number)
     const q_code =

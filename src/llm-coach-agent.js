@@ -369,10 +369,12 @@ async function buildPerformanceContext(runIdInput) {
     'Difficulty performance snapshot:',
     ...byDifficulty.map(
       (row) =>
-        `- ${row.difficulty || 'Unknown'}: total=${safeNumber(row.total, 0)}, accuracy=${safeNumber(
-          row.accuracy_pct,
+        `- ${row.difficulty || 'Unknown'}: total=${safeNumber(row.total, 0)}, correct=${safeNumber(
+          row.correct,
           0
-        )}%`
+        )}, wrong=${safeNumber(row.wrong, 0)}, accuracy=${safeNumber(row.accuracy_pct, 0)}%, avg=${formatDurationSeconds(
+          row.avg_time_sec
+        )}`
     ),
     '',
     'Confidence mismatch snapshot (wrong answers):',

@@ -772,6 +772,13 @@ function App() {
     return 'Needs Focus';
   }
 
+  function statusVariantFromAccuracy(accuracyPct) {
+    const label = statusLabelFromAccuracy(accuracyPct);
+    if (label === 'Strong') return 'success';
+    if (label === 'Improving') return 'info';
+    return 'warning';
+  }
+
   function handleClosePatternDrilldown() {
     setPatternDrilldown({
       open: false,
@@ -1252,40 +1259,43 @@ function App() {
                 <th>Incorrect</th>
                 <th>Accuracy</th>
                 <th>Avg Time / Q</th>
+                <th>Hard (Q / Acc / Avg)</th>
+                <th>Medium (Q / Acc / Avg)</th>
+                <th>Easy (Q / Acc / Avg)</th>
                 <th>Status</th>
               </tr>
             </thead>
             <tbody>
               {!categoryRows.length && (
                 <tr>
-                  <td colSpan="8">No category data yet.</td>
+                  <td colSpan="11">No category data yet.</td>
                 </tr>
               )}
-              {categoryRows.map((row) => (
-                <tr key={`${row.subject_family}-${row.subject_sub}`}>
-                  <td>{formatMaybe(row.subject_family)}</td>
-                  <td>{formatMaybe(row.subject_sub)}</td>
-                  <td>{formatMaybe(row.total_questions)}</td>
-                  <td>{formatMaybe(row.correct_count)}</td>
-                  <td>{formatMaybe(row.incorrect_count)}</td>
-                  <td>{formatPercent(row.accuracy_pct)}</td>
-                  <td>{formatDurationSeconds(row.avg_time_sec)}</td>
-                  <td>
-                    <Badge
-                      variant={
-                        statusLabelFromAccuracy(row.accuracy_pct) === 'Strong'
-                          ? 'success'
-                          : statusLabelFromAccuracy(row.accuracy_pct) === 'Improving'
-                            ? 'info'
-                            : 'warning'
-                      }
-                      className="status-pill"
-                    >
-                      {statusLabelFromAccuracy(row.accuracy_pct)}
-                    </Badge>
-                  </td>
-                </tr>
-              ))}
+              {categoryRows.map((row) => {
+                const statusLabel = statusLabelFromAccuracy(row.accuracy_pct);
+                return (
+                  <tr key={`${row.subject_family}-${row.subject_sub}`}>
+                    <td>{formatMaybe(row.subject_family)}</td>
+                    <td>{formatMaybe(row.subject_sub)}</td>
+                    <td>{formatMaybe(row.total_questions)}</td>
+                    <td>{formatMaybe(row.correct_count)}</td>
+                    <td>{formatMaybe(row.incorrect_count)}</td>
+                    <td>{formatPercent(row.accuracy_pct)}</td>
+                    <td>{formatDurationSeconds(row.avg_time_sec)}</td>
+                    <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>
+                    <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>
+                    <td>{formatDifficultyStat(row.easy_total, row.easy_accuracy_pct, row.easy_avg_time_sec)}</td>
+                    <td>
+                      <Badge
+                        variant={statusVariantFromAccuracy(row.accuracy_pct)}
+                        className={`status-pill ${String(statusLabel).toLowerCase().replace(/\s+/g, '-')}`}
+                      >
+                        {statusLabel}
+                      </Badge>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
