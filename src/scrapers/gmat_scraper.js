@@ -361,6 +361,32 @@ function mergeCategorySubCodeHints(targetMap, nextMap) {
   return targetMap;
 }
 
+function normalizeSubCode(value) {
+  const text = String(value || '').trim().toUpperCase();
+  if (!text) return null;
+  if (text === 'CR' || text === 'RC' || text === 'PS' || text === 'DS') return text;
+  if (text === 'MSR' || text === 'TA' || text === 'GI' || text === 'TPA' || text === 'DI') return text;
+  return null;
+}
+
+function preferredReviewCategoryFromSubCodeHints(subCodeHints, subjectSubRaw, subjectSub) {
+  if (!(subCodeHints instanceof Map) || !subCodeHints.size) return null;
+  const desiredCodes = Array.from(
+    new Set([normalizeSubCode(subjectSubRaw), normalizeSubCode(subjectSub)].filter(Boolean))
+  );
+  if (!desiredCodes.length) return null;
+
+  for (const desiredCode of desiredCodes) {
+    for (const [catId, code] of subCodeHints.entries()) {
+      if (String(code || '').trim().toUpperCase() === desiredCode) {
+        const parsedCatId = Number(catId);
+        if (Number.isInteger(parsedCatId) && parsedCatId > 0) return parsedCatId;
+      }
+    }
+  }
+  return null;
+}
+
 function subSubjectFamily(subSubject) {
   if (subSubject === 'CR' || subSubject === 'RC' || subSubject === 'VERBAL') return 'Verbal';
   if (subSubject === 'PS' || subSubject === 'QUANT') return 'Quant';
@@ -1750,6 +1776,8 @@ async function scrapePart1(cfg = CONFIG) {
         cat_id: q.cat_id || reviewCategoryId || parentCategoryFromQuestionCategory(q.cat_id) || null,
         review_category_id: reviewCategoryId || parentCategoryFromQuestionCategory(q.cat_id) || null,
         time_sec: Number(q.time_sec) || 0,
+        subject_sub: q.subject_sub || subSubjectGroup(q.subject_sub_raw || normalizeSubSubject(q)) || null,
+        subject_sub_raw: String(q.subject_sub_raw || normalizeSubSubject(q) || '').trim().toUpperCase() || null,
       }));
     const wrongFromCategories = catQs
       .filter((q) => !q.correct && q?.q_id)
@@ -1818,6 +1846,14 @@ async function scrapePart1(cfg = CONFIG) {
     const apiCorrectCount = apiS.questions.filter((q) => Boolean(q.correct)).length;
     const apiErrorCount = apiS.questions.filter((q) => !q.correct).length;
     const statsQuestions = catQs.length ? catQs : questions;
+    const averageTimeSec = (rows = []) => {
+      const values = rows
+        .map((q) => Number(q?.time_sec))
+        .filter((value) => Number.isFinite(value) && value > 0);
+      if (!values.length) return null;
+      const total = values.reduce((sum, value) => sum + value, 0);
+      return Math.round(total / values.length);
+    };
     const computedCorrect = statsQuestions.length
       ? statsQuestions.filter((q) => q.correct).length
       : apiCorrectCount;
@@ -1827,6 +1863,9 @@ async function scrapePart1(cfg = CONFIG) {
     const computedTotal = computedCorrect + computedErrors;
     const computedAccuracyPct =
       computedTotal > 0 ? Number(((computedCorrect * 100) / computedTotal).toFixed(1)) : null;
+    const avgTimeFromRows = averageTimeSec(statsQuestions);
+    const avgCorrectTimeFromRows = averageTimeSec(statsQuestions.filter((q) => q.correct));
+    const avgIncorrectTimeFromRows = averageTimeSec(statsQuestions.filter((q) => !q.correct));
 
     sessions.push({
       session_id:            parseInt(sid),
@@ -1840,9 +1879,9 @@ async function scrapePart1(cfg = CONFIG) {
         correct:             computedCorrect,
         errors:              computedErrors,
         accuracy_pct:        computedAccuracyPct,
-        avg_time_sec:        avgMatch  ? parseTimeSec(avgMatch[1])  : Math.round(apiS.questions.reduce((s,q)=>s+q.time_sec,0)/apiS.questions.length),
-        avg_correct_time_sec:  cAvgMatch ? parseTimeSec(cAvgMatch[1]) : null,
-        avg_incorrect_time_sec: wAvgMatch ? parseTimeSec(wAvgMatch[1]) : null,
+        avg_time_sec:        avgTimeFromRows ?? (avgMatch ? parseTimeSec(avgMatch[1]) : null),
+        avg_correct_time_sec:  avgCorrectTimeFromRows ?? (cAvgMatch ? parseTimeSec(cAvgMatch[1]) : null),
+        avg_incorrect_time_sec: avgIncorrectTimeFromRows ?? (wAvgMatch ? parseTimeSec(wAvgMatch[1]) : null),
       },
       questions,             // category rows + API fallback rows (session-scoped)
       wrong_q_ids:           wrongRefs,  // internal IDs for Part 2
@@ -1893,6 +1932,8 @@ async function scrapePart2(sessions, cfg = CONFIG) {
         q_id_candidates: wq.q_id_candidates || [wq.q_id],
         cat_id: wq.cat_id,
         review_category_id: wq.review_category_id || s.review_category_id || null,
+        subject_sub: wq.subject_sub || null,
+        subject_sub_raw: wq.subject_sub_raw || null,
         q_code: wq.q_code || null,
         question_url: wq.question_url || null,
         api_user_answer: wq.user_answer || null,
@@ -2041,6 +2082,8 @@ async function scrapePart2(sessions, cfg = CONFIG) {
       q_id_candidates,
       cat_id,
       review_category_id,
+      subject_sub: subjectSub,
+      subject_sub_raw: subjectSubRaw,
       q_code: expectedQCode,
       question_url: savedQuestionUrl,
       api_user_answer: apiUserAnswer,
@@ -2048,7 +2091,13 @@ async function scrapePart2(sessions, cfg = CONFIG) {
     const diContext = isDiReviewContext(source, session_subject, cat_id, review_category_id);
     const savedRoute = parseReviewRoute(savedQuestionUrl);
     const sessionKey = String(session_id);
+    const subCodeHints = subCodeHintsBySession.get(sessionKey);
     const preferredReviewCatId = preferredReviewCatBySession.get(sessionKey);
+    const preferredReviewCatFromSubCode = preferredReviewCategoryFromSubCodeHints(
+      subCodeHints,
+      subjectSubRaw,
+      subjectSub
+    );
     const qIdCandidates = Array.from(
       new Set(
         [q_id, savedRoute?.q_id, ...(Array.isArray(q_id_candidates) ? q_id_candidates : [])]
@@ -2058,6 +2107,7 @@ async function scrapePart2(sessions, cfg = CONFIG) {
     ).slice(0, maxQIdCandidates);
     const reviewCatCandidates = dedupeNumeric([
       preferredReviewCatId,
+      preferredReviewCatFromSubCode,
       savedRoute?.cat_id,
       cat_id,
       parentCategoryFromQuestionCategory(cat_id),

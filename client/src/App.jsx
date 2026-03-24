@@ -142,18 +142,34 @@ function mapSubjectFamily(subject) {
 
 async function fetchJson(url, options) {
   const response = await fetch(url, options);
-  let data = null;
+  const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+  let data = {};
+  let rawBody = '';
   try {
-    data = await response.json();
+    if (contentType.includes('application/json')) {
+      data = await response.json();
+    } else {
+      rawBody = await response.text();
+      if (rawBody) {
+        try {
+          data = JSON.parse(rawBody);
+        } catch (_parseError) {
+          data = {};
+        }
+      }
+    }
   } catch (_error) {
     data = {};
   }
 
   if (!response.ok) {
-    const error = new Error(data.error || `Request failed (${response.status})`);
+    const fallbackMessage = rawBody
+      ? `Request failed (${response.status}): ${String(rawBody).replace(/\s+/g, ' ').trim().slice(0, 220)}`
+      : `Request failed (${response.status})`;
+    const error = new Error(data.error || fallbackMessage);
     error.status = response.status;
     error.hint = data.hint || '';
-    error.details = data.details || '';
+    error.details = data.details || rawBody || '';
     error.debug = data.debug || null;
     throw error;
   }
@@ -240,6 +256,21 @@ function App() {
   const [aiMessages, setAiMessages] = useState([]);
   const [isAskingAi, setIsAskingAi] = useState(false);
   const aiChatEndRef = useRef(null);
+
+  // Collapsible sections state
+  const [collapsedSections, setCollapsedSections] = useState({
+    hero: false,
+    aiCoach: false,
+    topicDashboard: false,
+    categoryBreakdown: false,
+    subtopicBreakdown: false,
+    performanceBySession: false,
+    errorLog: false,
+  });
+
+  const toggleSection = (section) => {
+    setCollapsedSections((prev) => ({ ...prev, [section]: !prev[section] }));
+  };
 
   // Pagination state
   const [sessionPagination, setSessionPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
@@ -1070,26 +1101,41 @@ function App() {
   return (
     <main className="page-shell">
       <Card className="hero card">
-        <p className="eyebrow">Local GMAT Analytics</p>
-        <h1>Topic Breakdown Dashboard</h1>
-        <p className="muted">
-          Track Quant, Verbal, and Data Insights performance and review error patterns from synced GMAT practice.
-        </p>
-        <div className="hero-actions">
-          <Button type="button" onClick={() => setSyncCenterOpen(true)}>
-            Sync GMAT Practice
-          </Button>
-          <Button variant="outline" asChild>
-            <a
-              href="https://gmat.targettestprep.com/gmat_focus_score_chart_and_calculator"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Open Score Calculator
-            </a>
-          </Button>
-          <p className={`status${status.isError ? ' error' : ''}`}>{status.message}</p>
+        <div className="section-header">
+          <p className="eyebrow">Local GMAT Analytics</p>
+          <h1>Topic Breakdown Dashboard</h1>
+          <button
+            type="button"
+            className="collapse-toggle"
+            onClick={() => toggleSection('hero')}
+            aria-expanded={!collapsedSections.hero}
+            aria-label="Toggle hero section"
+          >
+            {collapsedSections.hero ? '▶' : '▼'}
+          </button>
         </div>
+        {!collapsedSections.hero && (
+          <>
+            <p className="muted">
+              Track Quant, Verbal, and Data Insights performance and review error patterns from synced GMAT practice.
+            </p>
+            <div className="hero-actions">
+              <Button type="button" onClick={() => setSyncCenterOpen(true)}>
+                Sync GMAT Practice
+              </Button>
+              <Button variant="outline" asChild>
+                <a
+                  href="https://gmat.targettestprep.com/gmat_focus_score_chart_and_calculator"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Open Score Calculator
+                </a>
+              </Button>
+              <p className={`status${status.isError ? ' error' : ''}`}>{status.message}</p>
+            </div>
+          </>
+        )}
       </Card>
 
       <Card className="card ai-coach-card">
@@ -1099,73 +1145,88 @@ function App() {
             <h2>AI Performance Reviewer + Q&A Coach</h2>
             <p className="muted">{`Scope: ${aiScopeLabel}`}</p>
           </div>
-          <Button type="button" onClick={handleGenerateAiReview} disabled={isGeneratingAiReview}>
-            {isGeneratingAiReview ? 'Generating Review...' : 'Generate Review'}
-          </Button>
-        </div>
-
-        <label>
-          Review focus (optional)
-          <Textarea
-            rows={2}
-            value={aiFocus}
-            placeholder="Example: Focus on Data Insights timing and low-confidence misses."
-            onChange={(event) => setAiFocus(event.target.value)}
-          />
-        </label>
-
-        <div className="ai-review-block">
-          <h3>Performance Review</h3>
-          <div className="ai-review-output">
-            {aiReview ? <pre>{aiReview}</pre> : <p className="muted">Generate a review to get personalized recommendations.</p>}
+          <div className="ai-coach-actions">
+            <Button type="button" onClick={handleGenerateAiReview} disabled={isGeneratingAiReview}>
+              {isGeneratingAiReview ? 'Generating Review...' : 'Generate Review'}
+            </Button>
+            <button
+              type="button"
+              className="collapse-toggle"
+              onClick={() => toggleSection('aiCoach')}
+              aria-expanded={!collapsedSections.aiCoach}
+              aria-label="Toggle AI Coach section"
+            >
+              {collapsedSections.aiCoach ? '▶' : '▼'}
+            </button>
           </div>
         </div>
 
-        <div className="ai-chat-block">
-          <h3>Ask Follow-up Questions</h3>
-          <div className="ai-chat-shell">
-            <div className="ai-chat-toolbar">
-              <p className="muted">Chat with your coach about weak areas, timing, and daily drills.</p>
-              <Button variant="outline" size="sm" type="button" onClick={handleResetAiChat}>
-                Clear Chat
-              </Button>
-            </div>
-            <div className="ai-chat-log" role="log" aria-live="polite">
-              {aiMessages.map((message, idx) => (
-                <article key={`ai-${idx}`} className={`ai-message ${message.role === 'assistant' ? 'assistant' : 'user'}`}>
-                  <strong>{message.role === 'assistant' ? 'Coach' : 'You'}</strong>
-                  <p>{message.content}</p>
-                </article>
-              ))}
-              {isAskingAi && (
-                <article className="ai-message assistant typing">
-                  <strong>Coach</strong>
-                  <p>Thinking...</p>
-                </article>
-              )}
-              <div ref={aiChatEndRef} />
-            </div>
-            <div className="ai-chat-quick">
-              {AI_COACH_QUICK_PROMPTS.map((prompt) => (
-                <button key={prompt} type="button" className="ai-chip" onClick={() => handleAskAi(prompt)}>
-                  {prompt}
-                </button>
-              ))}
-            </div>
-            <div className="ai-chat-composer">
+        {!collapsedSections.aiCoach && (
+          <>
+            <label>
+              Review focus (optional)
               <Textarea
                 rows={2}
-                value={aiQuestion}
-                placeholder="Type your question and press Enter to send (Shift+Enter for new line)"
-                onChange={(event) => setAiQuestion(event.target.value)}
-                onKeyDown={handleAiComposerKeyDown}
+                value={aiFocus}
+                placeholder="Example: Focus on Data Insights timing and low-confidence misses."
+                onChange={(event) => setAiFocus(event.target.value)}
               />
-              <Button type="button" onClick={() => handleAskAi()} disabled={isAskingAi || !String(aiQuestion || '').trim()}>
-                {isAskingAi ? 'Sending...' : 'Send'}
-              </Button>
+            </label>
+
+            <div className="ai-review-block">
+              <h3>Performance Review</h3>
+              <div className="ai-review-output">
+                {aiReview ? <pre>{aiReview}</pre> : <p className="muted">Generate a review to get personalized recommendations.</p>}
+              </div>
             </div>
-          </div>
-        </div>
+
+            <div className="ai-chat-block">
+              <h3>Ask Follow-up Questions</h3>
+              <div className="ai-chat-shell">
+                <div className="ai-chat-toolbar">
+                  <p className="muted">Chat with your coach about weak areas, timing, and daily drills.</p>
+                  <Button variant="outline" size="sm" type="button" onClick={handleResetAiChat}>
+                    Clear Chat
+                  </Button>
+                </div>
+                <div className="ai-chat-log" role="log" aria-live="polite">
+                  {aiMessages.map((message, idx) => (
+                    <article key={`ai-${idx}`} className={`ai-message ${message.role === 'assistant' ? 'assistant' : 'user'}`}>
+                      <strong>{message.role === 'assistant' ? 'Coach' : 'You'}</strong>
+                      <p>{message.content}</p>
+                    </article>
+                  ))}
+                  {isAskingAi && (
+                    <article className="ai-message assistant typing">
+                      <strong>Coach</strong>
+                      <p>Thinking...</p>
+                    </article>
+                  )}
+                  <div ref={aiChatEndRef} />
+                </div>
+                <div className="ai-chat-quick">
+                  {AI_COACH_QUICK_PROMPTS.map((prompt) => (
+                    <button key={prompt} type="button" className="ai-chip" onClick={() => handleAskAi(prompt)}>
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
+                <div className="ai-chat-composer">
+                  <Textarea
+                    rows={2}
+                    value={aiQuestion}
+                    placeholder="Type your question and press Enter to send (Shift+Enter for new line)"
+                    onChange={(event) => setAiQuestion(event.target.value)}
+                    onKeyDown={handleAiComposerKeyDown}
+                  />
+                  <Button type="button" onClick={() => handleAskAi()} disabled={isAskingAi || !String(aiQuestion || '').trim()}>
+                    {isAskingAi ? 'Sending...' : 'Send'}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
       </Card>
 
       <Card className="card topic-dashboard">
@@ -1175,108 +1236,208 @@ function App() {
             <h2>Topic Breakdown</h2>
             <p className="muted">Performance across Quant, Verbal, and Data Insights modules.</p>
           </div>
+          <button
+            type="button"
+            className="collapse-toggle"
+            onClick={() => toggleSection('topicDashboard')}
+            aria-expanded={!collapsedSections.topicDashboard}
+            aria-label="Toggle Topic Dashboard section"
+          >
+            {collapsedSections.topicDashboard ? '▶' : '▼'}
+          </button>
         </div>
 
-        <div className="topic-score-grid">
-          {!subjectCards.length && <article className="topic-score-card muted">No subject data yet.</article>}
-          {subjectCards.map((card) => {
-            const accuracy = Math.max(0, Math.min(100, Number(card.accuracy_pct || 0)));
-            const errorRate = Math.max(0, Number((100 - accuracy).toFixed(1)));
-            return (
-              <article key={card.family} className="topic-score-card">
-                <span className="topic-chip">{card.family}</span>
-                <strong className="topic-score">{formatPercent(accuracy)}</strong>
-                <span className="topic-score-meta">{`${card.correct}/${card.total} correct · Avg ${formatDurationSeconds(card.avg_time_sec)}`}</span>
-                <div className="topic-track">
-                  <div className="topic-track-fill" style={{ width: `${accuracy}%` }} />
-                </div>
-                <span className="topic-score-meta">{`${errorRate}% error rate`}</span>
-              </article>
-            );
-          })}
-        </div>
-
-        <div className="topic-insight-grid">
-          <article className="topic-panel">
-            <h3>Accuracy vs Error Rate</h3>
-            <ul className="accuracy-rows">
-              {!subjectCards.length && <li className="metric-empty">No data yet</li>}
+        {!collapsedSections.topicDashboard && (
+          <>
+            <div className="topic-score-grid">
+              {!subjectCards.length && <article className="topic-score-card muted">No subject data yet.</article>}
               {subjectCards.map((card) => {
                 const accuracy = Math.max(0, Math.min(100, Number(card.accuracy_pct || 0)));
                 const errorRate = Math.max(0, Number((100 - accuracy).toFixed(1)));
                 return (
-                  <li key={`acc-${card.family}`}>
-                    <div className="accuracy-label">
-                      <span>{card.family}</span>
-                      <strong>{`${formatPercent(accuracy)} / ${formatPercent(errorRate)}`}</strong>
+                  <article key={card.family} className="topic-score-card">
+                    <span className="topic-chip">{card.family}</span>
+                    <strong className="topic-score">{formatPercent(accuracy)}</strong>
+                    <span className="topic-score-meta">{`${card.correct}/${card.total} correct · Avg ${formatDurationSeconds(card.avg_time_sec)}`}</span>
+                    <div className="topic-track">
+                      <div className="topic-track-fill" style={{ width: `${accuracy}%` }} />
                     </div>
-                    <div className="accuracy-bar">
-                      <div className="accuracy-fill" style={{ width: `${accuracy}%` }} />
-                      <div className="error-fill" style={{ width: `${errorRate}%` }} />
-                    </div>
-                  </li>
+                    <span className="topic-score-meta">{`${errorRate}% error rate`}</span>
+                  </article>
                 );
               })}
-            </ul>
-          </article>
-
-          <article className="topic-panel mastery-panel">
-            <h3>Overall Mastery</h3>
-            <div
-              className="mastery-ring"
-              style={{
-                background: `conic-gradient(var(--accent) 0 ${overallMastery}%, rgba(61, 69, 65, 0.14) ${overallMastery}% 100%)`,
-              }}
-            >
-              <div className="mastery-inner">
-                <strong>{formatPercent(overallMastery)}</strong>
-                <span>weighted</span>
-              </div>
             </div>
-            <div className="mastery-legend">
-              {subjectCards.map((card) => (
-                <div key={`m-${card.family}`}>
-                  <span>{card.family}</span>
-                  <strong>{formatPercent(card.accuracy_pct)}</strong>
+
+            <div className="topic-insight-grid">
+              <article className="topic-panel">
+                <h3>Accuracy vs Error Rate</h3>
+                <ul className="accuracy-rows">
+                  {!subjectCards.length && <li className="metric-empty">No data yet</li>}
+                  {subjectCards.map((card) => {
+                    const accuracy = Math.max(0, Math.min(100, Number(card.accuracy_pct || 0)));
+                    const errorRate = Math.max(0, Number((100 - accuracy).toFixed(1)));
+                    return (
+                      <li key={`acc-${card.family}`}>
+                        <div className="accuracy-label">
+                          <span>{card.family}</span>
+                          <strong>{`${formatPercent(accuracy)} / ${formatPercent(errorRate)}`}</strong>
+                        </div>
+                        <div className="accuracy-bar">
+                          <div className="accuracy-fill" style={{ width: `${accuracy}%` }} />
+                          <div className="error-fill" style={{ width: `${errorRate}%` }} />
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </article>
+
+              <article className="topic-panel mastery-panel">
+                <h3>Overall Mastery</h3>
+                <div
+                  className="mastery-ring"
+                  style={{
+                    background: `conic-gradient(var(--accent) 0 ${overallMastery}%, rgba(61, 69, 65, 0.14) ${overallMastery}% 100%)`,
+                  }}
+                >
+                  <div className="mastery-inner">
+                    <strong>{formatPercent(overallMastery)}</strong>
+                    <span>weighted</span>
+                  </div>
                 </div>
-              ))}
+                <div className="mastery-legend">
+                  {subjectCards.map((card) => (
+                    <div key={`m-${card.family}`}>
+                      <span>{card.family}</span>
+                      <strong>{formatPercent(card.accuracy_pct)}</strong>
+                    </div>
+                  ))}
+                </div>
+              </article>
             </div>
-          </article>
-        </div>
-
+          </>
+        )}
       </Card>
 
       <Card className="card">
-        <h2>Category Detailed Breakdown</h2>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Subject</th>
-                <th>Category</th>
-                <th>Total Questions</th>
-                <th>Correct</th>
-                <th>Incorrect</th>
-                <th>Accuracy</th>
-                <th>Avg Time / Q</th>
-                <th>Hard (Q / Acc / Avg)</th>
-                <th>Medium (Q / Acc / Avg)</th>
-                <th>Easy (Q / Acc / Avg)</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {!categoryRows.length && (
+        <div className="section-header">
+          <h2>Category Detailed Breakdown</h2>
+          <button
+            type="button"
+            className="collapse-toggle"
+            onClick={() => toggleSection('categoryBreakdown')}
+            aria-expanded={!collapsedSections.categoryBreakdown}
+            aria-label="Toggle Category Detailed Breakdown section"
+          >
+            {collapsedSections.categoryBreakdown ? '▶' : '▼'}
+          </button>
+        </div>
+        {!collapsedSections.categoryBreakdown && (
+          <div className="table-wrap">
+            <table>
+              <thead>
                 <tr>
-                  <td colSpan="11">No category data yet.</td>
+                  <th>Subject</th>
+                  <th>Category</th>
+                  <th>Total Questions</th>
+                  <th>Correct</th>
+                  <th>Incorrect</th>
+                  <th>Accuracy</th>
+                  <th>Avg Time / Q</th>
+                  <th>Hard (Q / Acc / Avg)</th>
+                  <th>Medium (Q / Acc / Avg)</th>
+                  <th>Easy (Q / Acc / Avg)</th>
+                  <th>Status</th>
                 </tr>
-              )}
-              {categoryRows.map((row) => {
-                const statusLabel = statusLabelFromAccuracy(row.accuracy_pct);
-                return (
-                  <tr key={`${row.subject_family}-${row.subject_sub}`}>
+              </thead>
+              <tbody>
+                {!categoryRows.length && (
+                  <tr>
+                    <td colSpan="11">No category data yet.</td>
+                  </tr>
+                )}
+                {categoryRows.map((row) => {
+                  const statusLabel = statusLabelFromAccuracy(row.accuracy_pct);
+                  return (
+                    <tr key={`${row.subject_family}-${row.subject_sub}`}>
+                      <td>{formatMaybe(row.subject_family)}</td>
+                      <td>{formatMaybe(row.subject_sub)}</td>
+                      <td>{formatMaybe(row.total_questions)}</td>
+                      <td>{formatMaybe(row.correct_count)}</td>
+                      <td>{formatMaybe(row.incorrect_count)}</td>
+                      <td>{formatPercent(row.accuracy_pct)}</td>
+                      <td>{formatDurationSeconds(row.avg_time_sec)}</td>
+                      <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>
+                      <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>
+                      <td>{formatDifficultyStat(row.easy_total, row.easy_accuracy_pct, row.easy_avg_time_sec)}</td>
+                      <td>
+                        <Badge
+                          variant={statusVariantFromAccuracy(row.accuracy_pct)}
+                          className={`status-pill ${String(statusLabel).toLowerCase().replace(/\s+/g, '-')}`}
+                        >
+                          {statusLabel}
+                        </Badge>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <Card className="card">
+        <div className="section-header-filters">
+          <h2>Subtopic Breakdown</h2>
+          <div className="filter-row">
+            <Select className="filter-select" value={subtopicScope} onChange={(event) => setSubtopicScope(event.target.value)}>
+              {subtopicScopeOptions.map((scope) => (
+                <option key={scope} value={scope}>
+                  {scope}
+                </option>
+              ))}
+            </Select>
+            <button
+              type="button"
+              className="collapse-toggle"
+              onClick={() => toggleSection('subtopicBreakdown')}
+              aria-expanded={!collapsedSections.subtopicBreakdown}
+              aria-label="Toggle Subtopic Breakdown section"
+            >
+              {collapsedSections.subtopicBreakdown ? '▶' : '▼'}
+            </button>
+          </div>
+        </div>
+        {!collapsedSections.subtopicBreakdown && (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Subject</th>
+                  <th>Category</th>
+                  <th>Subtopic</th>
+                  <th>Total</th>
+                  <th>Correct</th>
+                  <th>Incorrect</th>
+                  <th>Accuracy</th>
+                  <th>Avg Time</th>
+                  <th>Hard (Q / Acc / Avg)</th>
+                  <th>Medium (Q / Acc / Avg)</th>
+                  <th>Easy (Q / Acc / Avg)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!filteredSubtopicRows.length && (
+                  <tr>
+                    <td colSpan="11">No subtopic data yet.</td>
+                  </tr>
+                )}
+                {filteredSubtopicRows.map((row) => (
+                  <tr key={`${row.subject_family}-${row.subject_sub}-${row.subtopic}`}>
                     <td>{formatMaybe(row.subject_family)}</td>
                     <td>{formatMaybe(row.subject_sub)}</td>
+                    <td>{formatMaybe(row.subtopic)}</td>
                     <td>{formatMaybe(row.total_questions)}</td>
                     <td>{formatMaybe(row.correct_count)}</td>
                     <td>{formatMaybe(row.incorrect_count)}</td>
@@ -1285,62 +1446,12 @@ function App() {
                     <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>
                     <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>
                     <td>{formatDifficultyStat(row.easy_total, row.easy_accuracy_pct, row.easy_avg_time_sec)}</td>
-                    <td>
-                      <Badge
-                        variant={statusVariantFromAccuracy(row.accuracy_pct)}
-                        className={`status-pill ${String(statusLabel).toLowerCase().replace(/\s+/g, '-')}`}
-                      >
-                        {statusLabel}
-                      </Badge>
-                    </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      <Card className="card">
-        <div className="section-header-filters">
-          <h2>Subtopic Breakdown</h2>
-          <Select className="filter-select" value={subtopicScope} onChange={(event) => setSubtopicScope(event.target.value)}>
-            {subtopicScopeOptions.map((scope) => (
-              <option key={scope} value={scope}>
-                {scope}
-              </option>
-            ))}
-          </Select>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Subject</th>
-                <th>Category</th>
-                <th>Subtopic</th>
-                <th>Incorrect</th>
-                <th>Avg Time (Incorrect)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {!filteredSubtopicRows.length && (
-                <tr>
-                  <td colSpan="5">No subtopic data yet.</td>
-                </tr>
-              )}
-              {filteredSubtopicRows.map((row) => (
-                <tr key={`${row.subject_family}-${row.subject_sub}-${row.subtopic}`}>
-                  <td>{formatMaybe(row.subject_family)}</td>
-                  <td>{formatMaybe(row.subject_sub)}</td>
-                  <td>{formatMaybe(row.subtopic)}</td>
-                  <td>{formatMaybe(row.incorrect_count)}</td>
-                  <td>{formatDurationSeconds(row.avg_time_sec)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </Card>
 
       <Card className="card">
@@ -1388,282 +1499,310 @@ function App() {
                 Clear
               </Button>
             )}
+            <button
+              type="button"
+              className="collapse-toggle"
+              onClick={() => toggleSection('performanceBySession')}
+              aria-expanded={!collapsedSections.performanceBySession}
+              aria-label="Toggle Performance by Session section"
+            >
+              {collapsedSections.performanceBySession ? '▶' : '▼'}
+            </button>
           </div>
         </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th
-                  className="sortable"
-                  onClick={() => handleSessionSort('session_date')}
-                >
-                  Date {sessionSort.key === 'session_date' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="sortable"
-                  onClick={() => handleSessionSort('session_external_id')}
-                >
-                  Session ID {sessionSort.key === 'session_external_id' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="sortable"
-                  onClick={() => handleSessionSort('subject')}
-                >
-                  Subject {sessionSort.key === 'subject' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="sortable"
-                  onClick={() => handleSessionSort('question_count_display')}
-                >
-                  Questions {sessionSort.key === 'question_count_display' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="sortable"
-                  onClick={() => handleSessionSort('error_count_display')}
-                >
-                  Errors {sessionSort.key === 'error_count_display' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="sortable"
-                  onClick={() => handleSessionSort('answered_accuracy_pct')}
-                >
-                  Accuracy % {sessionSort.key === 'answered_accuracy_pct' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th
-                  className="sortable"
-                  onClick={() => handleSessionSort('avg_time_sec')}
-                >
-                  Avg Time {sessionSort.key === 'avg_time_sec' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th>Hard (Q / Acc / Avg)</th>
-                <th>Medium (Q / Acc / Avg)</th>
-                <th>Easy (Q / Acc / Avg)</th>
-                <th>Session Analysis</th>
-              </tr>
-            </thead>
-            <tbody>
-              {processedSessions.length === 0 && (
-                <tr>
-                  <td colSpan="11">No sessions found.</td>
-                </tr>
-              )}
-              {processedSessions.map((row) => (
-                <tr key={`${row.session_external_id}-${row.run_id}`}>
-                  <td>{formatDate(row.session_date)}</td>
-                  <td>{formatMaybe(row.session_external_id)}</td>
-                  <td>{formatMaybe(row.subject)}</td>
-                  <td>{formatMaybe(row.question_count_display)}</td>
-                  <td>{formatMaybe(row.error_count_display)}</td>
-                  <td>{formatPercent(row.answered_accuracy_pct)}</td>
-                  <td>{formatDurationSeconds(row.avg_time_sec)}</td>
-                  <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>
-                  <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>
-                  <td>{formatDifficultyStat(row.easy_total, row.easy_accuracy_pct, row.easy_avg_time_sec)}</td>
-                  <td>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="readmore-btn"
-                      type="button"
-                      onClick={() => handleOpenSessionAnalysis(row)}
+        {!collapsedSections.performanceBySession && (
+          <>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th
+                      className="sortable"
+                      onClick={() => handleSessionSort('session_date')}
                     >
-                      Read more
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="pagination-controls">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={sessionPagination.page <= 1}
-            onClick={() => loadSessions(sessionPagination.page - 1)}
-          >
-            Previous
-          </Button>
-          <span className="pagination-info">
-            Page {sessionPagination.page} of {sessionPagination.totalPages || 1} ({sessionPagination.total} total sessions)
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={sessionPagination.page >= sessionPagination.totalPages}
-            onClick={() => loadSessions(sessionPagination.page + 1)}
-          >
-            Next
-          </Button>
-        </div>
+                      Date {sessionSort.key === 'session_date' && (sessionSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th
+                      className="sortable"
+                      onClick={() => handleSessionSort('session_external_id')}
+                    >
+                      Session ID {sessionSort.key === 'session_external_id' && (sessionSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th
+                      className="sortable"
+                      onClick={() => handleSessionSort('subject')}
+                    >
+                      Subject {sessionSort.key === 'subject' && (sessionSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th
+                      className="sortable"
+                      onClick={() => handleSessionSort('question_count_display')}
+                    >
+                      Questions {sessionSort.key === 'question_count_display' && (sessionSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th
+                      className="sortable"
+                      onClick={() => handleSessionSort('error_count_display')}
+                    >
+                      Errors {sessionSort.key === 'error_count_display' && (sessionSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th
+                      className="sortable"
+                      onClick={() => handleSessionSort('answered_accuracy_pct')}
+                    >
+                      Accuracy % {sessionSort.key === 'answered_accuracy_pct' && (sessionSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th
+                      className="sortable"
+                      onClick={() => handleSessionSort('avg_time_sec')}
+                    >
+                      Avg Time {sessionSort.key === 'avg_time_sec' && (sessionSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th>Hard (Q / Acc / Avg)</th>
+                    <th>Medium (Q / Acc / Avg)</th>
+                    <th>Easy (Q / Acc / Avg)</th>
+                    <th>Session Analysis</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {processedSessions.length === 0 && (
+                    <tr>
+                      <td colSpan="11">No sessions found.</td>
+                    </tr>
+                  )}
+                  {processedSessions.map((row) => (
+                    <tr key={`${row.session_external_id}-${row.run_id}`}>
+                      <td>{formatDate(row.session_date)}</td>
+                      <td>{formatMaybe(row.session_external_id)}</td>
+                      <td>{formatMaybe(row.subject)}</td>
+                      <td>{formatMaybe(row.question_count_display)}</td>
+                      <td>{formatMaybe(row.error_count_display)}</td>
+                      <td>{formatPercent(row.answered_accuracy_pct)}</td>
+                      <td>{formatDurationSeconds(row.avg_time_sec)}</td>
+                      <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>
+                      <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>
+                      <td>{formatDifficultyStat(row.easy_total, row.easy_accuracy_pct, row.easy_avg_time_sec)}</td>
+                      <td>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="readmore-btn"
+                          type="button"
+                          onClick={() => handleOpenSessionAnalysis(row)}
+                        >
+                          Read more
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="pagination-controls">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={sessionPagination.page <= 1}
+                onClick={() => loadSessions(sessionPagination.page - 1)}
+              >
+                Previous
+              </Button>
+              <span className="pagination-info">
+                Page {sessionPagination.page} of {sessionPagination.totalPages || 1} ({sessionPagination.total} total sessions)
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={sessionPagination.page >= sessionPagination.totalPages}
+                onClick={() => loadSessions(sessionPagination.page + 1)}
+              >
+                Next
+              </Button>
+            </div>
+          </>
+        )}
       </Card>
 
       <Card className="card">
-        <h2>Error Log</h2>
-        <form className="filter-row" onSubmit={handleApplyFilter}>
-            <Select
-              value={filters.subject}
-              onChange={(event) => setFilters((prev) => ({ ...prev, subject: event.target.value }))}
-            >
-              <option value="">All subjects</option>
-              <option value="CR">CR</option>
-              <option value="RC">RC</option>
-              <option value="Verbal">Verbal</option>
-              <option value="PS">PS</option>
-              <option value="DS">DS</option>
-              <option value="Quant">Quant</option>
-              <option value="DI">DI</option>
-            </Select>
-            <Select
-              value={filters.difficulty}
-              onChange={(event) => setFilters((prev) => ({ ...prev, difficulty: event.target.value }))}
-            >
-              <option value="">All difficulty</option>
-              <option value="Hard">Hard</option>
-              <option value="Medium">Medium</option>
-              <option value="Easy">Easy</option>
-              <option value="Unknown">Unknown</option>
-            </Select>
-            <Select
-              value={filters.confidence}
-              onChange={(event) => setFilters((prev) => ({ ...prev, confidence: event.target.value }))}
-            >
-              <option value="">All confidence</option>
-              <option value="high">high</option>
-              <option value="medium">medium</option>
-              <option value="low">low</option>
-              <option value="not selected">not selected</option>
-            </Select>
-            <Input
-              placeholder="Topic or Q Code (e.g. Weaken, V01234)"
-              value={filters.search}
-              onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))}
-            />
-            <Button variant="outline" type="submit">
-              Apply Filter
-            </Button>
-        </form>
+        <div className="section-header">
+          <h2>Error Log</h2>
+          <button
+            type="button"
+            className="collapse-toggle"
+            onClick={() => toggleSection('errorLog')}
+            aria-expanded={!collapsedSections.errorLog}
+            aria-label="Toggle Error Log section"
+          >
+            {collapsedSections.errorLog ? '▶' : '▼'}
+          </button>
+        </div>
+        {!collapsedSections.errorLog && (
+          <>
+            <form className="filter-row" onSubmit={handleApplyFilter}>
+                <Select
+                  value={filters.subject}
+                  onChange={(event) => setFilters((prev) => ({ ...prev, subject: event.target.value }))}
+                >
+                  <option value="">All subjects</option>
+                  <option value="CR">CR</option>
+                  <option value="RC">RC</option>
+                  <option value="Verbal">Verbal</option>
+                  <option value="PS">PS</option>
+                  <option value="DS">DS</option>
+                  <option value="Quant">Quant</option>
+                  <option value="DI">DI</option>
+                </Select>
+                <Select
+                  value={filters.difficulty}
+                  onChange={(event) => setFilters((prev) => ({ ...prev, difficulty: event.target.value }))}
+                >
+                  <option value="">All difficulty</option>
+                  <option value="Hard">Hard</option>
+                  <option value="Medium">Medium</option>
+                  <option value="Easy">Easy</option>
+                  <option value="Unknown">Unknown</option>
+                </Select>
+                <Select
+                  value={filters.confidence}
+                  onChange={(event) => setFilters((prev) => ({ ...prev, confidence: event.target.value }))}
+                >
+                  <option value="">All confidence</option>
+                  <option value="high">high</option>
+                  <option value="medium">medium</option>
+                  <option value="low">low</option>
+                  <option value="not selected">not selected</option>
+                </Select>
+                <Input
+                  placeholder="Topic or Q Code (e.g. Weaken, V01234)"
+                  value={filters.search}
+                  onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))}
+                />
+                <Button variant="outline" type="submit">
+                  Apply Filter
+                </Button>
+            </form>
 
-        <div className="table-wrap error-log-table-wrap">
-          <table className="error-log-table">
-            <thead>
-              <tr>
-                <th className="sortable" onClick={() => handleErrorSort('session_date')}>
-                  Date {errorSort.key === 'session_date' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th className="sortable" onClick={() => handleErrorSort('session_external_id')}>
-                  Session {errorSort.key === 'session_external_id' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th className="sortable" onClick={() => handleErrorSort('q_code')}>
-                  Q Code {errorSort.key === 'q_code' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th className="sortable" onClick={() => handleErrorSort('subject')}>
-                  Subject {errorSort.key === 'subject' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th className="sortable" onClick={() => handleErrorSort('difficulty')}>
-                  Difficulty {errorSort.key === 'difficulty' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th className="sortable topic-col" onClick={() => handleErrorSort('topic')}>
-                  Topic {errorSort.key === 'topic' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th>My Ans</th>
-                <th>Correct</th>
-                <th>Redo</th>
-                <th className="sortable" onClick={() => handleErrorSort('time_sec')}>
-                  Time (min:sec) {errorSort.key === 'time_sec' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th className="sortable" onClick={() => handleErrorSort('mistake_type')}>
-                  Mistake Type {errorSort.key === 'mistake_type' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                </th>
-                <th className="notes-col">Notes</th>
-                <th className="action-col annotate-col">Annotate</th>
-                <th className="action-col open-col">Open</th>
-              </tr>
-            </thead>
-            <tbody>
-              {errors.length === 0 && (
-                <tr>
-                  <td colSpan="14">No error rows match this filter.</td>
-                </tr>
-              )}
-              {errors.map((row) => (
-                <tr key={row.id}>
-                  <td>{formatDate(row.session_date)}</td>
-                  <td>{formatMaybe(row.session_external_id)}</td>
-                  <td>{formatMaybe(row.q_code)}</td>
-                  <td>{formatMaybe(row.subject)}</td>
-                  <td>{formatMaybe(row.difficulty)}</td>
-                  <td className="topic-col">{formatMaybe(row.topic)}</td>
-                  <td>{formatMaybe(row.my_answer)}</td>
-                  <td>{formatMaybe(row.correct_answer)}</td>
-                  <td className="redo-col">
-                    {Number(row.corrected_later || 0) === 1 ? (
-                      <Badge variant="success" className="redo-pill">
-                        Corrected
-                      </Badge>
-                    ) : (
-                      <span className="muted">Not yet</span>
-                    )}
-                  </td>
-                  <td>{formatDurationSeconds(row.time_sec)}</td>
-                  <td>{formatMaybe(row.mistake_type)}</td>
-                  <td className="notes-cell notes-col" title={row.notes || ''}>
-                    {formatNotePreview(row.notes)}
-                  </td>
-                  <td className="action-col annotate-col">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="readmore-btn"
-                      type="button"
-                      onClick={() => handleOpenAnnotation(row)}
-                    >
-                      Annotate
-                    </Button>
-                  </td>
-                  <td className="action-col open-col">
-                    {row.question_url ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        type="button"
-                        className="readmore-btn"
-                        onClick={() => handleOpenQuestion(row, 'error-log')}
-                        disabled={openingQuestionKey === questionOpenKey(row, 'error-log')}
-                      >
-                        {openingQuestionKey === questionOpenKey(row, 'error-log') ? 'Opening...' : 'Open'}
-                      </Button>
-                    ) : (
-                      <span className="muted">-</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="pagination-controls">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={errorPagination.page <= 1}
-            onClick={() => loadErrors(errorPagination.page - 1)}
-          >
-            Previous
-          </Button>
-          <span className="pagination-info">
-            Page {errorPagination.page} of {errorPagination.totalPages || 1} ({errorPagination.total} total errors)
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={errorPagination.page >= errorPagination.totalPages}
-            onClick={() => loadErrors(errorPagination.page + 1)}
-          >
-            Next
-          </Button>
-        </div>
+            <div className="table-wrap error-log-table-wrap">
+              <table className="error-log-table">
+                <thead>
+                  <tr>
+                    <th className="sortable" onClick={() => handleErrorSort('session_date')}>
+                      Date {errorSort.key === 'session_date' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th className="sortable" onClick={() => handleErrorSort('session_external_id')}>
+                      Session {errorSort.key === 'session_external_id' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th className="sortable" onClick={() => handleErrorSort('q_code')}>
+                      Q Code {errorSort.key === 'q_code' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th className="sortable" onClick={() => handleErrorSort('subject')}>
+                      Subject {errorSort.key === 'subject' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th className="sortable" onClick={() => handleErrorSort('difficulty')}>
+                      Difficulty {errorSort.key === 'difficulty' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th className="sortable topic-col" onClick={() => handleErrorSort('topic')}>
+                      Topic {errorSort.key === 'topic' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th>My Ans</th>
+                    <th>Correct</th>
+                    <th>Redo</th>
+                    <th className="sortable" onClick={() => handleErrorSort('time_sec')}>
+                      Time (min:sec) {errorSort.key === 'time_sec' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th className="sortable" onClick={() => handleErrorSort('mistake_type')}>
+                      Mistake Type {errorSort.key === 'mistake_type' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th className="notes-col">Notes</th>
+                    <th className="action-col annotate-col">Annotate</th>
+                    <th className="action-col open-col">Open</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {errors.length === 0 && (
+                    <tr>
+                      <td colSpan="14">No error rows match this filter.</td>
+                    </tr>
+                  )}
+                  {errors.map((row) => (
+                    <tr key={row.id}>
+                      <td>{formatDate(row.session_date)}</td>
+                      <td>{formatMaybe(row.session_external_id)}</td>
+                      <td>{formatMaybe(row.q_code)}</td>
+                      <td>{formatMaybe(row.subject)}</td>
+                      <td>{formatMaybe(row.difficulty)}</td>
+                      <td className="topic-col">{formatMaybe(row.topic)}</td>
+                      <td>{formatMaybe(row.my_answer)}</td>
+                      <td>{formatMaybe(row.correct_answer)}</td>
+                      <td className="redo-col">
+                        {Number(row.corrected_later || 0) === 1 ? (
+                          <Badge variant="success" className="redo-pill">
+                            Corrected
+                          </Badge>
+                        ) : (
+                          <span className="muted">Not yet</span>
+                        )}
+                      </td>
+                      <td>{formatDurationSeconds(row.time_sec)}</td>
+                      <td>{formatMaybe(row.mistake_type)}</td>
+                      <td className="notes-cell notes-col" title={row.notes || ''}>
+                        {formatNotePreview(row.notes)}
+                      </td>
+                      <td className="action-col annotate-col">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="readmore-btn"
+                          type="button"
+                          onClick={() => handleOpenAnnotation(row)}
+                        >
+                          Annotate
+                        </Button>
+                      </td>
+                      <td className="action-col open-col">
+                        {row.question_url ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            type="button"
+                            className="readmore-btn"
+                            onClick={() => handleOpenQuestion(row, 'error-log')}
+                            disabled={openingQuestionKey === questionOpenKey(row, 'error-log')}
+                          >
+                            {openingQuestionKey === questionOpenKey(row, 'error-log') ? 'Opening...' : 'Open'}
+                          </Button>
+                        ) : (
+                          <span className="muted">-</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="pagination-controls">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={errorPagination.page <= 1}
+                onClick={() => loadErrors(errorPagination.page - 1)}
+              >
+                Previous
+              </Button>
+              <span className="pagination-info">
+                Page {errorPagination.page} of {errorPagination.totalPages || 1} ({errorPagination.total} total errors)
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={errorPagination.page >= errorPagination.totalPages}
+                onClick={() => loadErrors(errorPagination.page + 1)}
+              >
+                Next
+              </Button>
+            </div>
+          </>
+        )}
       </Card>
 
       {syncCenterOpen && (

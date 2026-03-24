@@ -15,6 +15,9 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:4310',
         changeOrigin: true,
+        // Scrapes can run for several minutes; avoid proxy-side socket cutoff.
+        timeout: 30 * 60 * 1000,
+        proxyTimeout: 30 * 60 * 1000,
       },
     },
   },

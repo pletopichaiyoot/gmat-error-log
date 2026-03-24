@@ -704,6 +704,9 @@ async function listSessions(runId, { limit, offset } = {}) {
   const answeredCountExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) THEN 1 ELSE 0 END)`;
   const answeredCorrectExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN 1 ELSE 0 END)`;
   const answeredWrongExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN 1 ELSE 0 END)`;
+  const answeredAvgTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) THEN q.time_sec END), 0)`;
+  const answeredAvgCorrectTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN q.time_sec END), 0)`;
+  const answeredAvgWrongTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN q.time_sec END), 0)`;
 
   let limitClause = '';
   if (limit !== undefined && offset !== undefined) {
@@ -743,9 +746,9 @@ async function listSessions(runId, { limit, offset } = {}) {
           END,
           1
         ) AS accuracy_pct,
-        s.avg_time_sec,
-        s.avg_correct_time_sec,
-        s.avg_incorrect_time_sec,
+        COALESCE(${answeredAvgTimeExpr}, s.avg_time_sec) AS avg_time_sec,
+        COALESCE(${answeredAvgCorrectTimeExpr}, s.avg_correct_time_sec) AS avg_correct_time_sec,
+        COALESCE(${answeredAvgWrongTimeExpr}, s.avg_incorrect_time_sec) AS avg_incorrect_time_sec,
         SUM(CASE WHEN LOWER(COALESCE(q.difficulty, '')) = 'hard' THEN 1 ELSE 0 END) AS hard_total,
         SUM(
           CASE
@@ -1375,11 +1378,53 @@ async function getPatterns(runId) {
         ${subjectFamilyExpr} AS subject_family,
         ${subjectSubExpr} AS subject_sub,
         ${topicExpr} AS subtopic,
-        COUNT(*) AS incorrect_count,
-        ROUND(AVG(q.time_sec), 0) AS avg_time_sec
+        COUNT(*) AS total_questions,
+        SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) AS correct_count,
+        SUM(CASE WHEN q.correct = 0 THEN 1 ELSE 0 END) AS incorrect_count,
+        ROUND(
+          100.0 * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
+          1
+        ) AS accuracy_pct,
+        ROUND(AVG(q.time_sec), 0) AS avg_time_sec,
+        SUM(CASE WHEN (${difficultyExpr}) = 'Hard' THEN 1 ELSE 0 END) AS hard_total,
+        ROUND(
+          CASE
+            WHEN SUM(CASE WHEN (${difficultyExpr}) = 'Hard' THEN 1 ELSE 0 END) > 0 THEN
+              100.0
+              * SUM(CASE WHEN (${difficultyExpr}) = 'Hard' AND q.correct = 1 THEN 1 ELSE 0 END)
+              / SUM(CASE WHEN (${difficultyExpr}) = 'Hard' THEN 1 ELSE 0 END)
+            ELSE NULL
+          END,
+          1
+        ) AS hard_accuracy_pct,
+        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Hard' THEN q.time_sec END), 0) AS hard_avg_time_sec,
+        SUM(CASE WHEN (${difficultyExpr}) = 'Medium' THEN 1 ELSE 0 END) AS medium_total,
+        ROUND(
+          CASE
+            WHEN SUM(CASE WHEN (${difficultyExpr}) = 'Medium' THEN 1 ELSE 0 END) > 0 THEN
+              100.0
+              * SUM(CASE WHEN (${difficultyExpr}) = 'Medium' AND q.correct = 1 THEN 1 ELSE 0 END)
+              / SUM(CASE WHEN (${difficultyExpr}) = 'Medium' THEN 1 ELSE 0 END)
+            ELSE NULL
+          END,
+          1
+        ) AS medium_accuracy_pct,
+        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Medium' THEN q.time_sec END), 0) AS medium_avg_time_sec,
+        SUM(CASE WHEN (${difficultyExpr}) = 'Easy' THEN 1 ELSE 0 END) AS easy_total,
+        ROUND(
+          CASE
+            WHEN SUM(CASE WHEN (${difficultyExpr}) = 'Easy' THEN 1 ELSE 0 END) > 0 THEN
+              100.0
+              * SUM(CASE WHEN (${difficultyExpr}) = 'Easy' AND q.correct = 1 THEN 1 ELSE 0 END)
+              / SUM(CASE WHEN (${difficultyExpr}) = 'Easy' THEN 1 ELSE 0 END)
+            ELSE NULL
+          END,
+          1
+        ) AS easy_accuracy_pct,
+        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Easy' THEN q.time_sec END), 0) AS easy_avg_time_sec
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
-      WHERE ${runJoinClause}q.correct = 0 AND ${answeredWhere}
+      WHERE ${runJoinClause}${answeredWhere}
       GROUP BY ${subjectFamilyExpr}, ${subjectSubExpr}, ${topicExpr}
       ORDER BY ${subjectSortExpr}, subject_sub ASC, incorrect_count DESC, subtopic ASC
       LIMIT 250
@@ -1406,6 +1451,9 @@ async function getSessionAnalysis(sessionId) {
   const answeredCountExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) THEN 1 ELSE 0 END)`;
   const answeredCorrectExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN 1 ELSE 0 END)`;
   const answeredWrongExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN 1 ELSE 0 END)`;
+  const answeredAvgTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) THEN q.time_sec END), 0)`;
+  const answeredAvgCorrectTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN q.time_sec END), 0)`;
+  const answeredAvgWrongTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN q.time_sec END), 0)`;
 
   const session = await get(
     `
@@ -1439,9 +1487,9 @@ async function getSessionAnalysis(sessionId) {
           END,
           1
         ) AS accuracy_pct,
-        s.avg_time_sec,
-        s.avg_correct_time_sec,
-        s.avg_incorrect_time_sec
+        COALESCE(${answeredAvgTimeExpr}, s.avg_time_sec) AS avg_time_sec,
+        COALESCE(${answeredAvgCorrectTimeExpr}, s.avg_correct_time_sec) AS avg_correct_time_sec,
+        COALESCE(${answeredAvgWrongTimeExpr}, s.avg_incorrect_time_sec) AS avg_incorrect_time_sec
       FROM sessions s
       LEFT JOIN question_attempts q ON q.session_id = s.id
       WHERE s.id = ?
