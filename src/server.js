@@ -303,6 +303,7 @@ app.get('/api/errors', async (req, res) => {
       topic: req.query.topic || '',
       confidence: req.query.confidence || '',
       search: req.query.search || '',
+      mistakeTag: req.query.mistakeTag || '',
       sortKey: req.query.sortKey || 'session_date',
       sortOrder: req.query.sortOrder === 'asc' ? 'asc' : 'desc',
     };

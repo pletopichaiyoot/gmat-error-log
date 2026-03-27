@@ -849,7 +849,7 @@ async function countSessions(runId) {
   return row ? row.total : 0;
 }
 
-async function listErrors({ runId, subject, difficulty, topic, confidence, search, sortKey, sortOrder, limit, offset }) {
+async function listErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag, sortKey, sortOrder, limit, offset }) {
   const ALLOWED_SORT = {
     session_date: 's.session_date',
     session_external_id: 's.session_external_id',
@@ -947,6 +947,10 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
     where.push(`(UPPER(COALESCE(q.topic, '')) LIKE UPPER(?) OR UPPER(COALESCE(q.q_code, '')) LIKE UPPER(?))`);
     params.push(`%${search}%`, `%${search}%`);
   }
+  if (mistakeTag) {
+    where.push(`COALESCE(q.mistake_type, '') LIKE ?`);
+    params.push(`%${mistakeTag}%`);
+  }
 
   let limitClause = '';
   if (limit !== undefined && offset !== undefined) {
@@ -1023,7 +1027,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
   );
 }
 
-async function countErrors({ runId, subject, difficulty, topic, confidence, search }) {
+async function countErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag }) {
   const params = [];
   const where = ['q.correct = 0', `NOT (${unansweredPlaceholderExpr('q')})`];
   // Re-use expressions for subject and topic logic to ensure consistency
@@ -1101,6 +1105,10 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
   if (search) {
     where.push(`(UPPER(COALESCE(q.topic, '')) LIKE UPPER(?) OR UPPER(COALESCE(q.q_code, '')) LIKE UPPER(?))`);
     params.push(`%${search}%`, `%${search}%`);
+  }
+  if (mistakeTag) {
+    where.push(`COALESCE(q.mistake_type, '') LIKE ?`);
+    params.push(`%${mistakeTag}%`);
   }
 
   const row = await get(
@@ -1613,6 +1621,7 @@ async function updateErrorAnnotation(errorId, { mistakeType, notes }) {
 
   const nextMistakeType = String(mistakeType || '').trim();
   const nextNotes = String(notes || '').trim();
+  const storedMistakeType = nextMistakeType === '[]' ? null : nextMistakeType || null;
 
   await run(
     `
@@ -1622,7 +1631,7 @@ async function updateErrorAnnotation(errorId, { mistakeType, notes }) {
         notes = ?
       WHERE id = ?
     `,
-    [nextMistakeType || null, nextNotes || null, id]
+    [storedMistakeType, nextNotes || null, id]
   );
 
   return get(

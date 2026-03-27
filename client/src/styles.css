@@ -1331,11 +1331,116 @@ th.sortable:hover {
 }
 
 .note-dialog {
-  width: min(760px, calc(100vw - 24px));
+  width: min(880px, calc(100vw - 24px));
 }
 
 .notes-label {
   grid-column: 1 / -1;
+}
+
+/* ─── Mistake tags ───────────────────────────────────────────── */
+.mistake-tags-section {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--s2);
+}
+
+.mistake-tags-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.mistake-tags-selected {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--surface2, #f3f4f6);
+  border-radius: 6px;
+  min-height: 32px;
+}
+
+.mistake-tag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: var(--r-xs);
+  background: var(--accent-lt);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  border: 1px solid rgba(217, 185, 62, 0.4);
+  margin: 0 2px 2px 0;
+}
+
+.mistake-tag-pill.selected {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+.mistake-tag-remove {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  opacity: 0.8;
+}
+
+.mistake-tag-remove:hover { opacity: 1; }
+
+.mistake-category {
+  margin-bottom: 6px;
+}
+
+.mistake-category-label {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.55;
+  margin-bottom: 4px;
+  margin-top: 6px;
+}
+
+.mistake-tags-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mistake-tag-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border, #e5e7eb);
+  transition: background 0.1s;
+}
+
+.mistake-tag-checkbox:hover {
+  background: var(--surface2, #f3f4f6);
+}
+
+.mistake-tag-checkbox input[type="checkbox"] {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--accent, #3b82f6);
+  cursor: pointer;
+}
+
+.mistake-tags-cell {
+  vertical-align: middle;
 }
 
 .analysis-shell {

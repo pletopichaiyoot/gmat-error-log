@@ -392,7 +392,13 @@ async function buildPerformanceContext(runIdInput) {
     ...recentErrors.map((row) => {
       const correctionFlag = row.correctedLater ? 'corrected later' : 'not corrected yet';
       const notePart = row.notes ? ` | note=${clipText(row.notes, 80)}` : '';
-      const mistakePart = row.mistakeType ? ` | type=${row.mistakeType}` : '';
+      const mistakeTags = (() => {
+        const v = row.mistakeType || '';
+        if (!v) return [];
+        if (v.startsWith('[')) { try { return JSON.parse(v); } catch { /* ignore */ } }
+        return [v];
+      })();
+      const mistakePart = mistakeTags.length ? ` | type=${mistakeTags.join(', ')}` : '';
       return `- ${row.qCode} | ${row.subject}/${row.difficulty} | ${row.topic} | t=${row.time} | ${correctionFlag}${mistakePart}${notePart}`;
     }),
   ];

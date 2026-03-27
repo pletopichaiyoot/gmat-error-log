@@ -8,6 +8,63 @@ import { Select } from './components/ui/select';
 
 const DEFAULT_CDP_URL = 'http://localhost:9222';
 
+const MISTAKE_TYPES = {
+  'Core Reasoning / Process': [
+    'Misread Condition',
+    'Wrong Variable Setup',
+    'Failed to Translate',
+    'Missed Constraint',
+    'Invalid Assumption',
+    'Incomplete Casework',
+    'Wrong Order/Pairing',
+    'Calculation Error',
+    'Unit/Scale Error',
+    'Conceptual Gap',
+    'Logic Breakdown',
+  ],
+  'Data Handling / DI-Specific': [
+    'Data Extraction Error',
+    'Chart/Table Misread',
+    'Two-Part: Order Reversal',
+    'Two-Part: Pairing Logic Error',
+    'Table Analysis: Filter Miss',
+    'Table Analysis: Final Step Slip',
+    'Graphics: Axis/Label Misread',
+    'MSR: Missed Cross-Source Link',
+  ],
+  'Verbal / Reading': [
+    'Misread Passage',
+    'Misread Question',
+    'Out of Scope Inference',
+    'Missed Author Tone',
+    'Wrong Logical Relationship',
+  ],
+  'Test Strategy / Process': [
+    'Eliminated Correct Choice',
+    'Chose Too Early',
+    'Could Not Start / No Plan',
+    'Overinvested Time',
+    'Rushed Guess',
+    'Switched from Correct Path',
+    'Stuck in Algebra',
+    'Re-read Too Much',
+  ],
+};
+
+const ALL_MISTAKE_TAGS = Object.values(MISTAKE_TYPES).flat();
+
+function parseMistakeTags(value) {
+  if (!value) return [];
+  if (typeof value === 'string' && value.startsWith('[')) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      // fall through
+    }
+  }
+  return [value];
+}
+
 function formatDate(value) {
   if (!value) return '-';
   const dt = new Date(value);
@@ -216,7 +273,7 @@ function App() {
     subtopicBreakdown: [],
   });
   const [subtopicScope, setSubtopicScope] = useState('All');
-  const [filters, setFilters] = useState({ subject: '', difficulty: '', topic: '', confidence: '', search: '' });
+  const [filters, setFilters] = useState({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '' });
   const [syncCenterOpen, setSyncCenterOpen] = useState(false);
   const [isOpening, setIsOpening] = useState(false);
   const [isScraping, setIsScraping] = useState(false);
@@ -240,7 +297,7 @@ function App() {
     saving: false,
     error: '',
     row: null,
-    mistakeType: '',
+    mistakeTags: [],
     notes: '',
   });
   const [openingQuestionKey, setOpeningQuestionKey] = useState('');
@@ -371,6 +428,7 @@ function App() {
     if (customFilters.topic) params.set('topic', customFilters.topic);
     if (customFilters.confidence) params.set('confidence', customFilters.confidence);
     if (customFilters.search) params.set('search', customFilters.search);
+    if (customFilters.mistakeTag) params.set('mistakeTag', customFilters.mistakeTag);
     params.set('sortKey', customSort.key);
     params.set('sortOrder', customSort.order);
 
@@ -884,7 +942,7 @@ function App() {
       saving: false,
       error: '',
       row,
-      mistakeType: row.mistake_type || '',
+      mistakeTags: parseMistakeTags(row.mistake_type),
       notes: row.notes || '',
     });
   }
@@ -895,9 +953,18 @@ function App() {
       saving: false,
       error: '',
       row: null,
-      mistakeType: '',
+      mistakeTags: [],
       notes: '',
     });
+  }
+
+  function handleToggleMistakeTag(tag) {
+    setAnnotation((prev) => ({
+      ...prev,
+      mistakeTags: prev.mistakeTags.includes(tag)
+        ? prev.mistakeTags.filter((t) => t !== tag)
+        : [...prev.mistakeTags, tag],
+    }));
   }
 
   function applyAnnotationLocally(updated) {
@@ -943,7 +1010,7 @@ function App() {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          mistakeType: annotation.mistakeType,
+          mistakeType: annotation.mistakeTags.length ? JSON.stringify(annotation.mistakeTags) : '',
           notes: annotation.notes,
         }),
       });
@@ -1677,6 +1744,15 @@ function App() {
                   value={filters.search}
                   onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))}
                 />
+                <Select
+                  value={filters.mistakeTag}
+                  onChange={(event) => setFilters((prev) => ({ ...prev, mistakeTag: event.target.value }))}
+                >
+                  <option value="">All mistake tags</option>
+                  {ALL_MISTAKE_TAGS.map((tag) => (
+                    <option key={tag} value={tag}>{tag}</option>
+                  ))}
+                </Select>
                 <Button variant="outline" type="submit">
                   Apply Filter
                 </Button>
@@ -1744,7 +1820,13 @@ function App() {
                         )}
                       </td>
                       <td>{formatDurationSeconds(row.time_sec)}</td>
-                      <td>{formatMaybe(row.mistake_type)}</td>
+                      <td className="mistake-tags-cell">
+                        {parseMistakeTags(row.mistake_type).length > 0
+                          ? parseMistakeTags(row.mistake_type).map((tag) => (
+                              <span key={tag} className="mistake-tag-pill">{tag}</span>
+                            ))
+                          : <span className="muted">-</span>}
+                      </td>
                       <td className="notes-cell notes-col" title={row.notes || ''}>
                         {formatNotePreview(row.notes)}
                       </td>
@@ -2297,23 +2379,43 @@ function App() {
                 </Button>
               </div>
               <div className="form-grid">
-                <label>
-                  Mistake Type
-                  <Select
-                    value={annotation.mistakeType}
-                    onChange={(event) => setAnnotation((prev) => ({ ...prev, mistakeType: event.target.value }))}
-                  >
-                    <option value="">Not set</option>
-                    <option value="Conceptual Gap">Conceptual Gap</option>
-                    <option value="Misread Question">Misread Question</option>
-                    <option value="Misread Passage">Misread Passage</option>
-                    <option value="Logic Breakdown">Logic Breakdown</option>
-                    <option value="Careless Error">Careless Error</option>
-                    <option value="Timing Pressure">Timing Pressure</option>
-                    <option value="Bad Elimination">Bad Elimination</option>
-                    <option value="Guess">Guess</option>
-                  </Select>
-                </label>
+                <div className="mistake-tags-section">
+                  <span className="mistake-tags-section-title">Mistake Tags</span>
+                  {annotation.mistakeTags.length > 0 && (
+                    <div className="mistake-tags-selected">
+                      {annotation.mistakeTags.map((tag) => (
+                        <span key={tag} className="mistake-tag-pill selected">
+                          {tag}
+                          <button
+                            type="button"
+                            className="mistake-tag-remove"
+                            onClick={() => handleToggleMistakeTag(tag)}
+                            aria-label={`Remove ${tag}`}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {Object.entries(MISTAKE_TYPES).map(([category, tags]) => (
+                    <div key={category} className="mistake-category">
+                      <span className="mistake-category-label">{category}</span>
+                      <div className="mistake-tags-grid">
+                        {tags.map((tag) => (
+                          <label key={tag} className="mistake-tag-checkbox">
+                            <input
+                              type="checkbox"
+                              checked={annotation.mistakeTags.includes(tag)}
+                              onChange={() => handleToggleMistakeTag(tag)}
+                            />
+                            {tag}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
                 <label className="notes-label">
                   Notes
                   <Textarea
