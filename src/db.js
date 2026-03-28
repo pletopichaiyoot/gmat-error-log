@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
+const { deriveQuestionMetadata, enrichQuestionMetadata } = require('./question-metadata');
 
 const dbDir = path.resolve(__dirname, '..', 'data');
 const dbPath = path.join(dbDir, 'gmat-error-log.db');
@@ -100,9 +101,16 @@ async function initDb() {
       q_code TEXT,
       q_id TEXT,
       cat_id INTEGER,
+      subject_code TEXT,
+      category_code TEXT,
+      subcategory TEXT,
       subject_sub TEXT,
       subject_sub_raw TEXT,
       question_url TEXT,
+      question_stem TEXT,
+      answer_choices TEXT,
+      response_format TEXT,
+      response_details TEXT,
       correct INTEGER NOT NULL,
       difficulty TEXT,
       confidence TEXT,
@@ -110,6 +118,8 @@ async function initDb() {
       my_answer TEXT,
       correct_answer TEXT,
       topic TEXT,
+      topic_source TEXT,
+      content_domain TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (run_id) REFERENCES scrape_runs(id) ON DELETE CASCADE,
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -118,11 +128,20 @@ async function initDb() {
 
   await ensureQuestionAttemptsColumn('q_id', 'TEXT');
   await ensureQuestionAttemptsColumn('cat_id', 'INTEGER');
+  await ensureQuestionAttemptsColumn('subject_code', 'TEXT');
+  await ensureQuestionAttemptsColumn('category_code', 'TEXT');
+  await ensureQuestionAttemptsColumn('subcategory', 'TEXT');
   await ensureQuestionAttemptsColumn('subject_sub', 'TEXT');
   await ensureQuestionAttemptsColumn('subject_sub_raw', 'TEXT');
   await ensureQuestionAttemptsColumn('question_url', 'TEXT');
+  await ensureQuestionAttemptsColumn('question_stem', 'TEXT');
+  await ensureQuestionAttemptsColumn('answer_choices', 'TEXT');
+  await ensureQuestionAttemptsColumn('response_format', 'TEXT');
+  await ensureQuestionAttemptsColumn('response_details', 'TEXT');
   await ensureQuestionAttemptsColumn('mistake_type', 'TEXT');
   await ensureQuestionAttemptsColumn('notes', 'TEXT');
+  await ensureQuestionAttemptsColumn('topic_source', 'TEXT');
+  await ensureQuestionAttemptsColumn('content_domain', 'TEXT');
 
   await run('CREATE INDEX IF NOT EXISTS idx_sessions_run_id ON sessions(run_id)');
   await run(
@@ -150,6 +169,33 @@ function normalizedTextOrNull(value) {
   return text || null;
 }
 
+function normalizeAnswerChoicesForStorage(value) {
+  if (Array.isArray(value)) {
+    const normalized = value
+      .map((item) => {
+        const label = normalizedTextOrNull(item?.label);
+        const text = normalizedTextOrNull(item?.text);
+        if (!label && !text) return null;
+        return {
+          label: label || null,
+          text: text || null,
+        };
+      })
+      .filter(Boolean);
+    return normalized.length ? JSON.stringify(normalized) : null;
+  }
+
+  const text = normalizedTextOrNull(value);
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) return text;
+    return normalizeAnswerChoicesForStorage(parsed);
+  } catch (_error) {
+    return text;
+  }
+}
+
 function toNullableInteger(value) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed)) return null;
@@ -159,12 +205,10 @@ function toNullableInteger(value) {
 function unansweredPlaceholderExpr(alias = 'q') {
   const prefix = alias ? `${alias}.` : '';
   return `(
-    COALESCE(TRIM(${prefix}q_code), '') = ''
-    AND COALESCE(TRIM(${prefix}difficulty), '') = ''
-    AND COALESCE(TRIM(${prefix}question_url), '') = ''
-    AND COALESCE(TRIM(${prefix}my_answer), '') = ''
+    COALESCE(TRIM(${prefix}my_answer), '') = ''
     AND COALESCE(TRIM(${prefix}correct_answer), '') = ''
-    AND COALESCE(${prefix}time_sec, 0) <= 1
+    AND COALESCE(TRIM(${prefix}question_stem), '') = ''
+    AND COALESCE(${prefix}time_sec, 0) <= 5
   )`;
 }
 
@@ -205,6 +249,51 @@ function fallbackTopicFromSubjectSubCodes(subjectSubRaw, subjectSub) {
   if (code === 'GI') return 'Graphics Interpretation';
   if (code === 'TPA') return 'Two-Part Analysis';
   return null;
+}
+
+function normalizeResponseDetailsForStorage(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const slots = Array.isArray(value.slots)
+    ? value.slots
+        .map((slot, slotIndex) => {
+          const options = Array.isArray(slot?.options)
+            ? slot.options
+                .map((option, optionIndex) => {
+                  const rawId = normalizedTextOrNull(option?.id);
+                  const label = normalizedTextOrNull(option?.label);
+                  const text = normalizedTextOrNull(option?.text);
+                  if (!rawId && !label && !text) return null;
+                  return {
+                    id: rawId || `option_${optionIndex + 1}`,
+                    label: label || null,
+                    text: text || null,
+                    selected: Boolean(option?.selected),
+                    correct: Boolean(option?.correct),
+                    incorrect: Boolean(option?.incorrect),
+                  };
+                })
+                .filter(Boolean)
+            : [];
+
+          return {
+            slot_id: normalizedTextOrNull(slot?.slot_id) || `slot_${slotIndex + 1}`,
+            slot_type: normalizedTextOrNull(slot?.slot_type) || null,
+            prompt: normalizedTextOrNull(slot?.prompt) || null,
+            user_value: normalizedTextOrNull(slot?.user_value) || null,
+            correct_value: normalizedTextOrNull(slot?.correct_value) || null,
+            options,
+          };
+        })
+        .filter((slot) => slot && (slot.prompt || slot.options.length || slot.user_value || slot.correct_value))
+    : [];
+
+  const responseFormat = normalizedTextOrNull(value.response_format);
+  if (!responseFormat && !slots.length) return null;
+
+  return JSON.stringify({
+    response_format: responseFormat || null,
+    slots,
+  });
 }
 
 async function backfillSparseQuestionAttempts({ sessionIds = [] } = {}) {
@@ -408,7 +497,16 @@ function scoreAttemptSnapshot(snapshot = {}) {
   let score = 0;
   if (snapshot.q_code) score += 2;
   if (snapshot.question_url) score += 2;
+  if (snapshot.question_stem) score += 2;
+  if (snapshot.subject_code) score += 1;
+  if (snapshot.category_code) score += 1;
+  if (snapshot.subcategory) score += 1;
+  if (snapshot.answer_choices) score += 1;
+  if (snapshot.response_format) score += 1;
+  if (snapshot.response_details) score += 2;
   if (snapshot.topic) score += 1;
+  if (snapshot.topic_source) score += 1;
+  if (snapshot.content_domain) score += 1;
   if (Number.isInteger(snapshot.cat_id)) score += 1;
   if (snapshot.mistake_type) score += 1;
   if (snapshot.notes) score += 1;
@@ -432,8 +530,17 @@ function buildAttemptSnapshotIndex(rows = []) {
     const snapshot = {
       q_code: normalizedTextOrNull(row?.q_code),
       cat_id: toNullableInteger(row?.cat_id),
+      subject_code: normalizedTextOrNull(row?.subject_code),
+      category_code: normalizedTextOrNull(row?.category_code),
+      subcategory: normalizedTextOrNull(row?.subcategory),
       topic: normalizedTextOrNull(row?.topic),
+      topic_source: normalizedTextOrNull(row?.topic_source),
+      content_domain: normalizedTextOrNull(row?.content_domain),
       question_url: normalizedTextOrNull(row?.question_url),
+      question_stem: normalizedTextOrNull(row?.question_stem),
+      answer_choices: normalizeAnswerChoicesForStorage(row?.answer_choices),
+      response_format: normalizedTextOrNull(row?.response_format),
+      response_details: normalizeResponseDetailsForStorage(row?.response_details),
       mistake_type: normalizedTextOrNull(row?.mistake_type),
       notes: normalizedTextOrNull(row?.notes),
     };
@@ -526,7 +633,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     if (existing?.id) {
       const existingAttempts = await all(
         `
-          SELECT q_id, q_code, cat_id, topic, question_url, mistake_type, notes
+          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, answer_choices, response_format, response_details, mistake_type, notes
           FROM question_attempts
           WHERE session_id = ?
         `,
@@ -627,7 +734,39 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
       const qCode = normalizedTextOrNull(q.q_code) || preservedSnapshot?.q_code || null;
       const catId = toNullableInteger(q.cat_id) ?? preservedSnapshot?.cat_id ?? null;
       const topic = normalizedTextOrNull(q.topic) || preservedSnapshot?.topic || null;
+      const topicSource =
+        normalizedTextOrNull(q.topic_source) ||
+        (normalizedTextOrNull(q.topic) ? 'heuristic' : null) ||
+        preservedSnapshot?.topic_source ||
+        null;
+      const contentDomain =
+        normalizedTextOrNull(q.content_domain) ||
+        preservedSnapshot?.content_domain ||
+        null;
       const questionUrl = normalizedTextOrNull(q.question_url) || preservedSnapshot?.question_url || null;
+      const questionStem = normalizedTextOrNull(q.question_stem) || preservedSnapshot?.question_stem || null;
+      const answerChoices =
+        normalizeAnswerChoicesForStorage(q.answer_choices) ||
+        preservedSnapshot?.answer_choices ||
+        null;
+      const responseFormat =
+        normalizedTextOrNull(q.response_format) ||
+        preservedSnapshot?.response_format ||
+        null;
+      const responseDetails =
+        normalizeResponseDetailsForStorage(q.response_details) ||
+        preservedSnapshot?.response_details ||
+        null;
+      const metadata = deriveQuestionMetadata(
+        {
+          ...q,
+          topic,
+          subcategory: q.subcategory || preservedSnapshot?.subcategory || null,
+          category_code: q.category_code || preservedSnapshot?.category_code || null,
+          subject_code: q.subject_code || preservedSnapshot?.subject_code || null,
+        },
+        session
+      );
 
       await run(
         `
@@ -637,9 +776,16 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
             q_code,
             q_id,
             cat_id,
+            subject_code,
+            category_code,
+            subcategory,
             subject_sub,
             subject_sub_raw,
             question_url,
+            question_stem,
+            answer_choices,
+            response_format,
+            response_details,
             correct,
             difficulty,
             confidence,
@@ -647,19 +793,28 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
             my_answer,
             correct_answer,
             topic,
+            topic_source,
+            content_domain,
             mistake_type,
             notes
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         [
-          runId,
-          sessionId,
-          qCode,
-          q.q_id || null,
-          catId,
-          q.subject_sub || null,
-          q.subject_sub_raw || null,
-          questionUrl,
+            runId,
+            sessionId,
+            qCode,
+            q.q_id || null,
+            catId,
+            metadata.subject_code,
+            metadata.category_code,
+            metadata.subcategory,
+            q.subject_sub || null,
+            q.subject_sub_raw || null,
+            questionUrl,
+          questionStem,
+          answerChoices,
+          responseFormat,
+          responseDetails,
           boolToInt(Boolean(q.correct)),
           q.difficulty || null,
           q.confidence || null,
@@ -667,6 +822,8 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           q.my_answer || null,
           q.correct_answer || null,
           topic,
+          topicSource,
+          contentDomain,
           mistakeType,
           notes,
         ]
@@ -866,10 +1023,14 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
   const where = ['q.correct = 0', `NOT (${unansweredPlaceholderExpr('q')})`];
   const normalizedSubExpr = `
     CASE
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) = 'QUANT' THEN 'Quant'
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.category_code, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) = 'DI' THEN 'DI'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'DS'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN 'DI'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), ''))
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'DS'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('DI', 'TA', 'GI', 'MSR', 'TPA') THEN 'DI'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DI' THEN 'DI'
       WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%data sufficiency%' THEN 'DS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('CR', 'RC', 'PS', 'QUANT', 'VERBAL') THEN
         CASE UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
@@ -877,6 +1038,18 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
           WHEN 'VERBAL' THEN 'Verbal'
           ELSE UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
         END
+      ELSE ''
+    END
+  `;
+  const subjectCodeExpr = `
+    CASE
+      WHEN COALESCE(NULLIF(q.subject_code, ''), '') <> '' THEN UPPER(q.subject_code)
+      WHEN (${normalizedSubExpr}) IN ('DS', 'DI', 'TA', 'GI', 'MSR', 'TPA') THEN 'DI'
+      WHEN (${normalizedSubExpr}) IN ('CR', 'RC', 'VERBAL') THEN 'V'
+      WHEN (${normalizedSubExpr}) IN ('PS', 'QUANT') THEN 'Q'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'Verbal' THEN 'V'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'Quant' THEN 'Q'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'DI' THEN 'DI'
       ELSE ''
     END
   `;
@@ -928,8 +1101,14 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
   }
 
   if (subject) {
-    where.push(`(${subjectExpr}) = ?`);
-    params.push(subject);
+    const normalizedSubjectFilter = String(subject || '').trim().toUpperCase();
+    if (['Q', 'V', 'DI'].includes(normalizedSubjectFilter)) {
+      where.push(`(${subjectCodeExpr}) = ?`);
+      params.push(normalizedSubjectFilter);
+    } else {
+      where.push(`(${subjectExpr}) = ?`);
+      params.push(subject);
+    }
   }
   if (difficulty) {
     where.push(`COALESCE(NULLIF(q.difficulty, ''), 'Unknown') = ?`);
@@ -944,8 +1123,10 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
     params.push(confidence);
   }
   if (search) {
-    where.push(`(UPPER(COALESCE(q.topic, '')) LIKE UPPER(?) OR UPPER(COALESCE(q.q_code, '')) LIKE UPPER(?))`);
-    params.push(`%${search}%`, `%${search}%`);
+    where.push(
+      `(UPPER(COALESCE(q.topic, '')) LIKE UPPER(?) OR UPPER(COALESCE(q.q_code, '')) LIKE UPPER(?) OR UPPER(COALESCE(q.question_stem, '')) LIKE UPPER(?))`
+    );
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
   }
   if (mistakeTag) {
     where.push(`COALESCE(q.mistake_type, '') LIKE ?`);
@@ -960,7 +1141,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
     limitClause = 'LIMIT 500';
   }
 
-  return all(
+  const rows = await all(
     `
       SELECT
         q.id,
@@ -968,6 +1149,9 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
         s.session_external_id,
         s.session_date,
         ${subjectExpr} AS subject,
+        q.subject_code,
+        q.category_code,
+        q.subcategory,
         q.subject_sub,
         q.subject_sub_raw,
         s.source,
@@ -975,9 +1159,15 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
         q.q_id,
         q.cat_id,
         q.question_url,
+        q.question_stem,
+        q.answer_choices,
+        q.response_format,
+        q.response_details,
         q.difficulty,
         q.confidence,
         ${topicExpr} AS topic,
+        q.topic_source,
+        q.content_domain,
         q.time_sec,
         q.my_answer,
         q.correct_answer,
@@ -1025,6 +1215,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
     `,
     params
   );
+  return rows.map((row) => enrichQuestionMetadata(row));
 }
 
 async function countErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag }) {
@@ -1033,10 +1224,14 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
   // Re-use expressions for subject and topic logic to ensure consistency
   const normalizedSubExpr = `
     CASE
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) = 'QUANT' THEN 'Quant'
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.category_code, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) = 'DI' THEN 'DI'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'DS'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN 'DI'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), ''))
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'DS'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('DI', 'TA', 'GI', 'MSR', 'TPA') THEN 'DI'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DI' THEN 'DI'
       WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%data sufficiency%' THEN 'DS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('CR', 'RC', 'PS', 'QUANT', 'VERBAL') THEN
         CASE UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
@@ -1044,6 +1239,18 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
           WHEN 'VERBAL' THEN 'Verbal'
           ELSE UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
         END
+      ELSE ''
+    END
+  `;
+  const subjectCodeExpr = `
+    CASE
+      WHEN COALESCE(NULLIF(q.subject_code, ''), '') <> '' THEN UPPER(q.subject_code)
+      WHEN (${normalizedSubExpr}) IN ('DS', 'DI', 'TA', 'GI', 'MSR', 'TPA') THEN 'DI'
+      WHEN (${normalizedSubExpr}) IN ('CR', 'RC', 'VERBAL') THEN 'V'
+      WHEN (${normalizedSubExpr}) IN ('PS', 'QUANT') THEN 'Q'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'Verbal' THEN 'V'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'Quant' THEN 'Q'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'DI' THEN 'DI'
       ELSE ''
     END
   `;
@@ -1087,8 +1294,14 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
     params.push(runId);
   }
   if (subject) {
-    where.push(`(${subjectExpr}) = ?`);
-    params.push(subject);
+    const normalizedSubjectFilter = String(subject || '').trim().toUpperCase();
+    if (['Q', 'V', 'DI'].includes(normalizedSubjectFilter)) {
+      where.push(`(${subjectCodeExpr}) = ?`);
+      params.push(normalizedSubjectFilter);
+    } else {
+      where.push(`(${subjectExpr}) = ?`);
+      params.push(subject);
+    }
   }
   if (difficulty) {
     where.push(`COALESCE(NULLIF(q.difficulty, ''), 'Unknown') = ?`);
@@ -1103,8 +1316,10 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
     params.push(confidence);
   }
   if (search) {
-    where.push(`(UPPER(COALESCE(q.topic, '')) LIKE UPPER(?) OR UPPER(COALESCE(q.q_code, '')) LIKE UPPER(?))`);
-    params.push(`%${search}%`, `%${search}%`);
+    where.push(
+      `(UPPER(COALESCE(q.topic, '')) LIKE UPPER(?) OR UPPER(COALESCE(q.q_code, '')) LIKE UPPER(?) OR UPPER(COALESCE(q.question_stem, '')) LIKE UPPER(?))`
+    );
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
   }
   if (mistakeTag) {
     where.push(`COALESCE(q.mistake_type, '') LIKE ?`);
@@ -1130,10 +1345,14 @@ async function getPatterns(runId) {
   const answeredWhere = `NOT (${unansweredPlaceholderExpr('q')})`;
   const normalizedSubExpr = `
     CASE
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) = 'QUANT' THEN 'Quant'
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.category_code, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) = 'DI' THEN 'DI'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'DS'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN 'DI'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), ''))
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'DS'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('DI', 'TA', 'GI', 'MSR', 'TPA') THEN 'DI'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DI' THEN 'DI'
       WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%data sufficiency%' THEN 'DS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'QUANT' THEN 'Quant'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'VERBAL' THEN 'Verbal'
@@ -1582,17 +1801,28 @@ async function getSessionAnalysis(sessionId) {
     [id]
   );
 
-  const slowWrongQuestions = await all(
+  const slowWrongQuestionsRaw = await all(
     `
       SELECT
         q.id,
         q.q_code,
+        q.subject_code,
+        q.category_code,
+        q.subcategory,
+        q.subject_sub,
+        q.subject_sub_raw,
         q.difficulty,
         ${topicExpr} AS topic,
         q.my_answer,
         q.correct_answer,
         q.time_sec,
         q.question_url,
+        q.question_stem,
+        q.answer_choices,
+        q.response_format,
+        q.response_details,
+        q.topic_source,
+        q.content_domain,
         q.mistake_type,
         q.notes,
         s.source
@@ -1603,6 +1833,7 @@ async function getSessionAnalysis(sessionId) {
     `,
     [id]
   );
+  const slowWrongQuestions = slowWrongQuestionsRaw.map((row) => enrichQuestionMetadata(row, session));
 
   return {
     session,

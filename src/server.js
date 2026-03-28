@@ -17,6 +17,7 @@ const {
   updateErrorAnnotation,
 } = require('./db');
 const { LlmConfigError, generatePerformanceReview, answerCoachQuestion } = require('./llm-coach-agent');
+const { classifyScrapedQuestions } = require('./question-topic-classifier');
 const { runScrapeFromOpenBrowser, openUrlInOpenBrowser } = require('./scraper-runner');
 
 const app = express();
@@ -582,6 +583,26 @@ app.post('/api/scrape', async (req, res) => {
       scraperPath: path.resolve(__dirname, 'scrapers', 'gmat_scraper.js'),
     });
 
+    let classification = null;
+    try {
+      classification = await classifyScrapedQuestions(data);
+    } catch (error) {
+      classification = {
+        attempted: 0,
+        classified: 0,
+        skipped: true,
+        reason: 'llm_unavailable',
+        error: error.message,
+        hint: error.hint || '',
+      };
+      // eslint-disable-next-line no-console
+      console.warn('[api/scrape] question classification skipped', {
+        error: error.message,
+        hint: error.hint || '',
+      });
+    }
+    data.classification = classification;
+
     const savedRun = await saveScrapeResult(data, {
       since: sinceValue,
       source: preset.label,
@@ -603,6 +624,7 @@ app.post('/api/scrape', async (req, res) => {
       sinceTimezone: THAI_TIME_ZONE,
       scrapeWindowUsed: String(scrapeWindow || 'today').toLowerCase(),
       mode: 'auto-upsert',
+      classification,
       warning,
       debug: debug || null,
     });

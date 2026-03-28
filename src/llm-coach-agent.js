@@ -179,19 +179,40 @@ function normalizeProvider(value) {
   return '';
 }
 
-function resolveProvider() {
-  const explicit = normalizeProvider(process.env.LLM_PROVIDER);
+function scopedEnvName(scope, key) {
+  const normalizedScope = String(scope || '').trim().toUpperCase();
+  if (!normalizedScope) return key;
+  return `${normalizedScope}_${key}`;
+}
+
+function getEnv(key, fallbackKeys = []) {
+  for (const candidate of [key, ...fallbackKeys].filter(Boolean)) {
+    const value = process.env[candidate];
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function getScopedModelEnv(scope, key, fallbackKeys = []) {
+  const scopedKeys = [scopedEnvName(scope, key), scopedEnvName(scope, 'LLM_MODEL'), ...fallbackKeys].filter(Boolean);
+  for (const candidate of scopedKeys) {
+    const value = process.env[candidate];
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function resolveProvider(scope = '') {
+  const explicit = normalizeProvider(
+    getEnv('LLM_PROVIDER')
+  );
   if (explicit) return explicit;
 
-  if (String(process.env.ZAI_API_KEY || '').trim()) return 'zai';
-  if (String(process.env.OPENAI_API_KEY || '').trim()) return 'openai';
+  if (String(getEnv('ZAI_API_KEY', ['LLM_API_KEY']) || '').trim()) return 'zai';
+  if (String(getEnv('OPENAI_API_KEY', ['OPENAI_API_KEY', 'LLM_API_KEY']) || '').trim()) return 'openai';
 
   const endpointHint = String(
-    process.env.ZAI_API_BASE ||
-      process.env.ZAI_BASE_URL ||
-      process.env.OPENAI_API_BASE ||
-      process.env.OPENAI_BASE_URL ||
-      process.env.LLM_BASE_URL ||
+    getEnv('ZAI_API_BASE', ['ZAI_BASE_URL', 'OPENAI_API_BASE', 'OPENAI_BASE_URL', 'LLM_BASE_URL']) ||
       ''
   )
     .trim()
@@ -201,22 +222,34 @@ function resolveProvider() {
   return 'openai';
 }
 
-function normalizedBaseUrl(value) {
+function normalizedBaseUrl(value, { scope = '', envKey = 'OPENAI_API_BASE' } = {}) {
   const text = String(value || '').trim();
   if (!text) return '';
-  return text.endsWith('/') ? text : `${text}/`;
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch (_error) {
+    const scopedKey = scopedEnvName(scope, envKey);
+    const globalHintKey = envKey;
+    throw new LlmConfigError(
+      `Invalid base URL for ${scope ? 'question classification' : 'AI provider'} config.`,
+      `Set ${globalHintKey} to a full URL like https://api.openai.com/v1 or leave it blank to use the default endpoint.`
+    );
+  }
+  const normalized = parsed.toString();
+  return normalized.endsWith('/') ? normalized : `${normalized}/`;
 }
 
-function resolveConfiguredMaxTokens() {
-  const raw = Number(process.env.LLM_MAX_TOKENS);
+function resolveConfiguredMaxTokens(scope = '') {
+  const raw = Number(getEnv('LLM_MAX_TOKENS'));
   if (!Number.isFinite(raw) || raw <= 0) return null;
   return Math.floor(raw);
 }
 
-function buildModel({ disableMaxTokens = false } = {}) {
-  const provider = resolveProvider();
-  const temperature = Number(process.env.LLM_TEMPERATURE ?? 0.2);
-  const maxTokens = disableMaxTokens ? null : resolveConfiguredMaxTokens();
+function buildModel({ disableMaxTokens = false, scope = '' } = {}) {
+  const provider = resolveProvider(scope);
+  const temperature = Number(getEnv('LLM_TEMPERATURE') ?? 0.2);
+  const maxTokens = disableMaxTokens ? null : resolveConfiguredMaxTokens(scope);
   const shared = {
     temperature: Number.isFinite(temperature) ? temperature : 0.2,
     maxRetries: 1,
@@ -227,7 +260,7 @@ function buildModel({ disableMaxTokens = false } = {}) {
   }
 
   if (provider === 'zai') {
-    const apiKey = String(process.env.ZAI_API_KEY || process.env.LLM_API_KEY || '').trim();
+    const apiKey = String(getEnv('ZAI_API_KEY', ['LLM_API_KEY']) || '').trim();
     if (!apiKey) {
       throw new LlmConfigError(
         'Missing API key for AI coach.',
@@ -236,13 +269,22 @@ function buildModel({ disableMaxTokens = false } = {}) {
     }
 
     const baseURL = normalizedBaseUrl(
-      process.env.ZAI_API_BASE ||
-        process.env.ZAI_BASE_URL ||
-        process.env.OPENAI_API_BASE ||
-        process.env.LLM_BASE_URL ||
-        'https://api.z.ai/api/paas/v4/'
+      getEnv('ZAI_API_BASE', ['ZAI_BASE_URL', 'OPENAI_API_BASE', 'LLM_BASE_URL']) ||
+        'https://api.z.ai/api/paas/v4/',
+      {
+        scope,
+        envKey: String(getEnv('ZAI_API_BASE') || '').trim()
+          ? 'ZAI_API_BASE'
+          : String(getEnv('ZAI_BASE_URL') || '').trim()
+            ? 'ZAI_BASE_URL'
+            : String(getEnv('OPENAI_API_BASE') || '').trim()
+              ? 'OPENAI_API_BASE'
+              : 'LLM_BASE_URL',
+      }
     );
-    const model = String(process.env.ZAI_MODEL || process.env.LLM_MODEL || 'glm-5').trim();
+    const model = String(
+      getScopedModelEnv(scope, 'ZAI_MODEL', ['ZAI_MODEL', 'LLM_MODEL']) || 'glm-5'
+    ).trim();
 
     return new ChatOpenAI({
       ...shared,
@@ -257,16 +299,27 @@ function buildModel({ disableMaxTokens = false } = {}) {
     });
   }
 
-  const apiKey = String(process.env.OPENAI_API_KEY || process.env.LLM_API_KEY || '').trim();
+  const apiKey = String(getEnv('OPENAI_API_KEY', ['LLM_API_KEY']) || '').trim();
   if (!apiKey) {
     throw new LlmConfigError(
       'Missing API key for AI coach.',
       'Set OPENAI_API_KEY (or LLM_API_KEY) in .env.'
     );
   }
-  const model = String(process.env.OPENAI_MODEL || process.env.LLM_MODEL || 'gpt-4o-mini').trim();
+  const model = String(
+    getScopedModelEnv(scope, 'OPENAI_MODEL', ['OPENAI_MODEL', 'LLM_MODEL']) || 'gpt-4o-mini'
+  ).trim();
   const openaiBase = normalizedBaseUrl(
-    process.env.OPENAI_API_BASE || process.env.OPENAI_BASE_URL || process.env.LLM_BASE_URL || ''
+    getEnv('OPENAI_API_BASE', ['OPENAI_BASE_URL', 'LLM_BASE_URL']) ||
+      '',
+    {
+      scope,
+      envKey: String(getEnv('OPENAI_API_BASE') || '').trim()
+        ? 'OPENAI_API_BASE'
+        : String(getEnv('OPENAI_BASE_URL') || '').trim()
+          ? 'OPENAI_BASE_URL'
+          : 'LLM_BASE_URL',
+    }
   );
   const configuration = openaiBase ? { baseURL: openaiBase } : undefined;
 
@@ -642,6 +695,9 @@ async function answerCoachQuestion({ runId = null, question = '', history = [] }
 
 module.exports = {
   LlmConfigError,
+  buildModel,
+  extractModelText,
+  classifyLlmError,
   generatePerformanceReview,
   answerCoachQuestion,
 };

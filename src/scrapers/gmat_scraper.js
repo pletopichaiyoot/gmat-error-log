@@ -210,6 +210,25 @@ function shouldKeepAnswerPayload(data) {
   return isCompletedAnswerPayload(data) || isUsableIncompleteAnswerPayload(data);
 }
 
+function isLikelyUnansweredCategoryRow(row = {}, apiByQId = new Map()) {
+  const qId = String(row?.q_id || '').trim();
+  if (qId && apiByQId.has(qId)) return false;
+
+  const hasAnswer =
+    String(row?.my_answer || '').trim() ||
+    String(row?.correct_answer || '').trim() ||
+    String(row?.user_answer || '').trim();
+  const timeSec = Number(row?.time_sec || 0);
+  const hasQuestionMeta =
+    String(row?.q_code || '').trim() ||
+    String(row?.difficulty || '').trim() ||
+    String(row?.question_url || '').trim();
+
+  if (!qId && !hasAnswer && timeSec <= 5) return true;
+  if (qId && !apiByQId.has(qId) && !hasAnswer && timeSec <= 5 && hasQuestionMeta) return true;
+  return false;
+}
+
 function answerPayloadDedupKey(data = {}) {
   const answerId = Number(data?.id);
   if (Number.isInteger(answerId) && answerId > 0) return `id:${answerId}`;
@@ -733,6 +752,16 @@ function inferChoiceLetterFromNode(el, idx) {
   return ['A', 'B', 'C', 'D', 'E'][idx] ?? String.fromCharCode(65 + idx);
 }
 
+function classContainsAny(el, fragments = []) {
+  const classText = String(el?.className || '').toLowerCase();
+  return fragments.some((fragment) => classText.includes(String(fragment || '').toLowerCase()));
+}
+
+function hasImmediateStatusChild(el, fragments = []) {
+  if (!el?.children?.length) return false;
+  return Array.from(el.children).some((child) => classContainsAny(child, fragments));
+}
+
 function elementLooksSelected(el) {
   if (!el) return false;
   const classText = String(el.className || '').toLowerCase();
@@ -752,22 +781,15 @@ function elementLooksSelected(el) {
 
 function elementLooksCorrect(el) {
   if (!el) return false;
-  const classText = String(el.className || '').toLowerCase();
-  if (classText.includes('corrected') || classText.includes('is-correct') || classText.includes('correct-answer')) {
-    return true;
-  }
-  if (el.querySelector?.('[class*="corrected"], [class*="is-correct"], [class*="correct-answer"]')) return true;
-  return false;
+  return (
+    classContainsAny(el, ['corrected', 'is-correct', 'correct-answer', ' correct']) ||
+    hasImmediateStatusChild(el, ['corrected', 'is-correct', 'correct-answer', ' correct'])
+  );
 }
 
 function elementLooksIncorrect(el) {
   if (!el) return false;
-  const classText = String(el.className || '').toLowerCase();
-  if (classText.includes('incorrect') || classText.includes('is-incorrect')) {
-    return true;
-  }
-  if (el.querySelector?.('[class*="incorrect"], [class*="is-incorrect"]')) return true;
-  return false;
+  return classContainsAny(el, ['incorrect', 'is-incorrect']) || hasImmediateStatusChild(el, ['incorrect', 'is-incorrect']);
 }
 
 function extractAnswersFromChoiceDom() {
@@ -800,6 +822,597 @@ function extractAnswersFromChoiceDom() {
     correct_answer: normalizeAnswerLetter(correctAnswer),
     selected_answer: normalizeAnswerLetter(selectedAnswer),
   };
+}
+
+function normalizeBlockText(rawValue) {
+  return String(rawValue || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function extractChoiceNodesFromDom() {
+  const selectors = [
+    '.question-choices-multi .multi-choice',
+    '.question-choices-multi [class*="choice"]',
+    '[class*="question-choices"] .multi-choice',
+    '[class*="question-choices"] [class*="choice"]',
+  ];
+
+  let choiceEls = [];
+  for (const selector of selectors) {
+    const nodes = Array.from(document.querySelectorAll(selector));
+    if (nodes.length > choiceEls.length) choiceEls = nodes;
+  }
+  return choiceEls;
+}
+
+function normalizeChoiceText(rawValue, letter = '') {
+  const text = normalizeBlockText(rawValue);
+  if (!text) return '';
+  if (!letter) return text;
+  return text.replace(new RegExp(`^${letter}[\\).:\\-\\s]+`, 'i'), '').trim();
+}
+
+function extractAnswerChoicesFromDom() {
+  const choiceEls = extractChoiceNodesFromDom();
+  if (!choiceEls.length) return [];
+
+  const out = [];
+  const seen = new Set();
+
+  choiceEls.forEach((el, idx) => {
+    const label = inferChoiceLetterFromNode(el, idx);
+    const text = normalizeChoiceText(el?.innerText || el?.textContent || '', label);
+    if (!text) return;
+    const key = `${label}|${text}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ label, text });
+  });
+
+  return out;
+}
+
+function collectUniqueElements(nodes = []) {
+  return Array.from(new Set((nodes || []).filter(Boolean)));
+}
+
+function responseFormatForQuestion({ diContext = false, subjectSubRaw = '', answerChoices = [], compositeSlots = [] } = {}) {
+  const subCode = String(subjectSubRaw || '').trim().toUpperCase();
+  if (!diContext) return 'single_select';
+  if (compositeSlots.length) return 'composite';
+  if (['TPA', 'TA', 'GI', 'MSR'].includes(subCode) && answerChoices.length !== 5) return 'composite';
+  return 'single_select';
+}
+
+function answerOptionSelectors() {
+  return [
+    '.question-choices-multi .multi-choice',
+    '.question-choices-multi [class*="choice"]',
+    '[class*="question-choices"] .multi-choice',
+    '[class*="question-choices"] [class*="choice"]',
+    '[class*="choice"]',
+    '[class*="option"]',
+    '[role="radio"]',
+    '[role="checkbox"]',
+    'input[type="radio"]',
+    'input[type="checkbox"]',
+    'option',
+    'button[aria-checked]',
+    '[aria-checked]',
+    'td',
+    'th',
+  ];
+}
+
+function queryAnswerOptionNodes(root = document) {
+  const seen = new Set();
+  const out = [];
+  for (const selector of answerOptionSelectors()) {
+    const nodes = Array.from(root.querySelectorAll(selector));
+    for (const node of nodes) {
+      if (!node || node === root || seen.has(node)) continue;
+      seen.add(node);
+      out.push(node);
+    }
+  }
+  return out;
+}
+
+function optionNodeText(el) {
+  const raw = String(el?.innerText || el?.textContent || '');
+  return normalizeBlockText(raw);
+}
+
+function nestedLeafOptionSelectors() {
+  return [
+    '.table-choice',
+    '.choice-content',
+    '.multi-choice',
+    '[role="radio"]',
+    '[role="checkbox"]',
+    'input[type="radio"]',
+    'input[type="checkbox"]',
+    'option',
+    'button[aria-checked]',
+    '[aria-checked]',
+    'select',
+  ];
+}
+
+function nestedLeafOptionCount(el) {
+  if (!el?.querySelectorAll) return 0;
+  const seen = new Set();
+  const selectors = nestedLeafOptionSelectors();
+  selectors.forEach((selector) => {
+    try {
+      Array.from(el.querySelectorAll(selector)).forEach((node) => {
+        if (node && node !== el) seen.add(node);
+      });
+    } catch (_error) {
+      // Ignore invalid selectors.
+    }
+  });
+  return seen.size;
+}
+
+function elementLooksAggregateOptionContainer(el) {
+  if (!el) return false;
+  const tag = String(el.tagName || '').toLowerCase();
+  const classText = String(el.className || '').toLowerCase();
+  if (['ul', 'ol', 'table', 'tbody', 'thead', 'tfoot', 'tr'].includes(tag)) return true;
+  if (
+    classText.includes('question-container') ||
+    classText.includes('questions-container') ||
+    classText.includes('content-container') ||
+    classText.includes('answer-container') ||
+    classText.includes('results')
+  ) {
+    return true;
+  }
+  return nestedLeafOptionCount(el) >= 2;
+}
+
+function optionNodeLooksUseful(el) {
+  if (!el) return false;
+  if (elementLooksAggregateOptionContainer(el)) return false;
+  const text = optionNodeText(el);
+  if (!text) return false;
+  if (text.length > 240) return false;
+  if (text.split(/\r?\n/).filter((line) => normalizeBlockText(line)).length > 6) return false;
+  if (/^(your answer|correct answer|selected answer|answer explanation|explanation)\b/i.test(text)) return false;
+  return true;
+}
+
+function deriveOptionId(el, idx, fallbackText = '') {
+  const directValue =
+    el?.getAttribute?.('data-choice') ||
+    el?.getAttribute?.('data-answer') ||
+    el?.getAttribute?.('data-option') ||
+    el?.getAttribute?.('data-value') ||
+    el?.getAttribute?.('value') ||
+    '';
+  const normalizedDirect = normalizeBlockText(directValue);
+  if (normalizedDirect) return normalizedDirect;
+  const fallback = normalizeBlockText(fallbackText).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return fallback || `option_${idx + 1}`;
+}
+
+function deriveOptionLabel(el, idx, text = '') {
+  const inferred = inferChoiceLetterFromNode(el, idx);
+  if (inferred && /^[A-E]$/.test(inferred)) return inferred;
+  const raw = normalizeBlockText(text);
+  const shortWord = raw.match(/^([A-Z]{1,3}|\d+)[\).:\-\s]/);
+  if (shortWord?.[1]) return shortWord[1];
+  return null;
+}
+
+function statefulAnswerNodes(root = document) {
+  return queryAnswerOptionNodes(root).filter(
+    (el) => optionNodeLooksUseful(el) && (elementLooksSelected(el) || elementLooksCorrect(el) || elementLooksIncorrect(el))
+  );
+}
+
+function countStatefulOptionNodes(root = document) {
+  return statefulAnswerNodes(root).length;
+}
+
+function findCompositeSlotContainer(node) {
+  if (!node) return null;
+  let current = node;
+  let best = node.parentElement || node;
+
+  for (let depth = 0; current && current !== document.body && depth < 7; depth += 1, current = current.parentElement) {
+    const text = normalizeBlockText(current.innerText || current.textContent || '');
+    if (!text || text.length > 700) continue;
+
+    const statefulCount = countStatefulOptionNodes(current);
+    const optionCount = queryAnswerOptionNodes(current).filter(optionNodeLooksUseful).length;
+    if (!statefulCount) continue;
+
+    const tag = String(current.tagName || '').toLowerCase();
+    const classText = String(current.className || '').toLowerCase();
+    const looksRowLike =
+      ['tr', 'li', 'fieldset'].includes(tag) ||
+      classText.includes('row') ||
+      classText.includes('statement') ||
+      classText.includes('part') ||
+      classText.includes('column');
+
+    if (looksRowLike && optionCount <= 12) return current;
+    if (statefulCount <= 4 && optionCount <= 12) best = current;
+  }
+
+  return best || node;
+}
+
+function deriveCompositeSlotPrompt(container, options = [], index = 0) {
+  const lines = normalizeBlockText(container?.innerText || '')
+    .split(/\r?\n/)
+    .map((line) => normalizeBlockText(line))
+    .filter(Boolean);
+  if (!lines.length) return `Part ${index + 1}`;
+
+  const optionTexts = new Set(
+    (options || [])
+      .map((option) => normalizeBlockText(option?.text || ''))
+      .filter(Boolean)
+  );
+
+  for (const line of lines) {
+    if (optionTexts.has(line)) continue;
+    if (/^(your answer|correct answer|selected answer|answer explanation|explanation)\b/i.test(line)) continue;
+    if (line.length > 2) return line;
+  }
+
+  return lines[0] || `Part ${index + 1}`;
+}
+
+function inferCompositeSlotType(container, options = []) {
+  const classText = String(container?.className || '').toLowerCase();
+  if (container?.querySelector?.('select')) return 'dropdown';
+  if (container?.querySelector?.('input[type="checkbox"], [role="checkbox"]')) return 'checkbox';
+  if (container?.querySelector?.('input[type="radio"], [role="radio"]')) return 'radio';
+  if (classText.includes('table') || container?.closest?.('table')) return 'table-cell';
+  if ((options || []).length > 2) return 'choice-grid';
+  return 'selection';
+}
+
+function extractCompositeSlotOptions(container, markedNodes = []) {
+  const baseNodes = queryAnswerOptionNodes(container).filter(optionNodeLooksUseful);
+  const optionNodes = collectUniqueElements([...baseNodes, ...(markedNodes || [])]);
+
+  const options = [];
+  const seen = new Set();
+
+  optionNodes.forEach((el, idx) => {
+    const text = optionNodeText(el);
+    if (!text) return;
+    const label = deriveOptionLabel(el, idx, text);
+    const optionId = deriveOptionId(el, idx, text);
+    const key = `${optionId}|${text}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    options.push({
+      id: optionId,
+      label: label || null,
+      text,
+      selected: elementLooksSelected(el),
+      correct: elementLooksCorrect(el),
+      incorrect: elementLooksIncorrect(el),
+    });
+  });
+
+  return options.slice(0, 12);
+}
+
+function extractRawAnswerValuesFromText(text) {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((line) => normalizeBlockText(line))
+    .filter(Boolean);
+
+  let myAnswerText = '';
+  let correctAnswerText = '';
+
+  for (const line of lines) {
+    if (!myAnswerText) {
+      const myMatch = line.match(/^(?:your answer|you answered|selected answer)\s*[:\-]\s*(.+)$/i);
+      if (myMatch?.[1]) myAnswerText = normalizeBlockText(myMatch[1]);
+    }
+    if (!correctAnswerText) {
+      const correctMatch = line.match(/^(?:correct answer|the correct answer is)\s*[:\-]?\s*(.+)$/i);
+      if (correctMatch?.[1]) correctAnswerText = normalizeBlockText(correctMatch[1]);
+    }
+    if (myAnswerText && correctAnswerText) break;
+  }
+
+  return {
+    my_answer_text: myAnswerText || null,
+    correct_answer_text: correctAnswerText || null,
+  };
+}
+
+function formatCompositeSlotValue(slot = {}, key = 'user_value') {
+  const value = normalizeBlockText(slot?.[key] || '');
+  if (!value) return '';
+  const options = Array.isArray(slot?.options) ? slot.options : [];
+  const matched = options.find((option) => String(option?.id || '') === value);
+  return normalizeBlockText(matched?.text || matched?.label || value);
+}
+
+function summarizeCompositeSlots(slots = [], key = 'user_value', maxLength = 160) {
+  const parts = [];
+  for (let idx = 0; idx < slots.length; idx += 1) {
+    const slot = slots[idx];
+    const valueText = formatCompositeSlotValue(slot, key);
+    if (!valueText) continue;
+    const prompt = normalizeBlockText(slot?.prompt || '') || `Part ${idx + 1}`;
+    parts.push(`${prompt}: ${valueText}`);
+  }
+  const summary = normalizeBlockText(parts.join(' | '));
+  if (!summary) return null;
+  if (summary.length <= maxLength) return summary;
+  return `${summary.slice(0, maxLength - 1)}…`;
+}
+
+function extractDiCompositeResponseFromDom() {
+  const markedNodes = statefulAnswerNodes(document);
+  if (!markedNodes.length) return null;
+
+  const slotMap = new Map();
+  markedNodes.forEach((node) => {
+    const container = findCompositeSlotContainer(node) || node.parentElement || node;
+    if (!container) return;
+    const key = container;
+    if (!slotMap.has(key)) slotMap.set(key, []);
+    slotMap.get(key).push(node);
+  });
+
+  const slots = [];
+  Array.from(slotMap.entries()).forEach(([container, slotNodes], index) => {
+    const options = extractCompositeSlotOptions(container, slotNodes);
+    const userOption =
+      options.find((option) => option.incorrect) ||
+      options.find((option) => option.selected && !option.correct) ||
+      null;
+    const correctOption = options.find((option) => option.correct) || null;
+
+    if (!options.length && !userOption && !correctOption) return;
+
+    slots.push({
+      slot_id: `slot_${index + 1}`,
+      slot_type: inferCompositeSlotType(container, options),
+      prompt: deriveCompositeSlotPrompt(container, options, index),
+      options,
+      user_value: userOption?.id || null,
+      correct_value: correctOption?.id || null,
+    });
+  });
+
+  if (!slots.length) return null;
+
+  return {
+    response_format: 'composite',
+    slots,
+  };
+}
+
+const QUESTION_STEM_SHELL_PHRASES = [
+  'skip to main content',
+  'notifications',
+  'synced',
+  'my account',
+  'home',
+  'study plan',
+  'game center',
+  'discussions',
+  'lessons',
+  'practice questions',
+  'practice exams',
+  'resources',
+  'search',
+  'strengths & weaknesses',
+  'review all results',
+  'category scores',
+];
+
+function questionStemRootSelectors() {
+  return [
+    '#content-question-start',
+    '[id^="content-question-start"]',
+    '[id^="current-question-container-"]',
+    '.answer-container.question-container',
+    '.question-container',
+    '.questions-container',
+  ];
+}
+
+function questionStemAnchorSelectors() {
+  return [
+    '.choice-content',
+    '.question-choices-table',
+    '.question-choices-multi',
+    '.multi-choice',
+    '[class*="question-choices"]',
+    '[class*="choice"].correct',
+    '[class*="choice"].incorrect',
+    '[aria-checked="true"]',
+    '[class*="correct"]',
+    '[class*="incorrect"]',
+  ];
+}
+
+function questionStemShellPhraseCount(text) {
+  const haystack = String(text || '').toLowerCase();
+  if (!haystack) return 0;
+  return QUESTION_STEM_SHELL_PHRASES.reduce(
+    (count, phrase) => count + (haystack.includes(phrase) ? 1 : 0),
+    0
+  );
+}
+
+function scoreQuestionStemRoot(node) {
+  if (!node) return Number.NEGATIVE_INFINITY;
+  const text = normalizeBlockText(node.innerText || node.textContent || '');
+  if (!text) return Number.NEGATIVE_INFINITY;
+
+  const id = String(node.id || '').toLowerCase();
+  const classText = String(node.className || '').toLowerCase();
+  const hasQuestionCode = /\bquestion\s+\d{5,7}\b/i.test(text);
+  const hasChoices = Boolean(
+    node.querySelector?.('.question-choices-table, .question-choices-multi, [class*="question-choices"]')
+  );
+  const hasTable = Boolean(node.querySelector?.('table'));
+  const shellCount = questionStemShellPhraseCount(text);
+
+  let score = 0;
+  if (id === 'content-question-start' || id.startsWith('content-question-start')) score += 260;
+  if (id.startsWith('current-question-container-')) score += 240;
+  if (classText.includes('answer-container')) score += 45;
+  if (classText.includes('question-container')) score += 35;
+  if (classText.includes('questions-container')) score += 45;
+  if (node.querySelector?.('#content-question-start, [id^="current-question-container-"]')) score += 30;
+  if (hasQuestionCode) score += 25;
+  if (hasChoices) score += 20;
+  if (hasTable) score += 10;
+
+  score -= shellCount * 35;
+  if (/\b(your answer|correct answer|selected answer|answer explanation|explanation)\b/i.test(text)) score -= 80;
+  if (/report content errors|issue type\*|please enter your message/i.test(text)) score -= 140;
+  if (/progress|review all results|category scores/i.test(text) && !hasQuestionCode) score -= 90;
+  if (text.length < 80) score -= 60;
+  if (text.length > 9000) score -= Math.ceil((text.length - 9000) / 500);
+
+  return score;
+}
+
+function findQuestionStemRoot() {
+  const candidates = [];
+  const seen = new Set();
+  const addCandidate = (node) => {
+    if (!node || node === document.body || seen.has(node)) return;
+    seen.add(node);
+    candidates.push(node);
+  };
+
+  for (const selector of questionStemRootSelectors()) {
+    try {
+      Array.from(document.querySelectorAll(selector)).forEach(addCandidate);
+    } catch (_error) {
+      // Ignore invalid selectors in older DOM variants.
+    }
+  }
+
+  for (const selector of questionStemAnchorSelectors()) {
+    let anchors = [];
+    try {
+      anchors = Array.from(document.querySelectorAll(selector));
+    } catch (_error) {
+      anchors = [];
+    }
+
+    for (const anchor of anchors) {
+      let current = anchor;
+      for (let depth = 0; current && current !== document.body && depth < 8; depth += 1, current = current.parentElement) {
+        addCandidate(current);
+      }
+    }
+  }
+
+  let bestNode = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  let bestLength = Number.POSITIVE_INFINITY;
+
+  for (const candidate of candidates) {
+    const score = scoreQuestionStemRoot(candidate);
+    if (!Number.isFinite(score)) continue;
+    const textLength = normalizeBlockText(candidate.innerText || candidate.textContent || '').length;
+    if (score > bestScore || (score === bestScore && textLength < bestLength)) {
+      bestNode = candidate;
+      bestScore = score;
+      bestLength = textLength;
+    }
+  }
+
+  if (bestScore <= 0) return null;
+  return bestNode;
+}
+
+function normalizeQuestionStemLine(line) {
+  const text = normalizeBlockText(line);
+  if (!text) return '';
+  const questionLeadMatch = text.match(/^question\s+\d{5,7}\s+(.+)$/i);
+  if (questionLeadMatch?.[1]) return normalizeBlockText(questionLeadMatch[1]);
+  return text;
+}
+
+function shouldStopQuestionStemAtLine(line) {
+  return /^(your answer|correct answer|selected answer|answer explanation|explanation|analysis|rationale|report content errors|done reviewing)\b/i.test(
+    String(line || '')
+  );
+}
+
+function shouldSkipQuestionStemLine(line, choiceVariants = new Set()) {
+  const text = normalizeBlockText(line);
+  if (!text) return true;
+  if (choiceVariants.has(text)) return true;
+  if (/^\d{6}$/.test(text)) return true;
+  if (/^[A-E]$/.test(text)) return true;
+  if (
+    /^(question|answer|correct|incorrect|confidence|time spent|review category|purchase prep|faqs?|back|next|previous|loading|report content errors|done reviewing)\b/i.test(
+      text
+    )
+  ) {
+    return true;
+  }
+  if (/^avg\.\s+(answer|correct|incorrect)\s+time\b/i.test(text)) return true;
+  if (/^\d+(?:\.\d+)?\s*%\s*correct$/i.test(text)) return true;
+  return false;
+}
+
+function extractQuestionStem(answerChoices = [], responseDetails = null) {
+  const choiceVariants = new Set();
+  for (const choice of answerChoices || []) {
+    const label = String(choice?.label || '').trim().toUpperCase();
+    const text = normalizeBlockText(choice?.text || '');
+    if (!text) continue;
+    choiceVariants.add(text);
+    if (label) {
+      choiceVariants.add(`${label} ${text}`);
+      choiceVariants.add(`${label}. ${text}`);
+      choiceVariants.add(`${label}) ${text}`);
+      choiceVariants.add(`${label}: ${text}`);
+    }
+  }
+
+  const slots = Array.isArray(responseDetails?.slots) ? responseDetails.slots : [];
+  for (const slot of slots) {
+    for (const option of Array.isArray(slot?.options) ? slot.options : []) {
+      const text = normalizeBlockText(option?.text || '');
+      if (text) choiceVariants.add(text);
+    }
+  }
+
+  const stemRoot = findQuestionStemRoot();
+  const lines = String(stemRoot?.innerText || document.body.innerText || '')
+    .split(/\r?\n/)
+    .map((line) => normalizeQuestionStemLine(line))
+    .map((line) => normalizeBlockText(line))
+    .filter(Boolean);
+
+  const collected = [];
+  for (const line of lines) {
+    if (shouldStopQuestionStemAtLine(line) && collected.length) break;
+    if (shouldSkipQuestionStemLine(line, choiceVariants)) continue;
+    collected.push(line);
+  }
+
+  return normalizeBlockText(collected.join('\n'));
 }
 
 function derivedSubject(questions, source) {
@@ -950,7 +1563,7 @@ function extractReviewTargetFromRow(row) {
   return null;
 }
 
-function dedupeWrongRefs(items) {
+function dedupeReviewRefs(items) {
   const seen = new Set();
   const output = [];
   for (const item of items || []) {
@@ -1356,13 +1969,101 @@ function countAnswerChoiceNodes() {
   return 0;
 }
 
+function detectReviewContentSignals({ diContext = false, expectedQCode = null, sessionId = null, reviewCatId = null, qId = null } = {}) {
+  const hash = window.location.hash || '';
+  const parsedRoute = parseReviewRoute(hash);
+  const bodyText = String(document.body.innerText || '');
+  const currentQCode = bodyText.match(/\b(\d{6})\b/)?.[1] ?? null;
+  const normalizedExpectedQCode = expectedQCode ? String(expectedQCode) : null;
+  const routeReady =
+    parsedRoute &&
+    Number(parsedRoute.session_id) === Number(sessionId) &&
+    Number(parsedRoute.cat_id) === Number(reviewCatId);
+  const qIdReady =
+    parsedRoute?.q_id
+      ? String(parsedRoute.q_id) === String(qId)
+      : hash.includes(`/${qId}`);
+  const qCodeReady = !normalizedExpectedQCode || currentQCode === normalizedExpectedQCode;
+  const choiceCount = countAnswerChoiceNodes();
+  const statefulCount = countStatefulOptionNodes(document);
+  const usefulOptionCount = queryAnswerOptionNodes(document).filter(optionNodeLooksUseful).length;
+  const rawTextAnswers = extractRawAnswerValuesFromText(bodyText);
+  const answerLabelCount = [
+    rawTextAnswers.my_answer_text,
+    rawTextAnswers.correct_answer_text,
+  ].filter(Boolean).length;
+  const hasAnswerLabelText =
+    answerLabelCount > 0 || /(?:your answer|you answered|selected answer|correct answer|the correct answer is)/i.test(bodyText);
+  const loadingLike =
+    /\bloading\b/i.test(bodyText) &&
+    !currentQCode &&
+    choiceCount === 0 &&
+    statefulCount === 0 &&
+    answerLabelCount === 0;
+  const compositeSlotCount =
+    diContext && statefulCount > 0
+      ? (extractDiCompositeResponseFromDom()?.slots || []).length
+      : 0;
+  const hasStemLikeText = normalizeBlockText(bodyText).length >= 120;
+
+  const contentReady =
+    choiceCount > 0 ||
+    compositeSlotCount > 0 ||
+    hasAnswerLabelText ||
+    (diContext && statefulCount > 0) ||
+    (diContext && usefulOptionCount >= 2 && hasStemLikeText);
+
+  return {
+    hash,
+    parsedRoute,
+    routeReady,
+    qIdReady,
+    qCodeReady,
+    currentQCode,
+    choiceCount,
+    statefulCount,
+    usefulOptionCount,
+    compositeSlotCount,
+    answerLabelCount,
+    hasAnswerLabelText,
+    hasStemLikeText,
+    loadingLike,
+    pageErrors: pageErrorCount(),
+    bodyTextLength: bodyText.length,
+    contentReady,
+  };
+}
+
+function formatReviewReadyDiagnostics(diag = {}) {
+  const route = diag?.parsedRoute
+    ? `${diag.parsedRoute.session_id}/${diag.parsedRoute.cat_id}/${diag.parsedRoute.q_id}`
+    : 'none';
+  return [
+    `hash="${String(diag?.hash || '').slice(0, 120)}"`,
+    `route=${route}`,
+    `routeReady=${diag?.routeReady ? 'yes' : 'no'}`,
+    `qIdReady=${diag?.qIdReady ? 'yes' : 'no'}`,
+    `qCodeReady=${diag?.qCodeReady ? 'yes' : 'no'}`,
+    `currentQCode=${diag?.currentQCode || '-'}`,
+    `choices=${Number(diag?.choiceCount || 0)}`,
+    `stateful=${Number(diag?.statefulCount || 0)}`,
+    `usefulOptions=${Number(diag?.usefulOptionCount || 0)}`,
+    `slots=${Number(diag?.compositeSlotCount || 0)}`,
+    `answerLabels=${Number(diag?.answerLabelCount || 0)}`,
+    `loadingLike=${diag?.loadingLike ? 'yes' : 'no'}`,
+    `pageErrors=${Number(diag?.pageErrors || 0)}`,
+    `bodyText=${Number(diag?.bodyTextLength || 0)}`,
+  ].join(', ');
+}
+
 async function waitForReviewReady(
   sessionId,
   reviewCatId,
   qId,
   cfg = CONFIG,
   expectedQCode = null,
-  timeoutOverrideMs = null
+  timeoutOverrideMs = null,
+  diContext = false
 ) {
   const timeoutMs =
     (Number(timeoutOverrideMs) > 0
@@ -1370,29 +2071,30 @@ async function waitForReviewReady(
       : Number(cfg.reviewReadyTimeoutMs)) || Math.max(Number(cfg.pageWaitMs || 0) * 4, 10000);
   const start = Date.now();
   const expectedRoutePart = `custom-quiz/${sessionId}/review/categories/${reviewCatId}/`;
-  const normalizedExpectedQCode = expectedQCode ? String(expectedQCode) : null;
+  let lastDiagnostics = null;
 
   while (Date.now() - start < timeoutMs) {
-    const hash = window.location.hash || '';
-    const parsedRoute = parseReviewRoute(hash);
-    const routeReady =
-      parsedRoute &&
-      Number(parsedRoute.session_id) === Number(sessionId) &&
-      Number(parsedRoute.cat_id) === Number(reviewCatId);
-    const hashReady = hash.includes(expectedRoutePart);
-    const choiceCount = countAnswerChoiceNodes();
-    const currentQCode = document.body.innerText.match(/\b(\d{6})\b/)?.[1] ?? null;
-    const qCodeReady = !normalizedExpectedQCode || currentQCode === normalizedExpectedQCode;
-    const qIdReady =
-      parsedRoute?.q_id
-        ? String(parsedRoute.q_id) === String(qId)
-        : hash.includes(`/${qId}`);
+    const diagnostics = detectReviewContentSignals({
+      diContext,
+      expectedQCode,
+      sessionId,
+      reviewCatId,
+      qId,
+    });
+    lastDiagnostics = diagnostics;
+    const hashReady = diagnostics.hash.includes(expectedRoutePart);
 
-    if ((routeReady || hashReady) && choiceCount > 0 && qCodeReady && (qIdReady || !normalizedExpectedQCode)) {
+    if (
+      (diagnostics.routeReady || hashReady) &&
+      diagnostics.contentReady &&
+      diagnostics.qCodeReady &&
+      (diagnostics.qIdReady || !expectedQCode)
+    ) {
       return {
         ready: true,
-        routeQId: parsedRoute?.q_id ? String(parsedRoute.q_id) : String(qId),
-        routeCatId: parsedRoute?.cat_id ? Number(parsedRoute.cat_id) : Number(reviewCatId),
+        routeQId: diagnostics.parsedRoute?.q_id ? String(diagnostics.parsedRoute.q_id) : String(qId),
+        routeCatId: diagnostics.parsedRoute?.cat_id ? Number(diagnostics.parsedRoute.cat_id) : Number(reviewCatId),
+        diagnostics,
       };
     }
     await wait(200);
@@ -1402,6 +2104,7 @@ async function waitForReviewReady(
     ready: false,
     routeQId: null,
     routeCatId: null,
+    diagnostics: lastDiagnostics,
   };
 }
 
@@ -1502,8 +2205,20 @@ async function scrapePart1(cfg = CONFIG) {
     if (!sid) continue;
     const normalizedCorrect = normalizeCorrectValue(d.correct);
     if (normalizedCorrect === null) continue;
-    if (!apiSessions[sid]) apiSessions[sid] = { sid, questions: [], catIds: new Set() };
+    if (!apiSessions[sid]) {
+      apiSessions[sid] = {
+        sid,
+        questions: [],
+        catIds: new Set(),
+        hasIncompleteAnswers: false,
+        incompleteAnswerCount: 0,
+      };
+    }
     const s = apiSessions[sid];
+    if (!isCompletedAnswerPayload(d)) {
+      s.hasIncompleteAnswers = true;
+      s.incompleteAnswerCount += 1;
+    }
     const idCandidates = extractIdCandidatesFromActivity(d);
     const catLabel = extractCategoryLabel(d);
     const apiSubRaw = normalizeSubSubject({
@@ -1651,6 +2366,8 @@ async function scrapePart1(cfg = CONFIG) {
         const diTopic = resolvedGroup === 'DI' ? diSubtopicFromSubSubject(resolvedSubCode) : '';
         return {
           ...row,
+          q_id_candidates: fromApi?.q_id_candidates || (row?.q_id ? [row.q_id] : []),
+          user_answer: fromApi?.user_answer ?? row?.user_answer ?? null,
           subject_sub: resolvedGroup,
           subject_sub_raw: resolvedSubCode || null,
           topic: currentTopic || diTopic || null,
@@ -1726,6 +2443,8 @@ async function scrapePart1(cfg = CONFIG) {
         const diTopic = resolvedGroup === 'DI' ? diSubtopicFromSubSubject(resolvedSubCode) : '';
         return {
           ...row,
+          q_id_candidates: fromApi?.q_id_candidates || (row?.q_id ? [row.q_id] : []),
+          user_answer: fromApi?.user_answer ?? row?.user_answer ?? null,
           subject_sub: resolvedGroup,
           subject_sub_raw: resolvedSubCode || null,
           topic: currentTopic || diTopic || null,
@@ -1740,7 +2459,22 @@ async function scrapePart1(cfg = CONFIG) {
 
     const catQsRaw = catQs;
     const scopedCatQs = catQsRaw.filter((q) => q?.q_id && apiByQId.has(String(q.q_id)));
-    if (scopedCatQs.length > 0 && scopedCatQs.length < catQsRaw.length) {
+    const unmatchedCatQs = catQsRaw.filter((q) => !scopedCatQs.includes(q));
+    const likelyUnansweredCatQs = unmatchedCatQs.filter((q) => isLikelyUnansweredCategoryRow(q, apiByQId));
+
+    if (apiS.hasIncompleteAnswers) {
+      const filteredEndedEarlyCatQs = scopedCatQs.length
+        ? scopedCatQs
+        : catQsRaw.filter((q) => !isLikelyUnansweredCategoryRow(q, apiByQId));
+      if (likelyUnansweredCatQs.length > 0) {
+        console.warn(
+          `  ⚠️ ${sid} — dropped ${likelyUnansweredCatQs.length} likely unanswered category rows from an ended-early session.`
+        );
+      }
+      if (filteredEndedEarlyCatQs.length > 0) {
+        catQs = filteredEndedEarlyCatQs;
+      }
+    } else if (scopedCatQs.length > 0 && scopedCatQs.length < catQsRaw.length) {
       console.warn(
         `  ⚠️ ${sid} — categories rows (${catQsRaw.length}) exceed API-window rows (${apiS.questions.length}); preserving all category rows for review-link accuracy.`
       );
@@ -1800,7 +2534,7 @@ async function scrapePart1(cfg = CONFIG) {
         q_code: q.q_code || null,
         question_url: toAbsoluteQuestionUrl(q.question_url) || null,
       }));
-    const wrongRefs = dedupeWrongRefs(
+    const wrongRefs = dedupeReviewRefs(
       wrongFromCategories.length ? wrongFromCategories : [...wrongFromCategories, ...wrongFromApi]
     );
 
@@ -1912,18 +2646,18 @@ async function scrapePart1(cfg = CONFIG) {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PART 2 — Review page scraper (wrong answers only)
-//   Input:  sessions array from Part 1 (needs wrong_q_ids)
-//   Output: per-question {q_id, q_code, session_id, my_answer, correct_answer, topic}
+// PART 2 — Review page scraper (all questions)
+//   Input:  sessions array from Part 1
+//   Output: per-question review details including stem, choices, answers, and topic
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function scrapePart2(sessions, cfg = CONFIG) {
   installPageErrorTracker();
-  // Collect all wrong questions across all sessions
+  // Collect all reviewable questions across all sessions.
   const toScrape = [];
   for (const s of sessions) {
-    for (const wq of (s.wrong_q_ids || [])) {
-      if (!wq?.q_id) continue;
+    const reviewableQuestions = dedupeReviewRefs(s.questions || []);
+    for (const wq of reviewableQuestions) {
       toScrape.push({
         session_id: s.session_id,
         session_subject: s.subject || '',
@@ -1937,6 +2671,7 @@ async function scrapePart2(sessions, cfg = CONFIG) {
         q_code: wq.q_code || null,
         question_url: wq.question_url || null,
         api_user_answer: wq.user_answer || null,
+        correct: Boolean(wq.correct),
       });
     }
   }
@@ -1948,11 +2683,10 @@ async function scrapePart2(sessions, cfg = CONFIG) {
     subCodeHintsBySession.set(String(sid), extractCategorySubCodesFromCurrentPage(sid));
   }
 
-  console.log(`📖 Scraping ${toScrape.length} wrong-answer review pages…`);
+  console.log(`📖 Scraping ${toScrape.length} review pages…`);
 
-  const wrongAnswers = [];
+  const reviewQuestions = [];
   let skippedNotReady = 0;
-  let skippedNotWrong = 0;
   let skippedMismatchedCode = 0;
   const configuredPageWaitMs = Number(cfg.pageWaitMs || 0);
   const reviewNavWaitMs = Math.max(
@@ -2021,12 +2755,14 @@ async function scrapePart2(sessions, cfg = CONFIG) {
     sessionId,
     reviewCatCandidates,
     expectedQCode,
+    diContext = false,
     remainingAttempts = Number.POSITIVE_INFINITY,
   }) => {
     const wanted = String(expectedQCode || '').trim();
     if (!wanted) return null;
     let attemptsLeft = Number(remainingAttempts);
     if (!Number.isFinite(attemptsLeft)) attemptsLeft = Number.POSITIVE_INFINITY;
+    let lastDiagnostics = null;
 
     for (const candidateCat of reviewCatCandidates) {
       if (attemptsLeft <= 0) break;
@@ -2044,7 +2780,8 @@ async function scrapePart2(sessions, cfg = CONFIG) {
         route.q_id,
         cfg,
         wanted,
-        fastReadyTimeoutMs
+        fastReadyTimeoutMs,
+        diContext
       );
 
       if (!readyState?.ready && navResult.hadPageError && retrySameUrlOnPageError) {
@@ -2058,19 +2795,26 @@ async function scrapePart2(sessions, cfg = CONFIG) {
           route.q_id,
           cfg,
           wanted,
-          fastReadyTimeoutMs
+          fastReadyTimeoutMs,
+          diContext
         );
       }
+      lastDiagnostics = readyState?.diagnostics || lastDiagnostics;
 
       if (readyState?.ready) {
         return {
           routeQId: readyState.routeQId || String(route.q_id),
           routeCatId: readyState.routeCatId || Number(route.cat_id),
+          diagnostics: readyState?.diagnostics || lastDiagnostics,
         };
       }
     }
 
-    return null;
+    return {
+      routeQId: null,
+      routeCatId: null,
+      diagnostics: lastDiagnostics,
+    };
   };
 
   for (let i = 0; i < toScrape.length; i++) {
@@ -2087,6 +2831,7 @@ async function scrapePart2(sessions, cfg = CONFIG) {
       q_code: expectedQCode,
       question_url: savedQuestionUrl,
       api_user_answer: apiUserAnswer,
+      correct: expectedCorrect,
     } = toScrape[i];
     const diContext = isDiReviewContext(source, session_subject, cat_id, review_category_id);
     const savedRoute = parseReviewRoute(savedQuestionUrl);
@@ -2126,6 +2871,7 @@ async function scrapePart2(sessions, cfg = CONFIG) {
     let ready = false;
     let usedReviewCatId = null;
     let usedQId = null;
+    let lastReadyDiagnostics = null;
     let attemptsUsed = 0;
     const attemptedPairs = new Set();
     const tryReviewAttempt = async ({ reviewCatId, candidateQId, timeoutMs }) => {
@@ -2150,7 +2896,8 @@ async function scrapePart2(sessions, cfg = CONFIG) {
         candidateQId,
         cfg,
         expectedQCode,
-        timeoutMs
+        timeoutMs,
+        diContext
       );
 
       if (!readyState?.ready && navResult.hadPageError && retrySameUrlOnPageError) {
@@ -2164,7 +2911,8 @@ async function scrapePart2(sessions, cfg = CONFIG) {
           candidateQId,
           cfg,
           expectedQCode,
-          timeoutMs
+          timeoutMs,
+          diContext
         );
       }
 
@@ -2172,6 +2920,7 @@ async function scrapePart2(sessions, cfg = CONFIG) {
         ready: Boolean(readyState?.ready),
         navResult,
         readyState,
+        diagnostics: readyState?.diagnostics || null,
         exhausted: attemptsUsed >= maxReviewAttemptsPerQuestion,
       };
     };
@@ -2182,6 +2931,7 @@ async function scrapePart2(sessions, cfg = CONFIG) {
         candidateQId: String(savedRoute.q_id),
         timeoutMs: fullReadyTimeoutMs,
       });
+      lastReadyDiagnostics = directAttempt.diagnostics || lastReadyDiagnostics;
       if (directAttempt.ready) {
         ready = true;
         usedReviewCatId = directAttempt.readyState?.routeCatId || Number(savedRoute.cat_id);
@@ -2197,6 +2947,7 @@ async function scrapePart2(sessions, cfg = CONFIG) {
           candidateQId,
           timeoutMs: fastReadyTimeoutMs,
         });
+        lastReadyDiagnostics = attempt.diagnostics || lastReadyDiagnostics;
         if (attempt.ready) {
           ready = true;
           usedReviewCatId = attempt.readyState?.routeCatId || reviewCatId;
@@ -2218,8 +2969,10 @@ async function scrapePart2(sessions, cfg = CONFIG) {
         sessionId: session_id,
         reviewCatCandidates,
         expectedQCode,
+        diContext,
         remainingAttempts: Math.max(0, maxReviewAttemptsPerQuestion - attemptsUsed),
       });
+      lastReadyDiagnostics = fallbackReady?.diagnostics || lastReadyDiagnostics;
       if (fallbackReady?.routeQId && fallbackReady?.routeCatId) {
         ready = true;
         usedQId = fallbackReady.routeQId;
@@ -2232,7 +2985,10 @@ async function scrapePart2(sessions, cfg = CONFIG) {
 
     if (!ready || !usedReviewCatId || !usedQId) {
       skippedNotReady += 1;
-      console.warn(`  ⚠️  Skipped ${session_id}/${q_id}: review page did not load in time`);
+      const lastDiag = formatReviewReadyDiagnostics(lastReadyDiagnostics);
+      console.warn(
+        `  ⚠️  Skipped ${session_id}/${q_id}: review page did not become ready. ${lastDiag || 'No diagnostics captured.'}`
+      );
       continue;
     }
     preferredReviewCatBySession.set(sessionKey, Number(usedReviewCatId));
@@ -2254,7 +3010,18 @@ async function scrapePart2(sessions, cfg = CONFIG) {
     const pageText = document.body.innerText || '';
     const domAnswers = extractAnswersFromChoiceDom();
     const textAnswers = extractAnswerLettersFromText(pageText);
+    const rawTextAnswers = extractRawAnswerValuesFromText(pageText);
     const apiAnswer = normalizeAnswerLetter(apiUserAnswer);
+    const answerChoices = extractAnswerChoicesFromDom();
+    const compositeResponse = diContext ? extractDiCompositeResponseFromDom() : null;
+    const responseFormat = responseFormatForQuestion({
+      diContext,
+      subjectSubRaw,
+      answerChoices,
+      compositeSlots: compositeResponse?.slots || [],
+    });
+    const responseDetails = responseFormat === 'composite' ? compositeResponse : null;
+    const questionStem = extractQuestionStem(answerChoices, responseDetails);
 
     let my_answer = domAnswers.my_answer || textAnswers.my_answer || null;
     let correct_answer = domAnswers.correct_answer || textAnswers.correct_answer || null;
@@ -2269,21 +3036,38 @@ async function scrapePart2(sessions, cfg = CONFIG) {
       my_answer = apiAnswer;
     }
 
-    if (diContext && my_answer && correct_answer && my_answer === correct_answer) {
+    if (expectedCorrect && my_answer && !correct_answer) {
+      correct_answer = my_answer;
+    }
+    if (expectedCorrect && correct_answer && !my_answer) {
+      my_answer = correct_answer;
+    }
+    if (expectedCorrect && apiAnswer && !my_answer && !correct_answer) {
+      my_answer = apiAnswer;
+      correct_answer = apiAnswer;
+    }
+
+    if (diContext && !expectedCorrect && my_answer && correct_answer && my_answer === correct_answer) {
       // DI pages can contain multiple sub-answers where a single-letter parse is ambiguous.
       my_answer = null;
       correct_answer = null;
     }
 
-    if (!my_answer && !correct_answer && !diContext) {
-      skippedNotWrong += 1;
-      console.warn(`  ↷ Skipped ${session_id}/${q_id}: unable to detect answers on review page`);
-      continue;
+    if (!diContext && !expectedCorrect && my_answer && correct_answer && my_answer === correct_answer) {
+      console.warn(
+        `  ↷ Parsed identical answers for incorrect question ${session_id}/${q_id} (my=${my_answer}, correct=${correct_answer})`
+      );
     }
-    if (my_answer && correct_answer && my_answer === correct_answer && !diContext) {
-      skippedNotWrong += 1;
-      console.warn(`  ↷ Skipped ${session_id}/${q_id}: parsed as non-incorrect (my=${my_answer}, correct=${correct_answer})`);
-      continue;
+
+    if (responseFormat === 'composite') {
+      my_answer =
+        summarizeCompositeSlots(responseDetails?.slots || [], 'user_value') ||
+        rawTextAnswers.my_answer_text ||
+        my_answer;
+      correct_answer =
+        summarizeCompositeSlots(responseDetails?.slots || [], 'correct_value') ||
+        rawTextAnswers.correct_answer_text ||
+        correct_answer;
     }
 
     // Topic from question text
@@ -2300,14 +3084,20 @@ async function scrapePart2(sessions, cfg = CONFIG) {
       : '';
     const topic = verbalTopic || quantTopic || diTopicFromPage || '';
 
-    wrongAnswers.push({
+    reviewQuestions.push({
       session_id,
       q_id: usedQId,
       cat_id: usedReviewCatId,
       q_code,
+      correct: Boolean(expectedCorrect),
       my_answer,
       correct_answer,
+      response_format: responseFormat,
+      response_details: responseDetails,
       topic,
+      topic_source: topic ? 'heuristic' : null,
+      question_stem: questionStem || null,
+      answer_choices: responseFormat === 'single_select' ? answerChoices : [],
       question_url:
         toAbsoluteQuestionUrl(savedQuestionUrl) ||
         toAbsoluteQuestionUrl(`#custom-quiz/${session_id}/review/categories/${usedReviewCatId}/${usedQId}`),
@@ -2318,15 +3108,16 @@ async function scrapePart2(sessions, cfg = CONFIG) {
 
   const result = {
     extracted_at:  new Date().toISOString(),
-    total:         wrongAnswers.length,
-    wrong_answers: wrongAnswers,
+    total:         reviewQuestions.length,
+    question_reviews: reviewQuestions,
+    wrong_answers: reviewQuestions.filter((item) => item && item.correct === false),
   };
 
   window._gmatPart2 = result;
-  console.log(`\n✅ Part 2 done — ${wrongAnswers.length} wrong answers, data in window._gmatPart2`);
-  if (skippedNotReady || skippedNotWrong || skippedMismatchedCode) {
+  console.log(`\n✅ Part 2 done — ${reviewQuestions.length} review pages, data in window._gmatPart2`);
+  if (skippedNotReady || skippedMismatchedCode) {
     console.log(
-      `   Skipped: ${skippedNotReady} not-ready pages, ${skippedNotWrong} non-incorrect pages, ${skippedMismatchedCode} code-mismatch pages`
+      `   Skipped: ${skippedNotReady} not-ready pages, ${skippedMismatchedCode} code-mismatch pages`
     );
   }
   console.log('   Copy with: copy(JSON.stringify(window._gmatPart2))');
@@ -2350,7 +3141,8 @@ async function runScraper(cfg = CONFIG) {
     // Merge: annotate wrong questions from review-page details.
     const detailByQCode = {};
     const detailByQId = {};
-    for (const w of part2.wrong_answers) {
+    const reviewDetails = Array.isArray(part2.question_reviews) ? part2.question_reviews : part2.wrong_answers || [];
+    for (const w of reviewDetails) {
       if (w?.q_id) {
         const qIdKey = `${w.session_id}_${w.q_id}`;
         if (!detailByQId[qIdKey]) detailByQId[qIdKey] = [];
@@ -2396,8 +3188,6 @@ async function runScraper(cfg = CONFIG) {
 
     for (const s of part1.sessions) {
       for (const q of s.questions) {
-        if (q.correct) continue;
-
         const detail = pickDetailForQuestion(s.session_id, q);
         if (detail) consumedDetails.add(detail);
 
@@ -2425,12 +3215,19 @@ async function runScraper(cfg = CONFIG) {
               ? toAbsoluteQuestionUrl(`#custom-quiz/${s.session_id}/review/categories/${finalCatId}/${finalQId}`)
               : null;
 
-          q.my_answer      = detail.my_answer;
-          q.correct_answer = detail.correct_answer;
+          q.my_answer      = detail.my_answer ?? q.my_answer ?? null;
+          q.correct_answer = detail.correct_answer ?? q.correct_answer ?? null;
+          q.response_format = detail.response_format || q.response_format || null;
+          q.response_details = detail.response_details || q.response_details || null;
           q.topic          = detail.topic || q.topic || null;
+          q.topic_source   = detail.topic_source || q.topic_source || null;
           q.q_code         = q.q_code || detail.q_code || null;
           q.q_id           = finalQId;
           q.cat_id         = finalCatId;
+          q.question_stem  = detail.question_stem || q.question_stem || null;
+          q.answer_choices = Array.isArray(detail.answer_choices) && detail.answer_choices.length
+            ? detail.answer_choices
+            : q.answer_choices || [];
           q.question_url   = q.question_url || detail.question_url || fallbackUrl;
         }
       }
@@ -2441,24 +3238,29 @@ async function runScraper(cfg = CONFIG) {
           .filter(Boolean)
           .map((id) => String(id))
       );
-      const unmatchedWrongDetails = (part2.wrong_answers || []).filter(
+      const unmatchedDetails = reviewDetails.filter(
         (w) =>
           w.session_id === s.session_id &&
           !consumedDetails.has(w) &&
           (!w.q_id || !existingQIds.has(String(w.q_id)))
       );
-      for (const detail of unmatchedWrongDetails) {
+      for (const detail of unmatchedDetails) {
         s.questions.push({
           q_code: detail.q_code || null,
-          correct: false,
+          correct: Boolean(detail.correct),
           difficulty: null,
           confidence: 'not selected',
           time_sec: null,
-          my_answer: detail.my_answer,
-          correct_answer: detail.correct_answer,
+          my_answer: detail.my_answer ?? null,
+          correct_answer: detail.correct_answer ?? null,
+          response_format: detail.response_format || null,
+          response_details: detail.response_details || null,
           topic: detail.topic || '',
+          topic_source: detail.topic_source || null,
           q_id: detail.q_id || null,
           cat_id: detail.cat_id || null,
+          question_stem: detail.question_stem || null,
+          answer_choices: Array.isArray(detail.answer_choices) ? detail.answer_choices : [],
           question_url: detail.question_url || null,
         });
         if (detail.q_id) existingQIds.add(String(detail.q_id));

@@ -188,6 +188,205 @@ function formatNotePreview(value, maxLength = 42) {
   return `${text.slice(0, maxLength - 1)}…`;
 }
 
+function normalizeQuestionText(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseAnswerChoices(value) {
+  if (Array.isArray(value)) return value;
+  const text = String(value || '').trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseResponseDetails(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  const text = String(value || '').trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function getResponseSlots(row) {
+  const details = parseResponseDetails(row?.response_details);
+  return Array.isArray(details?.slots) ? details.slots : [];
+}
+
+function formatResponseFormat(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return '';
+  if (text === 'single_select') return 'Single Select';
+  if (text === 'composite') return 'Composite';
+  return value;
+}
+
+function formatSlotType(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return '';
+  if (text === 'choice-grid') return 'Choice Grid';
+  if (text === 'table-cell') return 'Table Cell';
+  if (text === 'single_select') return 'Single Select';
+  return text
+    .split(/[_\-\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function findResponseOption(slot, value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return null;
+  const options = Array.isArray(slot?.options) ? slot.options : [];
+  return options.find((option) => String(option?.id || '').trim() === normalized) || null;
+}
+
+function formatResponseValue(slot, value) {
+  const matched = findResponseOption(slot, value);
+  return normalizeQuestionText(matched?.text || matched?.label || value || '');
+}
+
+function summarizeStructuredResponse(row, key = 'user_value') {
+  const slots = getResponseSlots(row);
+  if (!slots.length) return '';
+  const parts = slots
+    .map((slot, index) => {
+      const valueText = formatResponseValue(slot, slot?.[key]);
+      if (!valueText) return '';
+      const prompt = normalizeQuestionText(slot?.prompt || '') || `Part ${index + 1}`;
+      return `${prompt}: ${valueText}`;
+    })
+    .filter(Boolean);
+  const summary = parts.join(' | ');
+  if (summary.length <= 140) return summary;
+  return `${summary.slice(0, 139)}…`;
+}
+
+function hasScrapedQuestionContent(row) {
+  return (
+    Boolean(normalizeQuestionText(row?.question_stem)) ||
+    parseAnswerChoices(row?.answer_choices).length > 0 ||
+    getResponseSlots(row).length > 0
+  );
+}
+
+function formatQuestionActionLabel(row) {
+  return hasScrapedQuestionContent(row) ? 'Review' : 'Open';
+}
+
+function formatTopicSource(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (text === 'llm') return 'LLM';
+  if (text === 'heuristic') return 'Heuristic';
+  return text;
+}
+
+function formatContentDomain(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return '';
+  if (text === 'non_math') return 'Non-math';
+  if (text === 'math') return 'Math';
+  return value;
+}
+
+function normalizedSubjectCode(row) {
+  const raw = String(row?.subject_code || '').trim().toUpperCase();
+  if (raw) return raw;
+  const fallback = mapSubjectFamily(row?.subject || row?.subject_sub || row?.subject_sub_raw || '');
+  if (fallback === 'Quant') return 'Q';
+  if (fallback === 'Verbal') return 'V';
+  if (fallback === 'DI') return 'DI';
+  return fallback || '-';
+}
+
+function normalizedCategoryCode(row) {
+  const raw = String(row?.category_code || row?.subject_sub_raw || row?.subject_sub || '').trim();
+  if (!raw) return '-';
+  if (String(raw).trim().toUpperCase() === 'PS') return 'Quant';
+  return raw;
+}
+
+function normalizedSubcategory(row) {
+  return String(row?.subcategory || row?.topic || '').trim() || '-';
+}
+
+function normalizeSubjectCodeValue(value) {
+  const upper = String(value || '').trim().toUpperCase();
+  if (!upper) return '';
+  if (['Q', 'QUANT', 'PS'].includes(upper)) return 'Q';
+  if (['V', 'VERBAL', 'CR', 'RC'].includes(upper)) return 'V';
+  if (['DI', 'DS', 'MSR', 'TPA', 'GI', 'TA'].includes(upper)) return 'DI';
+  return upper;
+}
+
+function normalizeSubjectFamilyDisplay(value) {
+  const normalized = normalizeSubjectCodeValue(value);
+  if (normalized) return normalized;
+  return String(value || '').trim() || 'Other';
+}
+
+function truncateTableText(value, maxLength = 44) {
+  const text = normalizeQuestionText(value);
+  if (!text) return '-';
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1)}…`;
+}
+
+function isStructuredResponseRow(row) {
+  return String(row?.response_format || '').trim().toLowerCase() === 'composite' || getResponseSlots(row).length > 0;
+}
+
+function getCompactResponseValue(row, key = 'my_answer') {
+  if (isStructuredResponseRow(row)) {
+    const partCount = getResponseSlots(row).length;
+    if (partCount > 0) return `${partCount}-part structured`;
+    return 'Structured';
+  }
+  return truncateTableText(row?.[key], 38);
+}
+
+function getCompactResponseDisplay(row) {
+  if (isStructuredResponseRow(row)) {
+    return getCompactResponseValue(row, 'my_answer');
+  }
+
+  const mine = getCompactResponseValue(row, 'my_answer');
+  const correct = getCompactResponseValue(row, 'correct_answer');
+  if (mine === '-' && correct === '-') return '-';
+  if (mine === '-') return `Correct: ${correct}`;
+  if (correct === '-') return `Mine: ${mine}`;
+  if (mine === correct) return mine;
+  return `${mine} -> ${correct}`;
+}
+
+function SubjectCell({ row }) {
+  const subjectCode = normalizedSubjectCode(row);
+  return (
+    <div className="section-cell">
+      <span className="section-chip">{subjectCode}</span>
+    </div>
+  );
+}
+
+function ResponseCell({ row }) {
+  return (
+    <div className="response-summary-cell">
+      <strong>{getCompactResponseDisplay(row)}</strong>
+    </div>
+  );
+}
+
 function mapSubjectFamily(subject) {
   const raw = String(subject || '').trim();
   const upper = raw.toUpperCase();
@@ -263,16 +462,12 @@ function App() {
   const [sessions, setSessions] = useState([]);
   const [errors, setErrors] = useState([]);
   const [patterns, setPatterns] = useState({
-    byTopic: [],
     bySubject: [],
-    bySubjectTopic: [],
     byDifficulty: [],
     confidenceMismatch: [],
     subjectProgress: [],
     categoryBreakdown: [],
-    subtopicBreakdown: [],
   });
-  const [subtopicScope, setSubtopicScope] = useState('All');
   const [filters, setFilters] = useState({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '' });
   const [syncCenterOpen, setSyncCenterOpen] = useState(false);
   const [isOpening, setIsOpening] = useState(false);
@@ -300,6 +495,10 @@ function App() {
     mistakeTags: [],
     notes: '',
   });
+  const [questionReview, setQuestionReview] = useState({
+    open: false,
+    row: null,
+  });
   const [openingQuestionKey, setOpeningQuestionKey] = useState('');
   const [sessionSubjectFilter, setSessionSubjectFilter] = useState('');
   const [sessionSort, setSessionSort] = useState({ key: 'session_date', order: 'desc' });
@@ -320,7 +519,6 @@ function App() {
     aiCoach: false,
     topicDashboard: false,
     categoryBreakdown: false,
-    subtopicBreakdown: false,
     performanceBySession: false,
     errorLog: false,
   });
@@ -390,14 +588,11 @@ function App() {
         const runQuery = runId ? `?runId=${runId}` : '';
         const patternsRes = await fetchJson(`/api/patterns${runQuery}`);
         setPatterns({
-          byTopic: patternsRes.byTopic || [],
           bySubject: patternsRes.bySubject || [],
-          bySubjectTopic: patternsRes.bySubjectTopic || [],
           byDifficulty: patternsRes.byDifficulty || [],
           confidenceMismatch: patternsRes.confidenceMismatch || [],
           subjectProgress: patternsRes.subjectProgress || [],
           categoryBreakdown: patternsRes.categoryBreakdown || [],
-          subtopicBreakdown: patternsRes.subtopicBreakdown || [],
         });
       })(),
     ]);
@@ -433,13 +628,15 @@ function App() {
     params.set('sortOrder', customSort.order);
 
     const data = await fetchJson(`/api/errors?${params.toString()}`);
-    setErrors(Array.isArray(data.errors) ? data.errors : []);
+    const rows = Array.isArray(data.errors) ? data.errors : [];
+    setErrors(rows);
     setErrorPagination({
       page: data.page,
       pageSize: data.pageSize,
       total: data.total,
       totalPages: data.totalPages,
     });
+    return rows;
   }
 
   useEffect(() => {
@@ -465,13 +662,13 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!sessionAnalysis.open && !patternDrilldown.open && !syncCenterOpen && !annotation.open) return undefined;
+    if (!sessionAnalysis.open && !patternDrilldown.open && !syncCenterOpen && !annotation.open && !questionReview.open) return undefined;
     const previous = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => {
       document.body.style.overflow = previous;
     };
-  }, [sessionAnalysis.open, patternDrilldown.open, syncCenterOpen, annotation.open]);
+  }, [sessionAnalysis.open, patternDrilldown.open, syncCenterOpen, annotation.open, questionReview.open]);
 
   useEffect(() => {
     setAiReview('');
@@ -593,7 +790,7 @@ function App() {
   }
 
   async function loadErrorsByFilters(customFilters = filters) {
-    await loadErrors(1, selectedRunId, customFilters);
+    return loadErrors(1, selectedRunId, customFilters);
   }
 
   async function handleApplyFilter(event) {
@@ -647,7 +844,7 @@ function App() {
   const subjectCards = useMemo(() => {
     const groups = new Map();
     for (const row of patterns.subjectProgress || []) {
-      const family = row.subject_family || mapSubjectFamily(row.subject_sub);
+      const family = normalizeSubjectFamilyDisplay(row.subject_family || row.subject_sub);
       if (!groups.has(family)) {
         groups.set(family, {
           family,
@@ -688,42 +885,7 @@ function App() {
       }));
   }, [patterns.subjectProgress]);
 
-  const topicsForScope = useMemo(() => {
-    const rows = patterns.bySubjectTopic || [];
-    if (subtopicScope === 'All') return patterns.byTopic || [];
-
-    const sameScopeRows =
-      subtopicScope === 'Verbal' || subtopicScope === 'Quant' || subtopicScope === 'DI'
-        ? rows.filter((row) => mapSubjectFamily(row.subject) === subtopicScope)
-        : rows.filter((row) => row.subject === subtopicScope);
-
-    const topicMap = new Map();
-    for (const row of sameScopeRows) {
-      const topic = row.topic || 'Unknown';
-      topicMap.set(topic, (topicMap.get(topic) || 0) + Number(row.mistakes || 0));
-    }
-
-    return Array.from(topicMap.entries())
-      .map(([topic, mistakes]) => ({ topic, mistakes }))
-      .sort((a, b) => b.mistakes - a.mistakes || a.topic.localeCompare(b.topic));
-  }, [patterns.bySubjectTopic, patterns.byTopic, subtopicScope]);
-
   const categoryRows = useMemo(() => patterns.categoryBreakdown || [], [patterns.categoryBreakdown]);
-
-  const subtopicScopeOptions = useMemo(() => {
-    const options = ['All'];
-    for (const row of patterns.subtopicBreakdown || []) {
-      const key = row.subject_family || 'Other';
-      if (!options.includes(key)) options.push(key);
-    }
-    return options;
-  }, [patterns.subtopicBreakdown]);
-
-  const filteredSubtopicRows = useMemo(() => {
-    const rows = patterns.subtopicBreakdown || [];
-    if (subtopicScope === 'All') return rows;
-    return rows.filter((row) => (row.subject_family || 'Other') === subtopicScope);
-  }, [patterns.subtopicBreakdown, subtopicScope]);
 
   const overallMastery = useMemo(() => {
     const total = subjectCards.reduce((sum, card) => sum + Number(card.total || 0), 0);
@@ -732,13 +894,20 @@ function App() {
     return Number(((correct * 100) / total).toFixed(1));
   }, [subjectCards]);
 
-  const totalWrongTopicMistakes = useMemo(
-    () =>
-      (sessionAnalysis.data?.topWrongTopics || []).reduce(
-        (sum, row) => sum + Number(row?.mistakes || 0),
-        0
-      ),
-    [sessionAnalysis.data?.topWrongTopics]
+  const wrongCategoryRows = useMemo(() => {
+    const counts = new Map();
+    for (const row of sessionAnalysis.data?.slowWrongQuestions || []) {
+      const category = normalizedCategoryCode(row);
+      counts.set(category, (counts.get(category) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([category, mistakes]) => ({ category, mistakes }))
+      .sort((a, b) => b.mistakes - a.mistakes || a.category.localeCompare(b.category));
+  }, [sessionAnalysis.data?.slowWrongQuestions]);
+
+  const totalWrongCategoryMistakes = useMemo(
+    () => wrongCategoryRows.reduce((sum, row) => sum + Number(row?.mistakes || 0), 0),
+    [wrongCategoryRows]
   );
 
   const sortedSessionAnalysisWrongQuestions = useMemo(() => {
@@ -796,7 +965,7 @@ function App() {
 
     // Filter by subject
     if (sessionSubjectFilter) {
-      list = list.filter((s) => s.subject === sessionSubjectFilter);
+      list = list.filter((s) => normalizeSubjectCodeValue(s.subject) === sessionSubjectFilter);
     }
 
     // Filter by date range
@@ -907,6 +1076,12 @@ function App() {
             ...analysis,
             slowWrongQuestions: Array.isArray(analysis.slowWrongQuestions)
               ? analysis.slowWrongQuestions
+                  .map((item) => ({
+                    ...item,
+                    session_external_id: item?.session_external_id || analysis?.session?.session_external_id || '',
+                    session_date: item?.session_date || analysis?.session?.session_date || '',
+                    subject: item?.subject || analysis?.session?.subject || '',
+                  }))
               : [],
           }
         : null;
@@ -965,6 +1140,25 @@ function App() {
         ? prev.mistakeTags.filter((t) => t !== tag)
         : [...prev.mistakeTags, tag],
     }));
+  }
+
+  function handleOpenQuestionReview(row) {
+    if (!row) return;
+    setQuestionReview({
+      open: true,
+      row: {
+        ...row,
+        answer_choices: parseAnswerChoices(row?.answer_choices),
+        response_details: parseResponseDetails(row?.response_details),
+      },
+    });
+  }
+
+  function handleCloseQuestionReview() {
+    setQuestionReview({
+      open: false,
+      row: null,
+    });
   }
 
   function applyAnnotationLocally(updated) {
@@ -1068,7 +1262,7 @@ function App() {
     return `${scope}-${row.session_external_id || 'session'}-${row.q_code || 'q'}-${row.time_sec || 't'}`;
   }
 
-  async function handleOpenQuestion(row, scope = '') {
+  async function handleOpenQuestionInGmat(row, scope = '') {
     const questionUrl = canonicalQuestionUrl(row);
     if (!questionUrl) return;
     const key = questionOpenKey(row, scope);
@@ -1089,6 +1283,14 @@ function App() {
     } finally {
       setOpeningQuestionKey((prev) => (prev === key ? '' : prev));
     }
+  }
+
+  function handleQuestionAction(row, scope = '') {
+    if (hasScrapedQuestionContent(row)) {
+      handleOpenQuestionReview(row);
+      return;
+    }
+    handleOpenQuestionInGmat(row, scope);
   }
 
   async function handleGenerateAiReview() {
@@ -1170,7 +1372,7 @@ function App() {
       <Card className="hero card">
         <div className="section-header">
           <p className="eyebrow">Local GMAT Analytics</p>
-          <h1>Topic Breakdown Dashboard</h1>
+          <h1>Question Metadata Dashboard</h1>
           <button
             type="button"
             className="collapse-toggle"
@@ -1184,7 +1386,7 @@ function App() {
         {!collapsedSections.hero && (
           <>
             <p className="muted">
-              Track Quant, Verbal, and Data Insights performance and review error patterns from synced GMAT practice.
+              Track Q, V, and DI performance using Subject and Category metadata from synced GMAT practice.
             </p>
             <div className="hero-actions">
               <Button type="button" onClick={() => setSyncCenterOpen(true)}>
@@ -1300,8 +1502,8 @@ function App() {
         <div className="topic-dashboard-head">
           <div>
             <p className="eyebrow">Performance Dashboard</p>
-            <h2>Topic Breakdown</h2>
-            <p className="muted">Performance across Quant, Verbal, and Data Insights modules.</p>
+            <h2>Metadata Breakdown</h2>
+            <p className="muted">Performance grouped by Subject and Category.</p>
           </div>
           <button
             type="button"
@@ -1323,7 +1525,7 @@ function App() {
                 const errorRate = Math.max(0, Number((100 - accuracy).toFixed(1)));
                 return (
                   <article key={card.family} className="topic-score-card">
-                    <span className="topic-chip">{card.family}</span>
+                    <span className="topic-chip">{normalizeSubjectFamilyDisplay(card.family)}</span>
                     <strong className="topic-score">{formatPercent(accuracy)}</strong>
                     <span className="topic-score-meta">{`${card.correct}/${card.total} correct · Avg ${formatDurationSeconds(card.avg_time_sec)}`}</span>
                     <div className="topic-track">
@@ -1346,7 +1548,7 @@ function App() {
                     return (
                       <li key={`acc-${card.family}`}>
                         <div className="accuracy-label">
-                          <span>{card.family}</span>
+                          <span>{normalizeSubjectFamilyDisplay(card.family)}</span>
                           <strong>{`${formatPercent(accuracy)} / ${formatPercent(errorRate)}`}</strong>
                         </div>
                         <div className="accuracy-bar">
@@ -1375,7 +1577,7 @@ function App() {
                 <div className="mastery-legend">
                   {subjectCards.map((card) => (
                     <div key={`m-${card.family}`}>
-                      <span>{card.family}</span>
+                      <span>{normalizeSubjectFamilyDisplay(card.family)}</span>
                       <strong>{formatPercent(card.accuracy_pct)}</strong>
                     </div>
                   ))}
@@ -1388,7 +1590,7 @@ function App() {
 
       <Card className="card">
         <div className="section-header">
-          <h2>Category Detailed Breakdown</h2>
+          <h2>Category Breakdown</h2>
           <button
             type="button"
             className="collapse-toggle"
@@ -1427,8 +1629,8 @@ function App() {
                   const statusLabel = statusLabelFromAccuracy(row.accuracy_pct);
                   return (
                     <tr key={`${row.subject_family}-${row.subject_sub}`}>
-                      <td>{formatMaybe(row.subject_family)}</td>
-                      <td>{formatMaybe(row.subject_sub)}</td>
+                      <td>{formatMaybe(normalizeSubjectFamilyDisplay(row.subject_family))}</td>
+                      <td>{formatMaybe(normalizedCategoryCode(row))}</td>
                       <td>{formatMaybe(row.total_questions)}</td>
                       <td>{formatMaybe(row.correct_count)}</td>
                       <td>{formatMaybe(row.incorrect_count)}</td>
@@ -1456,73 +1658,6 @@ function App() {
 
       <Card className="card">
         <div className="section-header-filters">
-          <h2>Subtopic Breakdown</h2>
-          <div className="filter-row">
-            <Select className="filter-select" value={subtopicScope} onChange={(event) => setSubtopicScope(event.target.value)}>
-              {subtopicScopeOptions.map((scope) => (
-                <option key={scope} value={scope}>
-                  {scope}
-                </option>
-              ))}
-            </Select>
-            <button
-              type="button"
-              className="collapse-toggle"
-              onClick={() => toggleSection('subtopicBreakdown')}
-              aria-expanded={!collapsedSections.subtopicBreakdown}
-              aria-label="Toggle Subtopic Breakdown section"
-            >
-              {collapsedSections.subtopicBreakdown ? '▶' : '▼'}
-            </button>
-          </div>
-        </div>
-        {!collapsedSections.subtopicBreakdown && (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Subject</th>
-                  <th>Category</th>
-                  <th>Subtopic</th>
-                  <th>Total</th>
-                  <th>Correct</th>
-                  <th>Incorrect</th>
-                  <th>Accuracy</th>
-                  <th>Avg Time</th>
-                  <th>Hard (Q / Acc / Avg)</th>
-                  <th>Medium (Q / Acc / Avg)</th>
-                  <th>Easy (Q / Acc / Avg)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {!filteredSubtopicRows.length && (
-                  <tr>
-                    <td colSpan="11">No subtopic data yet.</td>
-                  </tr>
-                )}
-                {filteredSubtopicRows.map((row) => (
-                  <tr key={`${row.subject_family}-${row.subject_sub}-${row.subtopic}`}>
-                    <td>{formatMaybe(row.subject_family)}</td>
-                    <td>{formatMaybe(row.subject_sub)}</td>
-                    <td>{formatMaybe(row.subtopic)}</td>
-                    <td>{formatMaybe(row.total_questions)}</td>
-                    <td>{formatMaybe(row.correct_count)}</td>
-                    <td>{formatMaybe(row.incorrect_count)}</td>
-                    <td>{formatPercent(row.accuracy_pct)}</td>
-                    <td>{formatDurationSeconds(row.avg_time_sec)}</td>
-                    <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>
-                    <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>
-                    <td>{formatDifficultyStat(row.easy_total, row.easy_accuracy_pct, row.easy_avg_time_sec)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-
-      <Card className="card">
-        <div className="section-header-filters">
           <h2>Performance by Session</h2>
           <div className="filter-row session-filters">
             <Select
@@ -1531,12 +1666,8 @@ function App() {
               onChange={(e) => setSessionSubjectFilter(e.target.value)}
             >
               <option value="">All Subjects</option>
-              <option value="CR">CR</option>
-              <option value="RC">RC</option>
-              <option value="Verbal">Verbal</option>
-              <option value="PS">PS</option>
-              <option value="DS">DS</option>
-              <option value="Quant">Quant</option>
+              <option value="Q">Q</option>
+              <option value="V">V</option>
               <option value="DI">DI</option>
             </Select>
             <div className="date-filter-group">
@@ -1641,7 +1772,7 @@ function App() {
                     <tr key={`${row.session_external_id}-${row.run_id}`}>
                       <td>{formatDate(row.session_date)}</td>
                       <td>{formatMaybe(row.session_external_id)}</td>
-                      <td>{formatMaybe(row.subject)}</td>
+                      <td>{formatMaybe(normalizeSubjectCodeValue(row.subject))}</td>
                       <td>{formatMaybe(row.question_count_display)}</td>
                       <td>{formatMaybe(row.error_count_display)}</td>
                       <td>{formatPercent(row.answered_accuracy_pct)}</td>
@@ -1711,12 +1842,8 @@ function App() {
                   onChange={(event) => setFilters((prev) => ({ ...prev, subject: event.target.value }))}
                 >
                   <option value="">All subjects</option>
-                  <option value="CR">CR</option>
-                  <option value="RC">RC</option>
-                  <option value="Verbal">Verbal</option>
-                  <option value="PS">PS</option>
-                  <option value="DS">DS</option>
-                  <option value="Quant">Quant</option>
+                  <option value="Q">Q</option>
+                  <option value="V">V</option>
                   <option value="DI">DI</option>
                 </Select>
                 <Select
@@ -1740,7 +1867,7 @@ function App() {
                   <option value="not selected">not selected</option>
                 </Select>
                 <Input
-                  placeholder="Topic or Q Code (e.g. Weaken, V01234)"
+                  placeholder="Subcategory, Q Code, or stem text"
                   value={filters.search}
                   onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))}
                 />
@@ -1759,7 +1886,7 @@ function App() {
             </form>
 
             <div className="table-wrap error-log-table-wrap">
-              <table className="error-log-table">
+              <table className="review-table error-log-table">
                 <thead>
                   <tr>
                     <th className="sortable" onClick={() => handleErrorSort('session_date')}>
@@ -1768,20 +1895,20 @@ function App() {
                     <th className="sortable" onClick={() => handleErrorSort('session_external_id')}>
                       Session {errorSort.key === 'session_external_id' && (errorSort.order === 'asc' ? '↑' : '↓')}
                     </th>
-                    <th className="sortable" onClick={() => handleErrorSort('q_code')}>
-                      Q Code {errorSort.key === 'q_code' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
-                    <th className="sortable" onClick={() => handleErrorSort('subject')}>
+                    <th className="sortable section-col" onClick={() => handleErrorSort('subject')}>
                       Subject {errorSort.key === 'subject' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                    </th>
+                    <th className="category-col">Category</th>
+                    <th className="sortable topic-col" onClick={() => handleErrorSort('topic')}>
+                      Subcategory {errorSort.key === 'topic' && (errorSort.order === 'asc' ? '↑' : '↓')}
                     </th>
                     <th className="sortable" onClick={() => handleErrorSort('difficulty')}>
                       Difficulty {errorSort.key === 'difficulty' && (errorSort.order === 'asc' ? '↑' : '↓')}
                     </th>
-                    <th className="sortable topic-col" onClick={() => handleErrorSort('topic')}>
-                      Topic {errorSort.key === 'topic' && (errorSort.order === 'asc' ? '↑' : '↓')}
+                    <th className="sortable" onClick={() => handleErrorSort('q_code')}>
+                      Q Code {errorSort.key === 'q_code' && (errorSort.order === 'asc' ? '↑' : '↓')}
                     </th>
-                    <th>My Ans</th>
-                    <th>Correct</th>
+                    <th className="response-col">Response</th>
                     <th>Redo</th>
                     <th className="sortable" onClick={() => handleErrorSort('time_sec')}>
                       Time (min:sec) {errorSort.key === 'time_sec' && (errorSort.order === 'asc' ? '↑' : '↓')}
@@ -1791,7 +1918,7 @@ function App() {
                     </th>
                     <th className="notes-col">Notes</th>
                     <th className="action-col annotate-col">Annotate</th>
-                    <th className="action-col open-col">Open</th>
+                    <th className="action-col open-col">Review</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1804,12 +1931,12 @@ function App() {
                     <tr key={row.id}>
                       <td>{formatDate(row.session_date)}</td>
                       <td>{formatMaybe(row.session_external_id)}</td>
-                      <td>{formatMaybe(row.q_code)}</td>
-                      <td>{formatMaybe(row.subject)}</td>
+                      <td className="section-col"><SubjectCell row={row} /></td>
+                      <td className="category-col">{formatMaybe(normalizedCategoryCode(row))}</td>
+                      <td className="topic-col">{formatMaybe(normalizedSubcategory(row))}</td>
                       <td>{formatMaybe(row.difficulty)}</td>
-                      <td className="topic-col">{formatMaybe(row.topic)}</td>
-                      <td>{formatMaybe(row.my_answer)}</td>
-                      <td>{formatMaybe(row.correct_answer)}</td>
+                      <td>{formatMaybe(row.q_code)}</td>
+                      <td className="response-col"><ResponseCell row={row} /></td>
                       <td className="redo-col">
                         {Number(row.corrected_later || 0) === 1 ? (
                           <Badge variant="success" className="redo-pill">
@@ -1842,16 +1969,18 @@ function App() {
                         </Button>
                       </td>
                       <td className="action-col open-col">
-                        {row.question_url ? (
+                        {hasScrapedQuestionContent(row) || row.question_url ? (
                           <Button
                             variant="outline"
                             size="sm"
                             type="button"
                             className="readmore-btn"
-                            onClick={() => handleOpenQuestion(row, 'error-log')}
+                            onClick={() => handleQuestionAction(row, 'error-log')}
                             disabled={openingQuestionKey === questionOpenKey(row, 'error-log')}
                           >
-                            {openingQuestionKey === questionOpenKey(row, 'error-log') ? 'Opening...' : 'Open'}
+                            {openingQuestionKey === questionOpenKey(row, 'error-log')
+                              ? 'Opening...'
+                              : formatQuestionActionLabel(row)}
                           </Button>
                         ) : (
                           <span className="muted">-</span>
@@ -2036,18 +2165,18 @@ function App() {
                 <>
                   <p className="muted">{`${patternDrilldown.rows.length} matching errors`}</p>
                   <div className="table-wrap">
-                    <table>
+                    <table className="review-table">
                       <thead>
                         <tr>
                           <th>Date</th>
                           <th>Session</th>
-                          <th>Q Code</th>
-                          <th>Subject</th>
+                          <th className="section-col">Subject</th>
+                          <th className="category-col">Category</th>
+                          <th>Subcategory</th>
                           <th>Difficulty</th>
-                          <th>Topic</th>
+                          <th>Q Code</th>
+                          <th className="response-col">Response</th>
                           <th>Confidence</th>
-                          <th>My Ans</th>
-                          <th>Correct</th>
                           <th>Redo</th>
                           <th>Open</th>
                           <th>Time</th>
@@ -2066,13 +2195,13 @@ function App() {
                           <tr key={row.id}>
                             <td>{formatDate(row.session_date)}</td>
                             <td>{formatMaybe(row.session_external_id)}</td>
-                            <td>{formatMaybe(row.q_code)}</td>
-                            <td>{formatMaybe(row.subject)}</td>
+                            <td className="section-col"><SubjectCell row={row} /></td>
+                            <td className="category-col">{formatMaybe(normalizedCategoryCode(row))}</td>
+                            <td>{formatMaybe(normalizedSubcategory(row))}</td>
                             <td>{formatMaybe(row.difficulty)}</td>
-                            <td>{formatMaybe(row.topic)}</td>
+                            <td>{formatMaybe(row.q_code)}</td>
+                            <td className="response-col"><ResponseCell row={row} /></td>
                             <td>{formatMaybe(row.confidence)}</td>
-                            <td>{formatMaybe(row.my_answer)}</td>
-                            <td>{formatMaybe(row.correct_answer)}</td>
                             <td>
                               {Number(row.corrected_later || 0) === 1 ? (
                                 <Badge variant="success" className="redo-pill">
@@ -2083,16 +2212,18 @@ function App() {
                               )}
                             </td>
                             <td>
-                              {row.question_url ? (
+                              {hasScrapedQuestionContent(row) || row.question_url ? (
                                 <Button
                                   variant="outline"
                                   size="sm"
                                   type="button"
                                   className="readmore-btn"
-                                  onClick={() => handleOpenQuestion(row, 'drilldown')}
+                                  onClick={() => handleQuestionAction(row, 'drilldown')}
                                   disabled={openingQuestionKey === questionOpenKey(row, 'drilldown')}
                                 >
-                                  {openingQuestionKey === questionOpenKey(row, 'drilldown') ? 'Opening...' : 'Open'}
+                                  {openingQuestionKey === questionOpenKey(row, 'drilldown')
+                                    ? 'Opening...'
+                                    : formatQuestionActionLabel(row)}
                                 </Button>
                               ) : (
                                 <span className="muted">-</span>
@@ -2155,7 +2286,7 @@ function App() {
                   </div>
                   <div className="summary-item">
                     <span>Subject</span>
-                    <strong>{formatMaybe(sessionAnalysis.data.session.subject)}</strong>
+                    <strong>{formatMaybe(normalizeSubjectCodeValue(sessionAnalysis.data.session.subject))}</strong>
                   </div>
                   <div className="summary-item">
                     <span>Questions</span>
@@ -2232,17 +2363,17 @@ function App() {
 
                 <div className="pattern-grid">
                   <div>
-                    <h3>Wrong Topics (All)</h3>
+                    <h3>Wrong Categories</h3>
                     <ul className="metric-list">
-                      {!sessionAnalysis.data.topWrongTopics?.length && <li className="metric-empty">No wrong-topic data</li>}
-                      {(sessionAnalysis.data.topWrongTopics || []).map((row) => (
-                        <li key={row.topic}>
-                          <span className="metric-label">{row.topic}</span>
+                      {!wrongCategoryRows.length && <li className="metric-empty">No wrong-category data</li>}
+                      {wrongCategoryRows.map((row) => (
+                        <li key={row.category}>
+                          <span className="metric-label">{row.category}</span>
                           <span className="metric-values">
                             <strong>{row.mistakes}</strong>
                             <small>
-                              {totalWrongTopicMistakes
-                                ? `${((Number(row.mistakes || 0) * 100) / totalWrongTopicMistakes).toFixed(1)}%`
+                              {totalWrongCategoryMistakes
+                                ? `${((Number(row.mistakes || 0) * 100) / totalWrongCategoryMistakes).toFixed(1)}%`
                                 : '0.0%'}
                             </small>
                           </span>
@@ -2271,24 +2402,21 @@ function App() {
                 <div className="analysis-block">
                   <h3>{`All Wrong Questions (${sortedSessionAnalysisWrongQuestions.length})`}</h3>
                   <div className="table-wrap session-analysis-questions-wrap">
-                    <table className="session-analysis-questions-table">
+                    <table className="review-table session-analysis-questions-table">
                       <thead>
                         <tr>
-                          <th className="sortable" onClick={() => handleSessionAnalysisSort('q_code')}>
-                            Q Code {sessionAnalysisSort.key === 'q_code' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
+                          <th className="section-col">Subject</th>
+                          <th className="category-col">Category</th>
+                          <th className="sortable topic-col" onClick={() => handleSessionAnalysisSort('topic')}>
+                            Subcategory {sessionAnalysisSort.key === 'topic' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
                           </th>
                           <th className="sortable" onClick={() => handleSessionAnalysisSort('difficulty')}>
                             Difficulty {sessionAnalysisSort.key === 'difficulty' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
                           </th>
-                          <th className="sortable topic-col" onClick={() => handleSessionAnalysisSort('topic')}>
-                            Topic {sessionAnalysisSort.key === 'topic' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
+                          <th className="sortable" onClick={() => handleSessionAnalysisSort('q_code')}>
+                            Q Code {sessionAnalysisSort.key === 'q_code' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
                           </th>
-                          <th className="sortable" onClick={() => handleSessionAnalysisSort('my_answer')}>
-                            My Ans {sessionAnalysisSort.key === 'my_answer' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
-                          </th>
-                          <th className="sortable" onClick={() => handleSessionAnalysisSort('correct_answer')}>
-                            Correct {sessionAnalysisSort.key === 'correct_answer' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
-                          </th>
+                          <th className="response-col">Response</th>
                           <th className="sortable" onClick={() => handleSessionAnalysisSort('time_sec')}>
                             Time {sessionAnalysisSort.key === 'time_sec' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
                           </th>
@@ -2305,16 +2433,17 @@ function App() {
                       <tbody>
                         {!sessionAnalysis.data.slowWrongQuestions?.length && (
                           <tr>
-                            <td colSpan="10">No wrong questions found.</td>
+                            <td colSpan="11">No wrong questions found.</td>
                           </tr>
                         )}
                         {sortedSessionAnalysisWrongQuestions.map((row, idx) => (
                           <tr key={`${row.q_code || 'q'}-${idx}`}>
-                            <td>{formatMaybe(row.q_code)}</td>
+                            <td className="section-col"><SubjectCell row={row} /></td>
+                            <td className="category-col">{formatMaybe(normalizedCategoryCode(row))}</td>
+                            <td className="topic-col">{formatMaybe(normalizedSubcategory(row))}</td>
                             <td>{formatMaybe(row.difficulty)}</td>
-                            <td className="topic-col">{formatMaybe(row.topic)}</td>
-                            <td>{formatMaybe(row.my_answer)}</td>
-                            <td>{formatMaybe(row.correct_answer)}</td>
+                            <td>{formatMaybe(row.q_code)}</td>
+                            <td className="response-col"><ResponseCell row={row} /></td>
                             <td>{formatDurationSeconds(row.time_sec)}</td>
                             <td>{formatMaybe(row.mistake_type)}</td>
                             <td className="notes-cell notes-col" title={row.notes || ''}>
@@ -2332,18 +2461,18 @@ function App() {
                               </Button>
                             </td>
                             <td className="action-col open-col">
-                              {row.question_url ? (
+                              {hasScrapedQuestionContent(row) || row.question_url ? (
                                 <Button
                                   variant="outline"
                                   size="sm"
                                   type="button"
                                   className="readmore-btn"
-                                  onClick={() => handleOpenQuestion(row, 'session-analysis')}
+                                  onClick={() => handleQuestionAction(row, 'session-analysis')}
                                   disabled={openingQuestionKey === questionOpenKey(row, 'session-analysis')}
                                 >
                                   {openingQuestionKey === questionOpenKey(row, 'session-analysis')
                                     ? 'Opening...'
-                                    : 'Open'}
+                                    : formatQuestionActionLabel(row)}
                                 </Button>
                               ) : (
                                 <span className="muted">-</span>
@@ -2358,6 +2487,217 @@ function App() {
               </>
             )}
           </div>
+          </div>
+        </div>
+      )}
+
+      {questionReview.open && questionReview.row && (
+        <div
+          className="analysis-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Question Review"
+          onClick={handleCloseQuestionReview}
+        >
+          <div className="analysis-dialog question-review-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="analysis-shell question-review-shell">
+              <div className="analysis-header">
+                <div>
+                  <p className="eyebrow">Local Question Review</p>
+                  <h2>{questionReview.row.q_code ? `Question ${questionReview.row.q_code}` : 'Question Review'}</h2>
+                </div>
+                <div className="analysis-actions">
+                  {canonicalQuestionUrl(questionReview.row) ? (
+                    <Button
+                      variant="outline"
+                      type="button"
+                      onClick={() => handleOpenQuestionInGmat(questionReview.row, 'question-review')}
+                      disabled={openingQuestionKey === questionOpenKey(questionReview.row, 'question-review')}
+                    >
+                      {openingQuestionKey === questionOpenKey(questionReview.row, 'question-review') ? 'Opening...' : 'Open in GMAT'}
+                    </Button>
+                  ) : null}
+                  <Button variant="outline" type="button" onClick={handleCloseQuestionReview}>
+                    Close
+                  </Button>
+                </div>
+              </div>
+
+              <div className="question-review-hero">
+                <div className="question-review-meta">
+                  <span className="question-review-chip">{formatMaybe(normalizedSubjectCode(questionReview.row))}</span>
+                  <span className="question-review-chip">{formatMaybe(normalizedCategoryCode(questionReview.row))}</span>
+                  <span className="question-review-chip">{formatMaybe(questionReview.row.difficulty)}</span>
+                  <span className="question-review-chip">{formatMaybe(normalizedSubcategory(questionReview.row))}</span>
+                  {formatResponseFormat(questionReview.row.response_format) && (
+                    <span className="question-review-chip">{formatResponseFormat(questionReview.row.response_format)}</span>
+                  )}
+                  {formatContentDomain(questionReview.row.content_domain) && (
+                    <span className="question-review-chip">{formatContentDomain(questionReview.row.content_domain)}</span>
+                  )}
+                  {formatTopicSource(questionReview.row.topic_source) && (
+                    <span className="question-review-chip muted-chip">{formatTopicSource(questionReview.row.topic_source)}</span>
+                  )}
+                </div>
+                <div className="question-review-stats">
+                  <div>
+                    <span>Your Answer</span>
+                    <strong>{formatMaybe(questionReview.row.my_answer || summarizeStructuredResponse(questionReview.row, 'user_value'))}</strong>
+                  </div>
+                  <div>
+                    <span>Correct</span>
+                    <strong>{formatMaybe(questionReview.row.correct_answer || summarizeStructuredResponse(questionReview.row, 'correct_value'))}</strong>
+                  </div>
+                  <div>
+                    <span>Time</span>
+                    <strong>{formatDurationSeconds(questionReview.row.time_sec)}</strong>
+                  </div>
+                  <div>
+                    <span>Confidence</span>
+                    <strong>{formatMaybe(questionReview.row.confidence)}</strong>
+                  </div>
+                </div>
+              </div>
+
+              <section className="question-review-section">
+                <h3>Question Stem</h3>
+                <div className="question-stem-card">
+                  <p>{normalizeQuestionText(questionReview.row.question_stem) || 'No locally scraped stem yet.'}</p>
+                </div>
+              </section>
+
+              <section className="question-review-layout">
+                <div className="question-review-section">
+                  <h3>
+                    {getResponseSlots(questionReview.row).length
+                      ? 'Response Structure'
+                      : 'Answer Choices'}
+                  </h3>
+                  {getResponseSlots(questionReview.row).length ? (
+                    <div className="response-slot-list">
+                      {getResponseSlots(questionReview.row).map((slot, index) => {
+                        const prompt = normalizeQuestionText(slot?.prompt || '') || `Part ${index + 1}`;
+                        const slotOptions = Array.isArray(slot?.options) ? slot.options : [];
+                        const userValue = formatResponseValue(slot, slot?.user_value);
+                        const correctValue = formatResponseValue(slot, slot?.correct_value);
+                        return (
+                          <article key={slot?.slot_id || `slot-${index}`} className="response-slot-card">
+                            <div className="response-slot-head">
+                              <div>
+                                <strong>{prompt}</strong>
+                                {formatSlotType(slot?.slot_type) && (
+                                  <span className="response-slot-type">{formatSlotType(slot?.slot_type)}</span>
+                                )}
+                              </div>
+                              <div className="response-slot-summary">
+                                {userValue && <span>Your response: {userValue}</span>}
+                                {correctValue && <span>Correct response: {correctValue}</span>}
+                              </div>
+                            </div>
+
+                            {slotOptions.length ? (
+                              <div className="response-slot-options">
+                                {slotOptions.map((option, optionIndex) => {
+                                  const label = String(option?.label || '').trim();
+                                  const text = normalizeQuestionText(option?.text || '') || '-';
+                                  const isMine = String(slot?.user_value || '').trim() === String(option?.id || '').trim();
+                                  const isCorrect = String(slot?.correct_value || '').trim() === String(option?.id || '').trim();
+                                  return (
+                                    <article
+                                      key={`${slot?.slot_id || index}-${option?.id || optionIndex}`}
+                                      className={`answer-choice-card response-option-card${isMine ? ' mine' : ''}${isCorrect ? ' correct' : ''}`}
+                                    >
+                                      <div className="answer-choice-head">
+                                        <strong>{label || `Option ${optionIndex + 1}`}</strong>
+                                        <div className="answer-choice-flags">
+                                          {isMine && <span className="question-mini-chip">Your pick</span>}
+                                          {isCorrect && <span className="question-mini-chip success-chip">Correct</span>}
+                                        </div>
+                                      </div>
+                                      <p>{text}</p>
+                                    </article>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <p className="muted">No option-level scrape for this DI slot.</p>
+                            )}
+                          </article>
+                        );
+                      })}
+                    </div>
+                  ) : parseAnswerChoices(questionReview.row.answer_choices).length ? (
+                    <div className="answer-choice-list">
+                      {parseAnswerChoices(questionReview.row.answer_choices).map((choice, index) => {
+                        const label = String(choice?.label || String.fromCharCode(65 + index)).trim();
+                        const text = normalizeQuestionText(choice?.text || '');
+                        const isMine = String(questionReview.row.my_answer || '').trim().toUpperCase() === label.toUpperCase();
+                        const isCorrect = String(questionReview.row.correct_answer || '').trim().toUpperCase() === label.toUpperCase();
+                        return (
+                          <article
+                            key={`${label}-${index}`}
+                            className={`answer-choice-card${isMine ? ' mine' : ''}${isCorrect ? ' correct' : ''}`}
+                          >
+                            <div className="answer-choice-head">
+                              <strong>{label}</strong>
+                              <div className="answer-choice-flags">
+                                {isMine && <span className="question-mini-chip">Your pick</span>}
+                                {isCorrect && <span className="question-mini-chip success-chip">Correct</span>}
+                              </div>
+                            </div>
+                            <p>{text || '-'}</p>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="muted">No answer choices were scraped for this question.</p>
+                  )}
+                </div>
+
+                <div className="question-review-section">
+                  <h3>Study Notes</h3>
+                  <div className="question-side-stack">
+                    <div className="question-side-card">
+                      <span className="question-side-label">Mistake Tags</span>
+                      <div className="question-side-tags">
+                        {parseMistakeTags(questionReview.row.mistake_type).length ? (
+                          parseMistakeTags(questionReview.row.mistake_type).map((tag) => (
+                            <span key={tag} className="mistake-tag-pill">{tag}</span>
+                          ))
+                        ) : (
+                          <span className="muted">No tags yet</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="question-side-card">
+                      <span className="question-side-label">Notes</span>
+                      <p>{normalizeQuestionText(questionReview.row.notes) || 'No notes yet.'}</p>
+                    </div>
+                    <div className="question-side-card">
+                      <span className="question-side-label">Actions</span>
+                      <div className="question-side-actions">
+                        <Button variant="outline" type="button" onClick={() => handleOpenAnnotation(questionReview.row)}>
+                          Annotate
+                        </Button>
+                        {canonicalQuestionUrl(questionReview.row) ? (
+                          <Button
+                            variant="outline"
+                            type="button"
+                            onClick={() => handleOpenQuestionInGmat(questionReview.row, 'question-review-side')}
+                            disabled={openingQuestionKey === questionOpenKey(questionReview.row, 'question-review-side')}
+                          >
+                            {openingQuestionKey === questionOpenKey(questionReview.row, 'question-review-side')
+                              ? 'Opening...'
+                              : 'Open in GMAT'}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
           </div>
         </div>
       )}

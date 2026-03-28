@@ -208,6 +208,9 @@ Upsert behavior:
 - `ZAI_MODEL` (optional for Z AI, default `glm-5`)
 - `LLM_TEMPERATURE` (optional, default `0.2`)
 - `LLM_MAX_TOKENS` (optional, default `1000`)
+- `CLASSIFIER_OPENAI_MODEL` / `CLASSIFIER_ZAI_MODEL` (optional classifier-only model override)
+
+Coach and classifier now share the same provider, API key, base URL, temperature, and token settings. Only the model can differ for classification.
 
 Example setup is included in `.env.example`.
 
