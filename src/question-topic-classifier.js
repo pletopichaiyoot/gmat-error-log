@@ -245,7 +245,7 @@ function subjectHint(question = {}, session = {}) {
   const category = String(metadata.category_code || '').trim().toUpperCase();
   const subjectCode = String(metadata.subject_code || '').trim().toUpperCase();
 
-  if (category === 'QUANT' || category === 'DS') return 'math-oriented';
+  if (category === 'QUANT' || category === 'PS' || category === 'DS') return 'math-oriented';
   if (category === 'CR' || category === 'RC') return 'verbal-oriented';
   if (subjectCode === 'DI') return 'data-insights';
   if (subjectCode === 'Q') return 'math-oriented';

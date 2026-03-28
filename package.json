@@ -28,6 +28,30 @@
     "sqlite3": "^6.0.1",
     "tailwind-merge": "^3.5.0"
   },
+  "overrides": {
+    "express": {
+      "path-to-regexp": "0.1.13"
+    },
+    "anymatch": {
+      "picomatch": "2.3.2"
+    },
+    "readdirp": {
+      "picomatch": "2.3.2"
+    },
+    "micromatch": {
+      "picomatch": "2.3.2"
+    },
+    "vite": {
+      "picomatch": "4.0.4"
+    },
+    "fdir": {
+      "picomatch": "4.0.4"
+    },
+    "tinyglobby": {
+      "picomatch": "4.0.4"
+    },
+    "brace-expansion": "5.0.5"
+  },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.2.0",
     "autoprefixer": "^10.4.27",

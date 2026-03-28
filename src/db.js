@@ -5,6 +5,34 @@ const { deriveQuestionMetadata, enrichQuestionMetadata } = require('./question-m
 
 const dbDir = path.resolve(__dirname, '..', 'data');
 const dbPath = path.join(dbDir, 'gmat-error-log.db');
+const QUESTION_ATTEMPT_INSERT_COLUMNS = [
+  'run_id',
+  'session_id',
+  'q_code',
+  'q_id',
+  'cat_id',
+  'subject_code',
+  'category_code',
+  'subcategory',
+  'subject_sub',
+  'subject_sub_raw',
+  'question_url',
+  'question_stem',
+  'answer_choices',
+  'response_format',
+  'response_details',
+  'correct',
+  'difficulty',
+  'confidence',
+  'time_sec',
+  'my_answer',
+  'correct_answer',
+  'topic',
+  'topic_source',
+  'content_domain',
+  'mistake_type',
+  'notes',
+];
 
 if (!fs.existsSync(dbDir)) {
   fs.mkdirSync(dbDir, { recursive: true });
@@ -46,6 +74,21 @@ function get(sql, params = []) {
       resolve(row);
     });
   });
+}
+
+function buildInsertStatement(tableName, columns) {
+  const placeholders = columns.map(() => '?').join(', ');
+  return `
+    INSERT INTO ${tableName} (
+      ${columns.join(',\n      ')}
+    ) VALUES (${placeholders})
+  `;
+}
+
+function assertValueCount(label, columns, values) {
+  if (columns.length !== values.length) {
+    throw new Error(`${label} value mismatch: expected ${columns.length}, received ${values.length}.`);
+  }
 }
 
 async function ensureQuestionAttemptsColumn(columnName, definition) {
@@ -768,49 +811,18 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
         session
       );
 
-      await run(
-        `
-          INSERT INTO question_attempts (
-            run_id,
-            session_id,
-            q_code,
-            q_id,
-            cat_id,
-            subject_code,
-            category_code,
-            subcategory,
-            subject_sub,
-            subject_sub_raw,
-            question_url,
-            question_stem,
-            answer_choices,
-            response_format,
-            response_details,
-            correct,
-            difficulty,
-            confidence,
-            time_sec,
-            my_answer,
-            correct_answer,
-            topic,
-            topic_source,
-            content_domain,
-            mistake_type,
-            notes
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-        [
-            runId,
-            sessionId,
-            qCode,
-            q.q_id || null,
-            catId,
-            metadata.subject_code,
-            metadata.category_code,
-            metadata.subcategory,
-            q.subject_sub || null,
-            q.subject_sub_raw || null,
-            questionUrl,
+      const attemptValues = [
+        runId,
+        sessionId,
+        qCode,
+        q.q_id || null,
+        catId,
+        metadata.subject_code,
+        metadata.category_code,
+        metadata.subcategory,
+        q.subject_sub || null,
+        q.subject_sub_raw || null,
+        questionUrl,
           questionStem,
           answerChoices,
           responseFormat,
@@ -826,7 +838,12 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           contentDomain,
           mistakeType,
           notes,
-        ]
+      ];
+      assertValueCount('question_attempts insert', QUESTION_ATTEMPT_INSERT_COLUMNS, attemptValues);
+
+      await run(
+        buildInsertStatement('question_attempts', QUESTION_ATTEMPT_INSERT_COLUMNS),
+        attemptValues
       );
     }
   }
@@ -1023,9 +1040,17 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
   const where = ['q.correct = 0', `NOT (${unansweredPlaceholderExpr('q')})`];
   const normalizedSubExpr = `
     CASE
-      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) = 'QUANT' THEN 'Quant'
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('QUANT', 'PS') THEN 'PS'
       WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.category_code, ''), ''))
       WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) = 'DI' THEN 'DI'
+      WHEN q.cat_id IN (1337013, 1336833, 1336853) THEN 'RC'
+      WHEN q.cat_id IN (1337023, 1336843, 1336863) THEN 'CR'
+      WHEN q.cat_id IN (1336733, 1336743) THEN 'DS'
+      WHEN q.cat_id = 1336753 THEN 'MSR'
+      WHEN q.cat_id = 1336763 THEN 'TA'
+      WHEN q.cat_id = 1336773 THEN 'GI'
+      WHEN q.cat_id = 1336783 THEN 'TPA'
+      WHEN q.cat_id IN (1336803, 1336813) THEN 'PS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'DS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), ''))
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'DS'
@@ -1034,7 +1059,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
       WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%data sufficiency%' THEN 'DS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('CR', 'RC', 'PS', 'QUANT', 'VERBAL') THEN
         CASE UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
-          WHEN 'QUANT' THEN 'Quant'
+          WHEN 'QUANT' THEN 'PS'
           WHEN 'VERBAL' THEN 'Verbal'
           ELSE UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
         END
@@ -1224,9 +1249,17 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
   // Re-use expressions for subject and topic logic to ensure consistency
   const normalizedSubExpr = `
     CASE
-      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) = 'QUANT' THEN 'Quant'
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('QUANT', 'PS') THEN 'PS'
       WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.category_code, ''), ''))
       WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) = 'DI' THEN 'DI'
+      WHEN q.cat_id IN (1337013, 1336833, 1336853) THEN 'RC'
+      WHEN q.cat_id IN (1337023, 1336843, 1336863) THEN 'CR'
+      WHEN q.cat_id IN (1336733, 1336743) THEN 'DS'
+      WHEN q.cat_id = 1336753 THEN 'MSR'
+      WHEN q.cat_id = 1336763 THEN 'TA'
+      WHEN q.cat_id = 1336773 THEN 'GI'
+      WHEN q.cat_id = 1336783 THEN 'TPA'
+      WHEN q.cat_id IN (1336803, 1336813) THEN 'PS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'DS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), ''))
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'DS'
@@ -1235,7 +1268,7 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
       WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%data sufficiency%' THEN 'DS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('CR', 'RC', 'PS', 'QUANT', 'VERBAL') THEN
         CASE UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
-          WHEN 'QUANT' THEN 'Quant'
+          WHEN 'QUANT' THEN 'PS'
           WHEN 'VERBAL' THEN 'Verbal'
           ELSE UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
         END
@@ -1345,16 +1378,24 @@ async function getPatterns(runId) {
   const answeredWhere = `NOT (${unansweredPlaceholderExpr('q')})`;
   const normalizedSubExpr = `
     CASE
-      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) = 'QUANT' THEN 'Quant'
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('QUANT', 'PS') THEN 'PS'
       WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.category_code, ''), ''))
       WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) = 'DI' THEN 'DI'
+      WHEN q.cat_id IN (1337013, 1336833, 1336853) THEN 'RC'
+      WHEN q.cat_id IN (1337023, 1336843, 1336863) THEN 'CR'
+      WHEN q.cat_id IN (1336733, 1336743) THEN 'DS'
+      WHEN q.cat_id = 1336753 THEN 'MSR'
+      WHEN q.cat_id = 1336763 THEN 'TA'
+      WHEN q.cat_id = 1336773 THEN 'GI'
+      WHEN q.cat_id = 1336783 THEN 'TPA'
+      WHEN q.cat_id IN (1336803, 1336813) THEN 'PS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'DS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), ''))
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'DS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DI' THEN 'DI'
       WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%data sufficiency%' THEN 'DS'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'QUANT' THEN 'Quant'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'QUANT' THEN 'PS'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'VERBAL' THEN 'Verbal'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('CR', 'RC', 'PS') THEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
       ELSE ''
@@ -1377,8 +1418,9 @@ async function getPatterns(runId) {
           ELSE 'Verbal'
         END
       WHEN q.cat_id BETWEEN 1336700 AND 1336899 THEN 'DI'
-      WHEN COALESCE(NULLIF(s.subject, ''), '') IN ('CR', 'RC', 'PS', 'DS', 'Quant', 'DI', 'TA', 'GI', 'MSR', 'TPA') THEN COALESCE(NULLIF(s.subject, ''), 'Unknown')
-      WHEN LOWER(COALESCE(s.source, '')) LIKE '%quant%' THEN 'Quant'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') IN ('CR', 'RC', 'PS', 'DS', 'DI', 'TA', 'GI', 'MSR', 'TPA') THEN COALESCE(NULLIF(s.subject, ''), 'Unknown')
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'Quant' THEN 'PS'
+      WHEN LOWER(COALESCE(s.source, '')) LIKE '%quant%' THEN 'PS'
       WHEN LOWER(COALESCE(s.source, '')) LIKE '%data insights%' THEN 'DI'
       ELSE COALESCE(NULLIF(s.subject, ''), 'Other')
     END
@@ -1806,6 +1848,7 @@ async function getSessionAnalysis(sessionId) {
       SELECT
         q.id,
         q.q_code,
+        q.cat_id,
         q.subject_code,
         q.category_code,
         q.subcategory,

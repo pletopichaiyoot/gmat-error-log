@@ -199,6 +199,8 @@ Upsert behavior:
 - `HOST` (default `127.0.0.1`)
 - `CHROME_CDP_URL` (default `http://localhost:9222`)
 - `SCRAPE_TODAY_BUFFER_HOURS` (default `36`)
+- `EXPOSE_INTERNAL_DEBUG` (optional, default `false`; include internal scrape/CDP debug payloads in API responses)
+- `ALLOW_REMOTE_CDP` (optional, default `false`; allow non-localhost CDP targets)
 - `LLM_PROVIDER` (`openai` | `zai`, optional; auto-detect if omitted)
 - `OPENAI_API_KEY` (required when provider is OpenAI)
 - `OPENAI_MODEL` (optional, default `gpt-4o-mini`)

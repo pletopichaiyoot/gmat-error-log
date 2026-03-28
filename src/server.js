@@ -23,6 +23,8 @@ const { runScrapeFromOpenBrowser, openUrlInOpenBrowser } = require('./scraper-ru
 const app = express();
 const PORT = Number(process.env.PORT || 4310);
 const HOST = process.env.HOST || '127.0.0.1';
+const EXPOSE_INTERNAL_DEBUG = /^(1|true|yes)$/i.test(String(process.env.EXPOSE_INTERNAL_DEBUG || '').trim());
+const ALLOW_REMOTE_CDP = /^(1|true|yes)$/i.test(String(process.env.ALLOW_REMOTE_CDP || '').trim());
 const clientDistPath = path.resolve(__dirname, '..', 'client', 'dist');
 const THAI_UTC_OFFSET_MS = 7 * 60 * 60 * 1000;
 const THAI_TIME_ZONE = 'Asia/Bangkok';
@@ -200,6 +202,52 @@ function clipText(value, maxLen = 3000) {
   const text = String(value || '');
   if (text.length <= maxLen) return text;
   return `${text.slice(0, maxLen)}…`;
+}
+
+function parseHttpUrlSafe(rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value) return null;
+  try {
+    return new URL(value);
+  } catch (_error) {
+    try {
+      return new URL(`http://${value}`);
+    } catch (_innerError) {
+      return null;
+    }
+  }
+}
+
+function isLoopbackHostname(rawHost) {
+  const host = String(rawHost || '').trim().replace(/^\[|\]$/g, '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
+function normalizeCdpUrl(rawUrl) {
+  if (!rawUrl) return '';
+  const parsed = parseHttpUrlSafe(rawUrl);
+  if (!parsed || !/^https?:$/i.test(parsed.protocol)) return '';
+  return parsed.toString();
+}
+
+function getValidatedCdpUrl(rawUrl) {
+  const normalized = normalizeCdpUrl(rawUrl);
+  if (!normalized) return '';
+  const parsed = new URL(normalized);
+  if (!ALLOW_REMOTE_CDP && !isLoopbackHostname(parsed.hostname)) {
+    const error = new Error('Remote CDP hosts are blocked. Use localhost/127.0.0.1/::1 or set ALLOW_REMOTE_CDP=true.');
+    error.statusCode = 400;
+    throw error;
+  }
+  return normalized;
+}
+
+function withOptionalDebug(response, { details = '', debug = null } = {}) {
+  if (EXPOSE_INTERNAL_DEBUG) {
+    if (details) response.details = details;
+    if (debug) response.debug = debug;
+  }
+  return response;
 }
 
 function normalizeOpenUrl(rawUrl) {
@@ -455,7 +503,8 @@ app.post('/api/open-chrome', async (req, res) => {
       return;
     }
 
-    const port = cdpPortFromUrl(req.body?.cdpUrl);
+    const validatedCdpUrl = getValidatedCdpUrl(req.body?.cdpUrl);
+    const port = cdpPortFromUrl(validatedCdpUrl || req.body?.cdpUrl);
     const sourcePreset = resolveSourcePreset(req.body?.source);
     if (!sourcePreset) {
       res.status(400).json({
@@ -505,13 +554,13 @@ app.post('/api/open-chrome', async (req, res) => {
     res.json({
       ok: true,
       port,
-      profileDir,
       source: sourcePreset.label,
       appUrl: sourcePreset.appUrl,
+      ...(EXPOSE_INTERNAL_DEBUG ? { profileDir } : {}),
       message: 'Chrome launch command sent.',
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(Number(error.statusCode || 500)).json({
       ok: false,
       error: error.message,
     });
@@ -529,33 +578,37 @@ app.post('/api/open-question', async (req, res) => {
       return;
     }
 
+    const cdpUrl = getValidatedCdpUrl(req.body?.cdpUrl);
     const rawSource = String(req.body?.source || '').trim();
     const sourcePreset = rawSource ? resolveSourcePreset(rawSource) : null;
     const result = await openUrlInOpenBrowser({
-      cdpUrl: req.body?.cdpUrl,
+      cdpUrl,
       url: targetUrl,
       appUrl: sourcePreset?.appUrl || '',
     });
 
-    res.json({
+    res.json(withOptionalDebug({
       ok: true,
       openedUrl: result.openedUrl,
+    }, {
       debug: result.debug || null,
-    });
+    }));
   } catch (error) {
-    res.status(500).json({
+    res.status(Number(error.statusCode || 500)).json(withOptionalDebug({
       ok: false,
       error: error.message,
       hint: 'Open Chrome (CDP) first, keep GMAT tab logged in, then try Open again.',
+    }, {
       details: clipText(error.stack || error.message || String(error), 4000),
       debug: error.openDebug || null,
-    });
+    }));
   }
 });
 
 app.post('/api/scrape', async (req, res) => {
   try {
     const { source, cdpUrl, scrapeWindow, customSince } = req.body || {};
+    const validatedCdpUrl = getValidatedCdpUrl(cdpUrl);
     const preset = resolveSourcePreset(source);
     if (!preset) {
       res.status(400).json({
@@ -579,7 +632,7 @@ app.post('/api/scrape', async (req, res) => {
       autoDetectReviewCategoryId: !preset.reviewCategoryId,
       source: preset.label,
       appUrl: preset.appUrl,
-      cdpUrl,
+      cdpUrl: validatedCdpUrl,
       scraperPath: path.resolve(__dirname, 'scrapers', 'gmat_scraper.js'),
     });
 
@@ -615,7 +668,7 @@ app.post('/api/scrape', async (req, res) => {
       ? 'Scrape completed but extracted 0 sessions. Check source tab, date window, and debug logs below.'
       : '';
 
-    res.json({
+    res.json(withOptionalDebug({
       ok: true,
       tabUrl,
       run: savedRun,
@@ -626,18 +679,20 @@ app.post('/api/scrape', async (req, res) => {
       mode: 'auto-upsert',
       classification,
       warning,
+    }, {
       debug: debug || null,
-    });
+    }));
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('[api/scrape] failed', error);
-    res.status(500).json({
+    res.status(Number(error.statusCode || 500)).json(withOptionalDebug({
       ok: false,
       error: error.message,
       hint: 'Confirm Chrome is running with --remote-debugging-port=9222 and GMAT tab is open + logged in.',
+    }, {
       details: clipText(error.stack || error.message || String(error), 4000),
       debug: error.scrapeDebug || null,
-    });
+    }));
   }
 });
 

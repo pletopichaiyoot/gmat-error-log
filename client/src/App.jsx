@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Card } from './components/ui/card';
 import { Button } from './components/ui/button';
 import { Badge } from './components/ui/badge';
@@ -301,6 +301,12 @@ function formatContentDomain(value) {
 }
 
 function normalizedSubjectCode(row) {
+  const inferredCategory = normalizedCategoryCode(row);
+  const inferredCategoryUpper = String(inferredCategory || '').trim().toUpperCase();
+  if (inferredCategoryUpper === 'PS') return 'Q';
+  if (['CR', 'RC'].includes(inferredCategoryUpper)) return 'V';
+  if (['DS', 'MSR', 'TPA', 'GI', 'TA', 'DI', 'UNKNOWN DI'].includes(inferredCategoryUpper)) return 'DI';
+
   const raw = String(row?.subject_code || '').trim().toUpperCase();
   if (raw) return raw;
   const fallback = mapSubjectFamily(row?.subject || row?.subject_sub || row?.subject_sub_raw || '');
@@ -312,8 +318,31 @@ function normalizedSubjectCode(row) {
 
 function normalizedCategoryCode(row) {
   const raw = String(row?.category_code || row?.subject_sub_raw || row?.subject_sub || '').trim();
+  const upper = raw.toUpperCase();
+  if (['QUANT', 'Q', 'PS'].includes(upper)) return 'PS';
+  if (['CR', 'RC', 'DS', 'MSR', 'TPA', 'GI', 'TA'].includes(upper)) return upper;
+
+  const catId = Number(row?.cat_id);
+  if (Number.isInteger(catId)) {
+    if ([1337013, 1336833, 1336853].includes(catId)) return 'RC';
+    if ([1337023, 1336843, 1336863].includes(catId)) return 'CR';
+    if ([1336733, 1336743].includes(catId)) return 'DS';
+    if (catId === 1336753) return 'MSR';
+    if (catId === 1336763) return 'TA';
+    if (catId === 1336773) return 'GI';
+    if (catId === 1336783) return 'TPA';
+    if ([1336803, 1336813].includes(catId)) return 'PS';
+  }
+
+  const topic = String(row?.subcategory || row?.topic || '').trim().toUpperCase();
+  if (topic === 'DATA SUFFICIENCY') return 'DS';
+  if (topic === 'MULTI-SOURCE REASONING' || topic === 'MSR MATH RELATED' || topic === 'MSR NON-MATH RELATED') return 'MSR';
+  if (topic === 'TABLE ANALYSIS' || topic === 'G&T TABLES') return 'TA';
+  if (topic === 'GRAPHICS INTERPRETATION' || topic === 'G&T GRAPHS' || topic === 'G&T MATH RELATED' || topic === 'G&T NON-MATH RELATED') return 'GI';
+  if (topic === 'TWO-PART ANALYSIS' || topic === 'TPA MATH RELATED' || topic === 'TPA NON-MATH RELATED') return 'TPA';
+
   if (!raw) return '-';
-  if (String(raw).trim().toUpperCase() === 'PS') return 'Quant';
+  if (upper === 'DI') return 'Unknown DI';
   return raw;
 }
 
@@ -332,7 +361,9 @@ function normalizeSubjectCodeValue(value) {
 
 function normalizeSubjectFamilyDisplay(value) {
   const normalized = normalizeSubjectCodeValue(value);
-  if (normalized) return normalized;
+  if (normalized === 'Q') return 'Quant';
+  if (normalized === 'V') return 'Verbal';
+  if (normalized === 'DI') return 'Data Insights';
   return String(value || '').trim() || 'Other';
 }
 
@@ -374,7 +405,7 @@ function SubjectCell({ row }) {
   const subjectCode = normalizedSubjectCode(row);
   return (
     <div className="section-cell">
-      <span className="section-chip">{subjectCode}</span>
+      <span className="section-chip">{normalizeSubjectFamilyDisplay(subjectCode)}</span>
     </div>
   );
 }
@@ -467,6 +498,7 @@ function App() {
     confidenceMismatch: [],
     subjectProgress: [],
     categoryBreakdown: [],
+    subtopicBreakdown: [],
   });
   const [filters, setFilters] = useState({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '' });
   const [syncCenterOpen, setSyncCenterOpen] = useState(false);
@@ -504,7 +536,10 @@ function App() {
   const [sessionSort, setSessionSort] = useState({ key: 'session_date', order: 'desc' });
   const [sessionAnalysisSort, setSessionAnalysisSort] = useState({ key: 'time_sec', order: 'desc' });
   const [errorSort, setErrorSort] = useState({ key: 'session_date', order: 'desc' });
+  const [categoryBreakdownSort, setCategoryBreakdownSort] = useState({ key: 'subject_family', order: 'asc' });
+  const [subcategoryBreakdownSort, setSubcategoryBreakdownSort] = useState({ key: 'total_questions', order: 'desc' });
   const [sessionDateRange, setSessionDateRange] = useState({ start: '', end: '' });
+  const [expandedCategoryKey, setExpandedCategoryKey] = useState('');
   const [aiReview, setAiReview] = useState('');
   const [isGeneratingAiReview, setIsGeneratingAiReview] = useState(false);
   const [aiFocus, setAiFocus] = useState('');
@@ -593,6 +628,7 @@ function App() {
           confidenceMismatch: patternsRes.confidenceMismatch || [],
           subjectProgress: patternsRes.subjectProgress || [],
           categoryBreakdown: patternsRes.categoryBreakdown || [],
+          subtopicBreakdown: patternsRes.subtopicBreakdown || [],
         });
       })(),
     ]);
@@ -874,7 +910,7 @@ function App() {
       });
     }
 
-    const order = ['Verbal', 'Quant', 'DI', 'Other'];
+    const order = ['Verbal', 'Quant', 'Data Insights', 'Other'];
     return Array.from(groups.values())
       .sort((a, b) => order.indexOf(a.family) - order.indexOf(b.family))
       .map((group) => ({
@@ -885,7 +921,183 @@ function App() {
       }));
   }, [patterns.subjectProgress]);
 
-  const categoryRows = useMemo(() => patterns.categoryBreakdown || [], [patterns.categoryBreakdown]);
+  const categoryRows = useMemo(() => {
+    const groups = new Map();
+    for (const row of patterns.categoryBreakdown || []) {
+      const subjectFamily = normalizeSubjectFamilyDisplay(row.subject_family);
+      const category = normalizedCategoryCode(row);
+      const key = `${subjectFamily}|${category}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          subject_family: subjectFamily,
+          subject_sub: category,
+          total_questions: 0,
+          correct_count: 0,
+          incorrect_count: 0,
+          weighted_avg_time_sec: 0,
+          hard_total: 0,
+          hard_correct_estimate: 0,
+          hard_weighted_avg_time_sec: 0,
+          medium_total: 0,
+          medium_correct_estimate: 0,
+          medium_weighted_avg_time_sec: 0,
+          easy_total: 0,
+          easy_correct_estimate: 0,
+          easy_weighted_avg_time_sec: 0,
+        });
+      }
+
+      const group = groups.get(key);
+      const total = Number(row.total_questions || 0);
+      const correct = Number(row.correct_count || 0);
+      const incorrect = Number(row.incorrect_count || 0);
+      const avgTime = Number(row.avg_time_sec || 0);
+      const hardTotal = Number(row.hard_total || 0);
+      const hardAccuracyPct = Number(row.hard_accuracy_pct || 0);
+      const hardAvgTime = Number(row.hard_avg_time_sec || 0);
+      const mediumTotal = Number(row.medium_total || 0);
+      const mediumAccuracyPct = Number(row.medium_accuracy_pct || 0);
+      const mediumAvgTime = Number(row.medium_avg_time_sec || 0);
+      const easyTotal = Number(row.easy_total || 0);
+      const easyAccuracyPct = Number(row.easy_accuracy_pct || 0);
+      const easyAvgTime = Number(row.easy_avg_time_sec || 0);
+
+      group.total_questions += total;
+      group.correct_count += correct;
+      group.incorrect_count += incorrect;
+      group.weighted_avg_time_sec += avgTime * total;
+
+      group.hard_total += hardTotal;
+      group.hard_correct_estimate += (hardAccuracyPct / 100) * hardTotal;
+      group.hard_weighted_avg_time_sec += hardAvgTime * hardTotal;
+
+      group.medium_total += mediumTotal;
+      group.medium_correct_estimate += (mediumAccuracyPct / 100) * mediumTotal;
+      group.medium_weighted_avg_time_sec += mediumAvgTime * mediumTotal;
+
+      group.easy_total += easyTotal;
+      group.easy_correct_estimate += (easyAccuracyPct / 100) * easyTotal;
+      group.easy_weighted_avg_time_sec += easyAvgTime * easyTotal;
+    }
+
+    const order = ['Verbal', 'Quant', 'Data Insights', 'Other'];
+    return Array.from(groups.values())
+      .map((group) => ({
+        subject_family: group.subject_family,
+        subject_sub: group.subject_sub,
+        total_questions: group.total_questions,
+        correct_count: group.correct_count,
+        incorrect_count: group.incorrect_count,
+        accuracy_pct: group.total_questions ? Number(((group.correct_count * 100) / group.total_questions).toFixed(1)) : 0,
+        avg_time_sec: group.total_questions ? Math.round(group.weighted_avg_time_sec / group.total_questions) : 0,
+        hard_total: group.hard_total,
+        hard_accuracy_pct: group.hard_total ? Number(((group.hard_correct_estimate * 100) / group.hard_total).toFixed(1)) : 0,
+        hard_avg_time_sec: group.hard_total ? Math.round(group.hard_weighted_avg_time_sec / group.hard_total) : 0,
+        medium_total: group.medium_total,
+        medium_accuracy_pct: group.medium_total ? Number(((group.medium_correct_estimate * 100) / group.medium_total).toFixed(1)) : 0,
+        medium_avg_time_sec: group.medium_total ? Math.round(group.medium_weighted_avg_time_sec / group.medium_total) : 0,
+        easy_total: group.easy_total,
+        easy_accuracy_pct: group.easy_total ? Number(((group.easy_correct_estimate * 100) / group.easy_total).toFixed(1)) : 0,
+        easy_avg_time_sec: group.easy_total ? Math.round(group.easy_weighted_avg_time_sec / group.easy_total) : 0,
+      }))
+      .sort((a, b) => {
+        const familyDiff = order.indexOf(a.subject_family) - order.indexOf(b.subject_family);
+        if (familyDiff !== 0) return familyDiff;
+        return String(a.subject_sub || '').localeCompare(String(b.subject_sub || ''));
+      });
+  }, [patterns.categoryBreakdown]);
+  const subcategoryRowsByCategory = useMemo(() => {
+    const groups = new Map();
+    for (const row of patterns.subtopicBreakdown || []) {
+      const subjectFamily = normalizeSubjectFamilyDisplay(row.subject_family);
+      const category = normalizedCategoryCode(row);
+      const key = `${subjectFamily}|${category}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+    return groups;
+  }, [patterns.subtopicBreakdown]);
+
+  const sortedCategoryRows = useMemo(() => {
+    const rows = [...categoryRows];
+    const { key, order } = categoryBreakdownSort;
+
+    rows.sort((a, b) => {
+      let cmp = 0;
+      switch (key) {
+        case 'subject_family':
+          cmp = compareBasicSortValues(normalizeSubjectFamilyDisplay(a.subject_family), normalizeSubjectFamilyDisplay(b.subject_family), order);
+          break;
+        case 'category':
+          cmp = compareBasicSortValues(normalizedCategoryCode(a), normalizedCategoryCode(b), order);
+          break;
+        case 'total_questions':
+        case 'correct_count':
+        case 'incorrect_count':
+        case 'accuracy_pct':
+        case 'avg_time_sec':
+          cmp = compareBasicSortValues(a?.[key] || 0, b?.[key] || 0, order);
+          break;
+        case 'hard':
+        case 'medium':
+        case 'easy':
+          cmp = compareDifficultyBucket(a, b, key, order);
+          break;
+        case 'status':
+          cmp = compareBasicSortValues(statusLabelFromAccuracy(a.accuracy_pct), statusLabelFromAccuracy(b.accuracy_pct), order);
+          break;
+        default:
+          cmp = 0;
+      }
+
+      if (cmp !== 0) return cmp;
+      const familyCmp = compareBasicSortValues(normalizeSubjectFamilyDisplay(a.subject_family), normalizeSubjectFamilyDisplay(b.subject_family), 'asc');
+      if (familyCmp !== 0) return familyCmp;
+      return compareBasicSortValues(normalizedCategoryCode(a), normalizedCategoryCode(b), 'asc');
+    });
+
+    return rows;
+  }, [categoryRows, categoryBreakdownSort]);
+
+  const sortedSubcategoryRowsByCategory = useMemo(() => {
+    const groups = new Map();
+    const { key, order } = subcategoryBreakdownSort;
+
+    for (const [groupKey, rows] of subcategoryRowsByCategory.entries()) {
+      const sortedRows = [...rows].sort((a, b) => {
+        let cmp = 0;
+        switch (key) {
+          case 'subtopic':
+            cmp = compareBasicSortValues(a?.subtopic || '', b?.subtopic || '', order);
+            break;
+          case 'total_questions':
+          case 'correct_count':
+          case 'incorrect_count':
+          case 'accuracy_pct':
+          case 'avg_time_sec':
+            cmp = compareBasicSortValues(a?.[key] || 0, b?.[key] || 0, order);
+            break;
+          case 'hard':
+          case 'medium':
+          case 'easy':
+            cmp = compareDifficultyBucket(a, b, key, order);
+            break;
+          case 'status':
+            cmp = compareBasicSortValues(statusLabelFromAccuracy(a.accuracy_pct), statusLabelFromAccuracy(b.accuracy_pct), order);
+            break;
+          default:
+            cmp = 0;
+        }
+
+        if (cmp !== 0) return cmp;
+        return compareBasicSortValues(a?.subtopic || '', b?.subtopic || '', 'asc');
+      });
+
+      groups.set(groupKey, sortedRows);
+    }
+
+    return groups;
+  }, [subcategoryRowsByCategory, subcategoryBreakdownSort]);
 
   const overallMastery = useMemo(() => {
     const total = subjectCards.reduce((sum, card) => sum + Number(card.total || 0), 0);
@@ -1023,6 +1235,48 @@ function App() {
     loadErrors(1, selectedRunId, filters, newSort);
   }
 
+  function handleCategoryBreakdownSort(key) {
+    setCategoryBreakdownSort((prev) => ({
+      key,
+      order: prev.key === key && prev.order === 'desc' ? 'asc' : 'desc',
+    }));
+  }
+
+  function handleSubcategoryBreakdownSort(key) {
+    setSubcategoryBreakdownSort((prev) => ({
+      key,
+      order: prev.key === key && prev.order === 'desc' ? 'asc' : 'desc',
+    }));
+  }
+
+  function sortIndicator(sortState, key) {
+    return sortState.key === key ? (sortState.order === 'asc' ? '↑' : '↓') : '';
+  }
+
+  function compareBasicSortValues(valA, valB, order = 'asc') {
+    const bothNumbers = Number.isFinite(Number(valA)) && Number.isFinite(Number(valB));
+    if (bothNumbers) {
+      const numA = Number(valA);
+      const numB = Number(valB);
+      if (numA < numB) return order === 'asc' ? -1 : 1;
+      if (numA > numB) return order === 'asc' ? 1 : -1;
+      return 0;
+    }
+
+    const cmp = String(valA ?? '').localeCompare(String(valB ?? ''), undefined, { numeric: true, sensitivity: 'base' });
+    return order === 'asc' ? cmp : -cmp;
+  }
+
+  function compareDifficultyBucket(a, b, bucket, order = 'asc') {
+    const totalCmp = compareBasicSortValues(a?.[`${bucket}_total`] || 0, b?.[`${bucket}_total`] || 0, order);
+    if (totalCmp !== 0) return totalCmp;
+
+    const accuracyCmp = compareBasicSortValues(a?.[`${bucket}_accuracy_pct`] || 0, b?.[`${bucket}_accuracy_pct`] || 0, order);
+    if (accuracyCmp !== 0) return accuracyCmp;
+
+    return compareBasicSortValues(a?.[`${bucket}_avg_time_sec`] || 0, b?.[`${bucket}_avg_time_sec`] || 0, order);
+  }
+
   function statusLabelFromAccuracy(accuracyPct) {
     const score = Number(accuracyPct || 0);
     if (score >= 80) return 'Strong';
@@ -1035,6 +1289,15 @@ function App() {
     if (label === 'Strong') return 'success';
     if (label === 'Improving') return 'info';
     return 'warning';
+  }
+
+  function categoryDrilldownKey(row) {
+    return `${normalizeSubjectFamilyDisplay(row?.subject_family)}|${normalizedCategoryCode(row)}`;
+  }
+
+  function toggleCategoryDrilldown(row) {
+    const nextKey = categoryDrilldownKey(row);
+    setExpandedCategoryKey((prev) => (prev === nextKey ? '' : nextKey));
   }
 
   function handleClosePatternDrilldown() {
@@ -1606,48 +1869,169 @@ function App() {
             <table>
               <thead>
                 <tr>
-                  <th>Subject</th>
-                  <th>Category</th>
-                  <th>Total Questions</th>
-                  <th>Correct</th>
-                  <th>Incorrect</th>
-                  <th>Accuracy</th>
-                  <th>Avg Time / Q</th>
-                  <th>Hard (Q / Acc / Avg)</th>
-                  <th>Medium (Q / Acc / Avg)</th>
-                  <th>Easy (Q / Acc / Avg)</th>
-                  <th>Status</th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('subject_family')}>
+                    Subject {sortIndicator(categoryBreakdownSort, 'subject_family')}
+                  </th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('category')}>
+                    Category {sortIndicator(categoryBreakdownSort, 'category')}
+                  </th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('total_questions')}>
+                    Total Questions {sortIndicator(categoryBreakdownSort, 'total_questions')}
+                  </th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('correct_count')}>
+                    Correct {sortIndicator(categoryBreakdownSort, 'correct_count')}
+                  </th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('incorrect_count')}>
+                    Incorrect {sortIndicator(categoryBreakdownSort, 'incorrect_count')}
+                  </th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('accuracy_pct')}>
+                    Accuracy {sortIndicator(categoryBreakdownSort, 'accuracy_pct')}
+                  </th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('avg_time_sec')}>
+                    Avg Time / Q {sortIndicator(categoryBreakdownSort, 'avg_time_sec')}
+                  </th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('hard')}>
+                    Hard (Q / Acc / Avg) {sortIndicator(categoryBreakdownSort, 'hard')}
+                  </th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('medium')}>
+                    Medium (Q / Acc / Avg) {sortIndicator(categoryBreakdownSort, 'medium')}
+                  </th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('easy')}>
+                    Easy (Q / Acc / Avg) {sortIndicator(categoryBreakdownSort, 'easy')}
+                  </th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('status')}>
+                    Status {sortIndicator(categoryBreakdownSort, 'status')}
+                  </th>
+                  <th>Drilldown</th>
                 </tr>
               </thead>
               <tbody>
                 {!categoryRows.length && (
                   <tr>
-                    <td colSpan="11">No category data yet.</td>
+                    <td colSpan="12">No category data yet.</td>
                   </tr>
                 )}
-                {categoryRows.map((row) => {
+                {sortedCategoryRows.map((row) => {
                   const statusLabel = statusLabelFromAccuracy(row.accuracy_pct);
+                  const drilldownKey = categoryDrilldownKey(row);
+                  const subcategoryRows = sortedSubcategoryRowsByCategory.get(drilldownKey) || [];
+                  const isExpanded = expandedCategoryKey === drilldownKey;
                   return (
-                    <tr key={`${row.subject_family}-${row.subject_sub}`}>
-                      <td>{formatMaybe(normalizeSubjectFamilyDisplay(row.subject_family))}</td>
-                      <td>{formatMaybe(normalizedCategoryCode(row))}</td>
-                      <td>{formatMaybe(row.total_questions)}</td>
-                      <td>{formatMaybe(row.correct_count)}</td>
-                      <td>{formatMaybe(row.incorrect_count)}</td>
-                      <td>{formatPercent(row.accuracy_pct)}</td>
-                      <td>{formatDurationSeconds(row.avg_time_sec)}</td>
-                      <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>
-                      <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>
-                      <td>{formatDifficultyStat(row.easy_total, row.easy_accuracy_pct, row.easy_avg_time_sec)}</td>
-                      <td>
-                        <Badge
-                          variant={statusVariantFromAccuracy(row.accuracy_pct)}
-                          className={`status-pill ${String(statusLabel).toLowerCase().replace(/\s+/g, '-')}`}
-                        >
-                          {statusLabel}
-                        </Badge>
-                      </td>
-                    </tr>
+                    <Fragment key={drilldownKey}>
+                      <tr>
+                        <td>{formatMaybe(normalizeSubjectFamilyDisplay(row.subject_family))}</td>
+                        <td>{formatMaybe(normalizedCategoryCode(row))}</td>
+                        <td>{formatMaybe(row.total_questions)}</td>
+                        <td>{formatMaybe(row.correct_count)}</td>
+                        <td>{formatMaybe(row.incorrect_count)}</td>
+                        <td>{formatPercent(row.accuracy_pct)}</td>
+                        <td>{formatDurationSeconds(row.avg_time_sec)}</td>
+                        <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>
+                        <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>
+                        <td>{formatDifficultyStat(row.easy_total, row.easy_accuracy_pct, row.easy_avg_time_sec)}</td>
+                        <td>
+                          <Badge
+                            variant={statusVariantFromAccuracy(row.accuracy_pct)}
+                            className={`status-pill ${String(statusLabel).toLowerCase().replace(/\s+/g, '-')}`}
+                          >
+                            {statusLabel}
+                          </Badge>
+                        </td>
+                        <td className="category-drilldown-cell">
+                          {subcategoryRows.length ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              type="button"
+                              className="readmore-btn"
+                              onClick={() => toggleCategoryDrilldown(row)}
+                            >
+                              {isExpanded ? 'Hide' : `View ${subcategoryRows.length}`}
+                            </Button>
+                          ) : (
+                            <span className="muted">-</span>
+                          )}
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr className="category-drilldown-row">
+                          <td colSpan="12">
+                            <div className="subcategory-drilldown-panel">
+                              <div className="subcategory-drilldown-head">
+                                <strong>
+                                  {formatMaybe(normalizeSubjectFamilyDisplay(row.subject_family))} / {formatMaybe(normalizedCategoryCode(row))}
+                                </strong>
+                                <span className="muted">{subcategoryRows.length} subcategories</span>
+                              </div>
+                              <div className="table-wrap subcategory-drilldown-wrap">
+                                <table className="subcategory-drilldown-table">
+                                  <thead>
+                                    <tr>
+                                      <th className="sortable" onClick={() => handleSubcategoryBreakdownSort('subtopic')}>
+                                        Subcategory {sortIndicator(subcategoryBreakdownSort, 'subtopic')}
+                                      </th>
+                                      <th className="sortable" onClick={() => handleSubcategoryBreakdownSort('total_questions')}>
+                                        Total {sortIndicator(subcategoryBreakdownSort, 'total_questions')}
+                                      </th>
+                                      <th className="sortable" onClick={() => handleSubcategoryBreakdownSort('correct_count')}>
+                                        Correct {sortIndicator(subcategoryBreakdownSort, 'correct_count')}
+                                      </th>
+                                      <th className="sortable" onClick={() => handleSubcategoryBreakdownSort('incorrect_count')}>
+                                        Incorrect {sortIndicator(subcategoryBreakdownSort, 'incorrect_count')}
+                                      </th>
+                                      <th className="sortable" onClick={() => handleSubcategoryBreakdownSort('accuracy_pct')}>
+                                        Accuracy {sortIndicator(subcategoryBreakdownSort, 'accuracy_pct')}
+                                      </th>
+                                      <th className="sortable" onClick={() => handleSubcategoryBreakdownSort('avg_time_sec')}>
+                                        Avg Time {sortIndicator(subcategoryBreakdownSort, 'avg_time_sec')}
+                                      </th>
+                                      <th className="sortable" onClick={() => handleSubcategoryBreakdownSort('hard')}>
+                                        Hard (Q / Acc / Avg) {sortIndicator(subcategoryBreakdownSort, 'hard')}
+                                      </th>
+                                      <th className="sortable" onClick={() => handleSubcategoryBreakdownSort('medium')}>
+                                        Medium (Q / Acc / Avg) {sortIndicator(subcategoryBreakdownSort, 'medium')}
+                                      </th>
+                                      <th className="sortable" onClick={() => handleSubcategoryBreakdownSort('easy')}>
+                                        Easy (Q / Acc / Avg) {sortIndicator(subcategoryBreakdownSort, 'easy')}
+                                      </th>
+                                      <th className="sortable" onClick={() => handleSubcategoryBreakdownSort('status')}>
+                                        Status {sortIndicator(subcategoryBreakdownSort, 'status')}
+                                      </th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {subcategoryRows.map((subRow) => {
+                                      const subStatus = statusLabelFromAccuracy(subRow.accuracy_pct);
+                                      return (
+                                        <tr key={`${drilldownKey}|${subRow.subtopic}`}>
+                                          <td>{formatMaybe(subRow.subtopic)}</td>
+                                          <td>{formatMaybe(subRow.total_questions)}</td>
+                                          <td>{formatMaybe(subRow.correct_count)}</td>
+                                          <td>{formatMaybe(subRow.incorrect_count)}</td>
+                                          <td>{formatPercent(subRow.accuracy_pct)}</td>
+                                          <td>{formatDurationSeconds(subRow.avg_time_sec)}</td>
+                                          <td>{formatDifficultyStat(subRow.hard_total, subRow.hard_accuracy_pct, subRow.hard_avg_time_sec)}</td>
+                                          <td>{formatDifficultyStat(subRow.medium_total, subRow.medium_accuracy_pct, subRow.medium_avg_time_sec)}</td>
+                                          <td>{formatDifficultyStat(subRow.easy_total, subRow.easy_accuracy_pct, subRow.easy_avg_time_sec)}</td>
+                                          <td>
+                                            <Badge
+                                              variant={statusVariantFromAccuracy(subRow.accuracy_pct)}
+                                              className={`status-pill ${String(subStatus).toLowerCase().replace(/\s+/g, '-')}`}
+                                            >
+                                              {subStatus}
+                                            </Badge>
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   );
                 })}
               </tbody>
@@ -1666,9 +2050,9 @@ function App() {
               onChange={(e) => setSessionSubjectFilter(e.target.value)}
             >
               <option value="">All Subjects</option>
-              <option value="Q">Q</option>
-              <option value="V">V</option>
-              <option value="DI">DI</option>
+              <option value="Q">Quant</option>
+              <option value="V">Verbal</option>
+              <option value="DI">Data Insights</option>
             </Select>
             <div className="date-filter-group">
               <Input
@@ -1842,9 +2226,9 @@ function App() {
                   onChange={(event) => setFilters((prev) => ({ ...prev, subject: event.target.value }))}
                 >
                   <option value="">All subjects</option>
-                  <option value="Q">Q</option>
-                  <option value="V">V</option>
-                  <option value="DI">DI</option>
+                  <option value="Q">Quant</option>
+                  <option value="V">Verbal</option>
+                  <option value="DI">Data Insights</option>
                 </Select>
                 <Select
                   value={filters.difficulty}
@@ -2525,7 +2909,7 @@ function App() {
 
               <div className="question-review-hero">
                 <div className="question-review-meta">
-                  <span className="question-review-chip">{formatMaybe(normalizedSubjectCode(questionReview.row))}</span>
+                  <span className="question-review-chip">{formatMaybe(normalizeSubjectFamilyDisplay(normalizedSubjectCode(questionReview.row)))}</span>
                   <span className="question-review-chip">{formatMaybe(normalizedCategoryCode(questionReview.row))}</span>
                   <span className="question-review-chip">{formatMaybe(questionReview.row.difficulty)}</span>
                   <span className="question-review-chip">{formatMaybe(normalizedSubcategory(questionReview.row))}</span>

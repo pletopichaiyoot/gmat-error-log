@@ -92,7 +92,15 @@ function matchesAppEntry(pageUrl, appUrl) {
 
   const pagePath = trimTrailingSlash(pageParsed.pathname || '/');
   const appPath = trimTrailingSlash(appParsed.pathname || '/');
-  return pageParsed.origin === appParsed.origin && pagePath === appPath;
+  if (pageParsed.origin !== appParsed.origin || pagePath !== appPath) return false;
+
+  const pageHash = String(pageParsed.hash || '').replace(/^#/, '').trim();
+  const appHash = String(appParsed.hash || '').replace(/^#/, '').trim();
+
+  // The scraper should start from the source root, not from a deep review/custom-quiz route
+  // that happens to share the same /app/... pathname.
+  if (!appHash) return !pageHash;
+  return pageHash === appHash;
 }
 
 function clipText(value, maxLen = 1000) {

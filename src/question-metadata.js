@@ -33,25 +33,50 @@ function inferVerbalCategoryFromDomain(value) {
   return '';
 }
 
+function inferCategoryCodeFromCatId(catId) {
+  const normalizedCatId = Number(catId);
+  if (!Number.isInteger(normalizedCatId)) return '';
+
+  if (normalizedCatId === 1337013 || normalizedCatId === 1336833 || normalizedCatId === 1336853) return 'RC';
+  if (normalizedCatId === 1337023 || normalizedCatId === 1336843 || normalizedCatId === 1336863) return 'CR';
+  if (normalizedCatId === 1336733 || normalizedCatId === 1336743) return 'DS';
+  if (normalizedCatId === 1336753) return 'MSR';
+  if (normalizedCatId === 1336763) return 'TA';
+  if (normalizedCatId === 1336773) return 'GI';
+  if (normalizedCatId === 1336783) return 'TPA';
+  if (normalizedCatId === 1336803 || normalizedCatId === 1336813) return 'PS';
+
+  return '';
+}
+
+function inferCategoryCodeFromTopic(value) {
+  const upper = String(value || '').trim().toUpperCase();
+  if (!upper) return '';
+
+  if (upper === 'DATA SUFFICIENCY') return 'DS';
+  if (upper === 'MULTI-SOURCE REASONING' || upper === 'MSR MATH RELATED' || upper === 'MSR NON-MATH RELATED') return 'MSR';
+  if (upper === 'TABLE ANALYSIS' || upper === 'G&T TABLES') return 'TA';
+  if (upper === 'GRAPHICS INTERPRETATION' || upper === 'G&T GRAPHS' || upper === 'G&T MATH RELATED' || upper === 'G&T NON-MATH RELATED') return 'GI';
+  if (upper === 'TWO-PART ANALYSIS' || upper === 'TPA MATH RELATED' || upper === 'TPA NON-MATH RELATED') return 'TPA';
+
+  return inferVerbalCategoryFromDomain(upper);
+}
+
 function normalizeCategoryCode(value, { subjectCode = '', topic = '', catId = null } = {}) {
   const upper = String(value || '').trim().toUpperCase();
   if (upper) {
-    if (['QUANT', 'Q', 'PS'].includes(upper)) return 'Quant';
+    if (['PS', 'QUANT', 'Q'].includes(upper)) return 'PS';
     if (['CR', 'RC', 'DS', 'MSR', 'TPA', 'GI', 'TA'].includes(upper)) return upper;
   }
 
-  const normalizedCatId = Number(catId);
-  if (Number.isInteger(normalizedCatId)) {
-    if (normalizedCatId === 1337013) return 'CR';
-    if (normalizedCatId === 1337023) return 'RC';
-  }
+  const categoryFromCatId = inferCategoryCodeFromCatId(catId);
+  if (categoryFromCatId) return categoryFromCatId;
 
-  if (subjectCode === 'Q') return 'Quant';
+  const categoryFromTopic = inferCategoryCodeFromTopic(topic);
+  if (categoryFromTopic) return categoryFromTopic;
+
+  if (subjectCode === 'Q') return 'PS';
   if (subjectCode === 'V') return inferVerbalCategoryFromDomain(topic);
-  if (subjectCode === 'DI') {
-    const topicUpper = String(topic || '').trim().toUpperCase();
-    if (topicUpper === 'DATA SUFFICIENCY') return 'DS';
-  }
 
   return '';
 }
@@ -92,8 +117,10 @@ function deriveQuestionMetadata(question = {}, session = {}) {
     }) ||
     '';
 
+  const resolvedSubjectCode = normalizeSubjectCode(categoryCode) || subjectCode || '';
+
   return {
-    subject_code: subjectCode || null,
+    subject_code: resolvedSubjectCode || null,
     category_code: categoryCode || null,
     subcategory: normalizedTextOrNull(question.subcategory || question.topic) || null,
   };
