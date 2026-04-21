@@ -19,25 +19,33 @@ const MISTAKE_TYPES = {
     'Wrong Order/Pairing',
     'Calculation Error',
     'Unit/Scale Error',
+    'Sign/Direction Error',
     'Conceptual Gap',
     'Logic Breakdown',
+    'Careless / Sloppy Error',
   ],
   'Data Handling / DI-Specific': [
     'Data Extraction Error',
     'Chart/Table Misread',
     'Two-Part: Order Reversal',
     'Two-Part: Pairing Logic Error',
+    'Composite: Wrong Slot',
+    'Multi-Select: Partial Answer',
     'Table Analysis: Filter Miss',
     'Table Analysis: Final Step Slip',
     'Graphics: Axis/Label Misread',
+    'Graphics: Trend Misread',
     'MSR: Missed Cross-Source Link',
   ],
   'Verbal / Reading': [
     'Misread Passage',
     'Misread Question',
+    'Missed Negation/Qualifier',
     'Out of Scope Inference',
+    'Scope Shift',
     'Missed Author Tone',
     'Wrong Logical Relationship',
+    'Confused Answer Choices',
   ],
   'Test Strategy / Process': [
     'Eliminated Correct Choice',
@@ -48,6 +56,7 @@ const MISTAKE_TYPES = {
     'Switched from Correct Path',
     'Stuck in Algebra',
     'Re-read Too Much',
+    'Unfamiliar Format',
   ],
 };
 
@@ -346,8 +355,130 @@ function normalizedCategoryCode(row) {
   return raw;
 }
 
+function normalizeVerbalSubcategoryDisplay(value, categoryCode) {
+  const text = String(value || '').trim();
+  const normalized = text.toLowerCase();
+  const category = String(categoryCode || '').trim().toUpperCase();
+
+  if (!text) return '';
+
+  if (category === 'CR') {
+    if (/^(support|strengthen)$/i.test(text) || /strengthen|support/.test(normalized)) return 'Support';
+    if (/^(attack|weaken|flaw)$/i.test(text) || /weaken|flaw/.test(normalized)) return 'Attack';
+    if (/^(assumption|evaluate)$/i.test(text) || /assumption|evaluate|relevant to know/.test(normalized)) return 'Assumption';
+    if (/^(inference|complete)$/i.test(text) || /inference|must be true|best supported|complete/.test(normalized)) return 'Inference';
+    if (/^(resolve|explain)$/i.test(text) || /resolve|explain|paradox|discrepancy/.test(normalized)) return 'Resolve';
+    if (
+      /^(argument structure|boldface|method|parallel)$/i.test(text) ||
+      /boldface|method|technique|strategy|parallel|argument structure/.test(normalized)
+    ) {
+      return 'Argument Structure';
+    }
+  }
+
+  if (category === 'RC') {
+    if (
+      /^(main idea \/ purpose|main idea|purpose)$/i.test(text) ||
+      /main idea|main point|primary purpose|central idea|purpose/.test(normalized)
+    ) {
+      return 'Main Idea / Purpose';
+    }
+    if (/^detail$/i.test(text) || /detail|according to the passage/.test(normalized)) return 'Detail';
+    if (/^inference$/i.test(text) || /inference|must be true|best supported/.test(normalized)) return 'Inference';
+    if (
+      /^(structure \/ function|organization)$/i.test(text) ||
+      /organization|structure of the passage|serves to|function of|structure \/ function/.test(normalized)
+    ) {
+      return 'Structure / Function';
+    }
+    if (/^(author view|author attitude)$/i.test(text) || /author('|’)s attitude|tone|author view/.test(normalized)) {
+      return 'Author View';
+    }
+    if (/^application$/i.test(text) || /application|apply.*principle|analogous/.test(normalized)) return 'Application';
+  }
+
+  return text;
+}
+
+function normalizeQuantSubcategoryDisplay(value, categoryCode) {
+  const text = String(value || '').trim();
+  const normalized = text.toLowerCase();
+  const category = String(categoryCode || '').trim().toUpperCase();
+
+  if (!text) return '';
+  if (!['PS', 'DS'].includes(category)) return '';
+
+  if (category === 'DS' && /data sufficiency/.test(normalized)) return 'Unclear Topic';
+  if (/unclear topic|poor quality|bad question|ambiguous/.test(normalized)) return 'Unclear Topic';
+  if (/overlapping sets|venn|set theory/.test(normalized)) return 'Overlapping Sets';
+  if (/statistics|mean|median|standard deviation|variance/.test(normalized)) return 'Statistics';
+  if (/combin|permut|probab|counting/.test(normalized)) return 'Counting & Probability';
+  if (/distance|speed|rate|work|time/.test(normalized)) return 'Rates, Work & Motion';
+  if (/functions?|sequence|inequal|absolute value|custom character/.test(normalized)) return 'Functions, Sequences & Inequalities';
+  if (/word problem|age problem|digit problem|mixture|problem solving/.test(normalized)) return 'General Word Problems';
+  if (/percent|interest|fraction|ratio|proportion|arithmetic|decimal|average|fdp|remainder|multiple|factor/.test(normalized)) {
+    return 'Arithmetic, FDP & Ratios';
+  }
+  if (/geometry|triangle|circle|area|volume|coordinate/.test(normalized)) return 'Geometry';
+  if (/number properties|divis|integer|odd|even|prime/.test(normalized)) return 'Number Properties';
+  if (/algebra|equation|quadratic|linear/.test(normalized)) return 'Algebra & Equations';
+
+  return text;
+}
+
+function normalizeDiSubcategoryDisplay(value, categoryCode, contentDomain) {
+  const text = String(value || '').trim();
+  const normalized = text.toLowerCase();
+  const category = String(categoryCode || '').trim().toUpperCase();
+  const domain = String(contentDomain || '').trim().toLowerCase();
+
+  if (!text) return '';
+
+  if (category === 'GI') {
+    if (/graphs|graphics interpretation|graph|chart|plot|axis/.test(normalized)) return 'Graphs';
+    if (domain === 'math') return 'Math-Based Interpretation';
+    if (domain === 'non_math') return 'Non-Math Interpretation';
+    if (/non[- ]?math|verbal|reading|inference|author|purpose/.test(normalized)) return 'Non-Math Interpretation';
+    if (/math[- ]?based|math[- ]?related|algebra|arithmetic|rate|probab|geometry|number properties|statistics/.test(normalized)) {
+      return 'Math-Based Interpretation';
+    }
+  }
+
+  if (category === 'TA') {
+    if (/tables|table analysis|table/.test(normalized)) return 'Tables';
+    if (domain === 'math') return 'Math-Based Analysis';
+    if (domain === 'non_math') return 'Non-Math Analysis';
+    if (/non[- ]?math|verbal|reading|inference|author|purpose/.test(normalized)) return 'Non-Math Analysis';
+    if (/math[- ]?based|math[- ]?related|algebra|arithmetic|rate|probab|geometry|number properties|statistics/.test(normalized)) {
+      return 'Math-Based Analysis';
+    }
+  }
+
+  if (category === 'MSR' || category === 'TPA') {
+    if (domain === 'math') return 'Math-Based Reasoning';
+    if (domain === 'non_math') return 'Non-Math Reasoning';
+    if (category === 'MSR' && /multi-source reasoning/.test(normalized)) return 'Unknown';
+    if (category === 'TPA' && /two-part analysis/.test(normalized)) return 'Unknown';
+    if (/non[- ]?math|verbal|reading|inference|author|purpose/.test(normalized)) return 'Non-Math Reasoning';
+    if (/math[- ]?based|math[- ]?related|algebra|arithmetic|rate|probab|geometry|statistics/.test(normalized)) {
+      return 'Math-Based Reasoning';
+    }
+  }
+
+  return text;
+}
+
 function normalizedSubcategory(row) {
-  return String(row?.subcategory || row?.topic || '').trim() || '-';
+  const category = normalizedCategoryCode(row);
+  const raw = String(row?.subcategory || row?.topic || '').trim();
+  if (!raw) return '-';
+  const contentDomain = String(row?.content_domain || '').trim();
+  return (
+    normalizeVerbalSubcategoryDisplay(raw, category) ||
+    normalizeQuantSubcategoryDisplay(raw, category) ||
+    normalizeDiSubcategoryDisplay(raw, category, contentDomain) ||
+    raw
+  );
 }
 
 function normalizeSubjectCodeValue(value) {
@@ -546,12 +677,17 @@ function App() {
   const [aiQuestion, setAiQuestion] = useState('');
   const [aiMessages, setAiMessages] = useState([]);
   const [isAskingAi, setIsAskingAi] = useState(false);
+  const [coachOpen, setCoachOpen] = useState(false);
+  const [coachTab, setCoachTab] = useState('chat');
+  const [chatSessionId, setChatSessionId] = useState(null);
+  const [chatSessions, setChatSessions] = useState([]);
+  const [showSessionList, setShowSessionList] = useState(false);
   const aiChatEndRef = useRef(null);
+
+  const [showDifficultyCols, setShowDifficultyCols] = useState(false);
 
   // Collapsible sections state
   const [collapsedSections, setCollapsedSections] = useState({
-    hero: false,
-    aiCoach: false,
     topicDashboard: false,
     categoryBreakdown: false,
     performanceBySession: false,
@@ -599,6 +735,62 @@ function App() {
   }, [selectedRunId]);
 
   const aiScopeLabel = aiRunId ? `Run ${aiRunId}` : 'All runs';
+
+  async function loadCoachSessions() {
+    try {
+      const data = await fetchJson('/api/ai/sessions?limit=30');
+      setChatSessions(data.sessions || []);
+      return data.sessions || [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function loadSessionMessages(sessionId) {
+    try {
+      const data = await fetchJson(`/api/ai/sessions/${sessionId}`);
+      const msgs = (data.messages || []).map((m) => ({ role: m.role, content: m.content }));
+      setAiMessages([buildCoachGreeting(aiScopeLabel), ...msgs]);
+      setChatSessionId(sessionId);
+    } catch {
+      setChatSessionId(null);
+      setAiMessages([buildCoachGreeting(aiScopeLabel)]);
+    }
+  }
+
+  async function startNewSession() {
+    try {
+      const data = await fetchJson('/api/ai/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId: aiRunId }),
+      });
+      setChatSessionId(data.session?.id || null);
+      setAiMessages([buildCoachGreeting(aiScopeLabel)]);
+      setAiQuestion('');
+      loadCoachSessions();
+    } catch {
+      setChatSessionId(null);
+      setAiMessages([buildCoachGreeting(aiScopeLabel)]);
+    }
+  }
+
+  async function handleSelectSession(sessionId) {
+    await loadSessionMessages(sessionId);
+    setShowSessionList(false);
+  }
+
+  async function handleDeleteSession(sessionId) {
+    try {
+      await fetchJson(`/api/ai/sessions/${sessionId}`, { method: 'DELETE' });
+      setChatSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      if (chatSessionId === sessionId) {
+        startNewSession();
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   async function loadSources() {
     const data = await fetchJson('/api/sources');
@@ -707,14 +899,42 @@ function App() {
   }, [sessionAnalysis.open, patternDrilldown.open, syncCenterOpen, annotation.open, questionReview.open]);
 
   useEffect(() => {
+    function handleEscape(event) {
+      if (event.key !== 'Escape') return;
+      if (annotation.open) { handleCloseAnnotation(); return; }
+      if (questionReview.open) { handleCloseQuestionReview(); return; }
+      if (patternDrilldown.open) { setPatternDrilldown((prev) => ({ ...prev, open: false })); return; }
+      if (sessionAnalysis.open) { handleCloseSessionAnalysis(); return; }
+      if (syncCenterOpen) { setSyncCenterOpen(false); return; }
+    }
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [annotation.open, questionReview.open, patternDrilldown.open, sessionAnalysis.open, syncCenterOpen]);
+
+  useEffect(() => {
     setAiReview('');
     setAiQuestion('');
     setAiMessages([buildCoachGreeting(aiScopeLabel)]);
+    setChatSessionId(null);
+    // Load most recent session or create one
+    loadCoachSessions().then((sessions) => {
+      if (sessions.length > 0) {
+        loadSessionMessages(sessions[0].id);
+      }
+    });
   }, [aiScopeLabel]);
 
   useEffect(() => {
     aiChatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [aiMessages, isAskingAi]);
+
+  // Auto-apply error log filters on change (debounced for search input)
+  useEffect(() => {
+    const id = setTimeout(() => {
+      loadErrorsByFilters(filters).catch(() => {});
+    }, filters.search ? 350 : 0);
+    return () => clearTimeout(id);
+  }, [filters.subject, filters.difficulty, filters.confidence, filters.search, filters.mistakeTag, filters.topic]);
 
   async function handleOpenChrome() {
     if (!selectedSource) return;
@@ -1580,8 +1800,7 @@ function App() {
   }
 
   function handleResetAiChat() {
-    setAiMessages([buildCoachGreeting(aiScopeLabel)]);
-    setAiQuestion('');
+    startNewSession();
   }
 
   function handleAiComposerKeyDown(event) {
@@ -1597,9 +1816,7 @@ function App() {
     if (!question) return;
 
     const nextUserMessage = { role: 'user', content: question };
-    const nextHistory = [...aiMessages, nextUserMessage];
-
-    setAiMessages(nextHistory);
+    setAiMessages((prev) => [...prev, nextUserMessage]);
     setAiQuestion('');
     setIsAskingAi(true);
 
@@ -1610,9 +1827,15 @@ function App() {
         body: JSON.stringify({
           runId: aiRunId,
           question,
-          history: nextHistory.slice(-8),
+          sessionId: chatSessionId,
         }),
       });
+
+      // Store session ID from response (auto-created if none was sent)
+      if (result.sessionId && result.sessionId !== chatSessionId) {
+        setChatSessionId(result.sessionId);
+        loadCoachSessions();
+      }
 
       const answer = String(result.answer || '').trim() || 'No answer generated.';
       setAiMessages((prev) => [...prev, { role: 'assistant', content: answer }]);
@@ -1632,142 +1855,211 @@ function App() {
 
   return (
     <main className="page-shell">
-      <Card className="hero card">
-        <div className="section-header">
-          <p className="eyebrow">Local GMAT Analytics</p>
-          <h1>Question Metadata Dashboard</h1>
-          <button
-            type="button"
-            className="collapse-toggle"
-            onClick={() => toggleSection('hero')}
-            aria-expanded={!collapsedSections.hero}
-            aria-label="Toggle hero section"
-          >
-            {collapsedSections.hero ? '▶' : '▼'}
-          </button>
+      <header className="top-bar">
+        <div className="top-bar-left">
+          <h1 className="top-bar-title">GMAT Analytics</h1>
+          {status.message && (
+            <span className={`top-bar-status${status.isError ? ' error' : ''}`}>{status.message}</span>
+          )}
         </div>
-        {!collapsedSections.hero && (
-          <>
-            <p className="muted">
-              Track Q, V, and DI performance using Subject and Category metadata from synced GMAT practice.
-            </p>
-            <div className="hero-actions">
-              <Button type="button" onClick={() => setSyncCenterOpen(true)}>
-                Sync GMAT Practice
-              </Button>
-              <Button variant="outline" asChild>
-                <a
-                  href="https://gmat.targettestprep.com/gmat_focus_score_chart_and_calculator"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  Open Score Calculator
-                </a>
-              </Button>
-              <p className={`status${status.isError ? ' error' : ''}`}>{status.message}</p>
-            </div>
-          </>
-        )}
-      </Card>
+        <div className="top-bar-actions">
+          <Button size="sm" type="button" onClick={() => setSyncCenterOpen(true)}>
+            Sync Practice
+          </Button>
+          <Button variant="outline" size="sm" asChild>
+            <a
+              href="https://gmat.targettestprep.com/gmat_focus_score_chart_and_calculator"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Score Calculator
+            </a>
+          </Button>
+        </div>
+      </header>
 
-      <Card className="card ai-coach-card">
-        <div className="ai-coach-head">
-          <div>
-            <p className="eyebrow">LangGraph Agent</p>
-            <h2>AI Performance Reviewer + Q&A Coach</h2>
-            <p className="muted">{`Scope: ${aiScopeLabel}`}</p>
+      {/* Section nav */}
+      <nav className="section-nav" aria-label="Jump to section">
+        <a href="#dashboard" className="section-nav-link">Dashboard</a>
+        <a href="#categories" className="section-nav-link">Categories</a>
+        <a href="#sessions" className="section-nav-link">Sessions</a>
+        <a href="#errors" className="section-nav-link">Error Log</a>
+      </nav>
+
+      {/* Floating AI Coach FAB */}
+      <button
+        type="button"
+        className={`coach-fab ${coachOpen ? 'coach-fab--open' : ''}`}
+        onClick={() => setCoachOpen((v) => !v)}
+        aria-label={coachOpen ? 'Close AI Coach' : 'Open AI Coach'}
+      >
+        {coachOpen ? '\u2715' : '\uD83E\uDD16'}
+      </button>
+
+      {/* AI Coach floating panel */}
+      <div className={`coach-panel ${coachOpen ? 'coach-panel--open' : ''}`} role="dialog" aria-label="AI Coach" aria-modal={coachOpen} inert={coachOpen ? undefined : ''}>
+        <div className="coach-panel-header">
+          <div className="coach-panel-title">
+            <span className="coach-panel-badge">AI Coach</span>
+            <span className="coach-panel-scope">{aiScopeLabel}</span>
           </div>
-          <div className="ai-coach-actions">
-            <Button type="button" onClick={handleGenerateAiReview} disabled={isGeneratingAiReview}>
-              {isGeneratingAiReview ? 'Generating Review...' : 'Generate Review'}
-            </Button>
+          <div className="coach-panel-actions">
             <button
               type="button"
-              className="collapse-toggle"
-              onClick={() => toggleSection('aiCoach')}
-              aria-expanded={!collapsedSections.aiCoach}
-              aria-label="Toggle AI Coach section"
+              className="coach-sessions-toggle"
+              onClick={() => { setShowSessionList((v) => !v); if (!showSessionList) loadCoachSessions(); }}
+              aria-label="Session history"
+              title="Session history"
             >
-              {collapsedSections.aiCoach ? '▶' : '▼'}
+              {'\u2630'}
+            </button>
+            <button type="button" className="coach-panel-close" onClick={() => setCoachOpen(false)} aria-label="Close">
+              {'\u2715'}
             </button>
           </div>
         </div>
 
-        {!collapsedSections.aiCoach && (
-          <>
-            <label>
-              Review focus (optional)
-              <Textarea
-                rows={2}
-                value={aiFocus}
-                placeholder="Example: Focus on Data Insights timing and low-confidence misses."
-                onChange={(event) => setAiFocus(event.target.value)}
-              />
-            </label>
+        {showSessionList && (
+          <div className="coach-session-list">
+            <div className="coach-session-list-header">
+              <strong>Sessions</strong>
+              <button type="button" className="coach-new-session-btn" onClick={() => { startNewSession(); setShowSessionList(false); }}>
+                + New Chat
+              </button>
+            </div>
+            <div className="coach-session-list-items">
+              {chatSessions.length === 0 && <p className="muted" style={{ padding: '8px 12px', fontSize: '0.8rem' }}>No sessions yet.</p>}
+              {chatSessions.map((s) => (
+                <div
+                  key={s.id}
+                  className={`coach-session-item ${s.id === chatSessionId ? 'coach-session-item--active' : ''}`}
+                >
+                  <button
+                    type="button"
+                    className="coach-session-item-btn"
+                    onClick={() => handleSelectSession(s.id)}
+                    title={s.title || 'Untitled session'}
+                  >
+                    <span className="coach-session-item-title">{s.title || 'Untitled session'}</span>
+                    <span className="coach-session-item-meta">
+                      {s.message_count || 0} msgs &middot; {s.updated_at ? new Date(s.updated_at + 'Z').toLocaleDateString() : ''}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="coach-session-item-delete"
+                    onClick={(e) => { e.stopPropagation(); handleDeleteSession(s.id); }}
+                    aria-label="Delete session"
+                    title="Delete session"
+                  >
+                    {'\u2715'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
-            <div className="ai-review-block">
-              <h3>Performance Review</h3>
-              <div className="ai-review-output">
+        <nav className="coach-tabs">
+          <button
+            type="button"
+            className={`coach-tab ${coachTab === 'chat' ? 'coach-tab--active' : ''}`}
+            onClick={() => setCoachTab('chat')}
+          >
+            Chat
+          </button>
+          <button
+            type="button"
+            className={`coach-tab ${coachTab === 'review' ? 'coach-tab--active' : ''}`}
+            onClick={() => setCoachTab('review')}
+          >
+            Review
+          </button>
+        </nav>
+
+        <div className="coach-panel-body">
+          {coachTab === 'chat' && (
+            <>
+              <div className="coach-chat-log" role="log" aria-live="polite">
+                {aiMessages.map((message, idx) => (
+                  <article key={`ai-${idx}`} className={`ai-message ${message.role === 'assistant' ? 'assistant' : 'user'}`}>
+                    <strong>{message.role === 'assistant' ? 'Coach' : 'You'}</strong>
+                    <p>{message.content}</p>
+                  </article>
+                ))}
+                {isAskingAi && (
+                  <article className="ai-message assistant typing">
+                    <strong>Coach</strong>
+                    <p>Thinking...</p>
+                  </article>
+                )}
+                <div ref={aiChatEndRef} />
+              </div>
+              <div className="coach-quick-prompts">
+                {AI_COACH_QUICK_PROMPTS.map((prompt) => (
+                  <button key={prompt} type="button" className="ai-chip" onClick={() => handleAskAi(prompt)}>
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          {coachTab === 'review' && (
+            <div className="coach-review-body">
+              <label>
+                Review focus (optional)
+                <Textarea
+                  rows={2}
+                  value={aiFocus}
+                  placeholder="Example: Focus on Data Insights timing and low-confidence misses."
+                  onChange={(event) => setAiFocus(event.target.value)}
+                />
+              </label>
+              <Button type="button" className="btn-primary" onClick={handleGenerateAiReview} disabled={isGeneratingAiReview}>
+                {isGeneratingAiReview ? 'Generating...' : 'Generate Review'}
+              </Button>
+              <div className="coach-review-output">
                 {aiReview ? <pre>{aiReview}</pre> : <p className="muted">Generate a review to get personalized recommendations.</p>}
               </div>
             </div>
+          )}
+        </div>
 
-            <div className="ai-chat-block">
-              <h3>Ask Follow-up Questions</h3>
-              <div className="ai-chat-shell">
-                <div className="ai-chat-toolbar">
-                  <p className="muted">Chat with your coach about weak areas, timing, and daily drills.</p>
-                  <Button variant="outline" size="sm" type="button" onClick={handleResetAiChat}>
-                    Clear Chat
-                  </Button>
-                </div>
-                <div className="ai-chat-log" role="log" aria-live="polite">
-                  {aiMessages.map((message, idx) => (
-                    <article key={`ai-${idx}`} className={`ai-message ${message.role === 'assistant' ? 'assistant' : 'user'}`}>
-                      <strong>{message.role === 'assistant' ? 'Coach' : 'You'}</strong>
-                      <p>{message.content}</p>
-                    </article>
-                  ))}
-                  {isAskingAi && (
-                    <article className="ai-message assistant typing">
-                      <strong>Coach</strong>
-                      <p>Thinking...</p>
-                    </article>
-                  )}
-                  <div ref={aiChatEndRef} />
-                </div>
-                <div className="ai-chat-quick">
-                  {AI_COACH_QUICK_PROMPTS.map((prompt) => (
-                    <button key={prompt} type="button" className="ai-chip" onClick={() => handleAskAi(prompt)}>
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
-                <div className="ai-chat-composer">
-                  <Textarea
-                    rows={2}
-                    value={aiQuestion}
-                    placeholder="Type your question and press Enter to send (Shift+Enter for new line)"
-                    onChange={(event) => setAiQuestion(event.target.value)}
-                    onKeyDown={handleAiComposerKeyDown}
-                  />
-                  <Button type="button" onClick={() => handleAskAi()} disabled={isAskingAi || !String(aiQuestion || '').trim()}>
-                    {isAskingAi ? 'Sending...' : 'Send'}
-                  </Button>
-                </div>
-              </div>
+        <div className="coach-panel-footer">
+          {coachTab === 'chat' && (
+            <div className="coach-composer">
+              <Textarea
+                rows={1}
+                value={aiQuestion}
+                placeholder="Ask your coach..."
+                onChange={(event) => setAiQuestion(event.target.value)}
+                onKeyDown={handleAiComposerKeyDown}
+              />
+              <button
+                type="button"
+                className="coach-send-btn"
+                onClick={() => handleAskAi()}
+                disabled={isAskingAi || !String(aiQuestion || '').trim()}
+                aria-label="Send"
+              >
+                {isAskingAi ? '...' : '\u2191'}
+              </button>
             </div>
-          </>
-        )}
-      </Card>
+          )}
+          {coachTab === 'chat' && (
+            <button type="button" className="coach-reset-link" onClick={handleResetAiChat}>
+              New Chat
+            </button>
+          )}
+        </div>
+      </div>
 
-      <Card className="card topic-dashboard">
-        <div className="topic-dashboard-head">
-          <div>
-            <p className="eyebrow">Performance Dashboard</p>
-            <h2>Metadata Breakdown</h2>
-            <p className="muted">Performance grouped by Subject and Category.</p>
-          </div>
+      {coachOpen && <div className="coach-backdrop" onClick={() => setCoachOpen(false)} />}
+
+      <Card id="dashboard" className="card topic-dashboard">
+        <div className="section-header">
+          <h2>Performance by Subject</h2>
           <button
             type="button"
             className="collapse-toggle"
@@ -1775,140 +2067,83 @@ function App() {
             aria-expanded={!collapsedSections.topicDashboard}
             aria-label="Toggle Topic Dashboard section"
           >
-            {collapsedSections.topicDashboard ? '▶' : '▼'}
+            {collapsedSections.topicDashboard ? '\u002B' : '\u2212'}
           </button>
         </div>
 
         {!collapsedSections.topicDashboard && (
-          <>
-            <div className="topic-score-grid">
-              {!subjectCards.length && <article className="topic-score-card muted">No subject data yet.</article>}
-              {subjectCards.map((card) => {
-                const accuracy = Math.max(0, Math.min(100, Number(card.accuracy_pct || 0)));
-                const errorRate = Math.max(0, Number((100 - accuracy).toFixed(1)));
-                return (
-                  <article key={card.family} className="topic-score-card">
-                    <span className="topic-chip">{normalizeSubjectFamilyDisplay(card.family)}</span>
-                    <strong className="topic-score">{formatPercent(accuracy)}</strong>
-                    <span className="topic-score-meta">{`${card.correct}/${card.total} correct · Avg ${formatDurationSeconds(card.avg_time_sec)}`}</span>
-                    <div className="topic-track">
-                      <div className="topic-track-fill" style={{ width: `${accuracy}%` }} />
-                    </div>
-                    <span className="topic-score-meta">{`${errorRate}% error rate`}</span>
-                  </article>
-                );
-              })}
-            </div>
-
-            <div className="topic-insight-grid">
-              <article className="topic-panel">
-                <h3>Accuracy vs Error Rate</h3>
-                <ul className="accuracy-rows">
-                  {!subjectCards.length && <li className="metric-empty">No data yet</li>}
-                  {subjectCards.map((card) => {
-                    const accuracy = Math.max(0, Math.min(100, Number(card.accuracy_pct || 0)));
-                    const errorRate = Math.max(0, Number((100 - accuracy).toFixed(1)));
-                    return (
-                      <li key={`acc-${card.family}`}>
-                        <div className="accuracy-label">
-                          <span>{normalizeSubjectFamilyDisplay(card.family)}</span>
-                          <strong>{`${formatPercent(accuracy)} / ${formatPercent(errorRate)}`}</strong>
-                        </div>
-                        <div className="accuracy-bar">
-                          <div className="accuracy-fill" style={{ width: `${accuracy}%` }} />
-                          <div className="error-fill" style={{ width: `${errorRate}%` }} />
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </article>
-
-              <article className="topic-panel mastery-panel">
-                <h3>Overall Mastery</h3>
-                <div
-                  className="mastery-ring"
-                  style={{
-                    background: `conic-gradient(var(--accent) 0 ${overallMastery}%, rgba(61, 69, 65, 0.14) ${overallMastery}% 100%)`,
-                  }}
-                >
-                  <div className="mastery-inner">
-                    <strong>{formatPercent(overallMastery)}</strong>
-                    <span>weighted</span>
+          <div className="dashboard-strip">
+            {!subjectCards.length && <p className="muted">Sync a practice session to see subject performance here.</p>}
+            {subjectCards.length > 0 && (
+              <div className="dashboard-overall">
+                <span className="dashboard-overall-label">Overall</span>
+                <strong className="dashboard-overall-value">{formatPercent(overallMastery)}</strong>
+              </div>
+            )}
+            {subjectCards.map((card) => {
+              const accuracy = Math.max(0, Math.min(100, Number(card.accuracy_pct || 0)));
+              return (
+                <article key={card.family} className="dashboard-subject">
+                  <div className="dashboard-subject-head">
+                    <span className="dashboard-subject-name">{normalizeSubjectFamilyDisplay(card.family)}</span>
+                    <strong className="dashboard-subject-pct">{formatPercent(accuracy)}</strong>
                   </div>
-                </div>
-                <div className="mastery-legend">
-                  {subjectCards.map((card) => (
-                    <div key={`m-${card.family}`}>
-                      <span>{normalizeSubjectFamilyDisplay(card.family)}</span>
-                      <strong>{formatPercent(card.accuracy_pct)}</strong>
-                    </div>
-                  ))}
-                </div>
-              </article>
-            </div>
-          </>
+                  <div className="dashboard-subject-bar">
+                    <div className="dashboard-subject-fill" style={{ width: `${accuracy}%` }} />
+                  </div>
+                  <span className="dashboard-subject-meta">{card.correct}/{card.total} · {formatDurationSeconds(card.avg_time_sec)} avg</span>
+                </article>
+              );
+            })}
+          </div>
         )}
       </Card>
 
-      <Card className="card">
+      <Card id="categories" className="card">
         <div className="section-header">
           <h2>Category Breakdown</h2>
-          <button
-            type="button"
-            className="collapse-toggle"
-            onClick={() => toggleSection('categoryBreakdown')}
-            aria-expanded={!collapsedSections.categoryBreakdown}
-            aria-label="Toggle Category Detailed Breakdown section"
-          >
-            {collapsedSections.categoryBreakdown ? '▶' : '▼'}
-          </button>
+          <div className="section-header-actions">
+            <button
+              type="button"
+              className={`difficulty-toggle ${showDifficultyCols ? 'difficulty-toggle--active' : ''}`}
+              onClick={() => setShowDifficultyCols((v) => !v)}
+            >
+              {showDifficultyCols ? 'Hide' : 'Show'} Difficulty
+            </button>
+            <button
+              type="button"
+              className="collapse-toggle"
+              onClick={() => toggleSection('categoryBreakdown')}
+              aria-expanded={!collapsedSections.categoryBreakdown}
+              aria-label="Toggle Category Detailed Breakdown section"
+            >
+              {collapsedSections.categoryBreakdown ? '\u002B' : '\u2212'}
+            </button>
+          </div>
         </div>
         {!collapsedSections.categoryBreakdown && (
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('subject_family')}>
-                    Subject {sortIndicator(categoryBreakdownSort, 'subject_family')}
-                  </th>
-                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('category')}>
-                    Category {sortIndicator(categoryBreakdownSort, 'category')}
-                  </th>
-                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('total_questions')}>
-                    Total Questions {sortIndicator(categoryBreakdownSort, 'total_questions')}
-                  </th>
-                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('correct_count')}>
-                    Correct {sortIndicator(categoryBreakdownSort, 'correct_count')}
-                  </th>
-                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('incorrect_count')}>
-                    Incorrect {sortIndicator(categoryBreakdownSort, 'incorrect_count')}
-                  </th>
-                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('accuracy_pct')}>
-                    Accuracy {sortIndicator(categoryBreakdownSort, 'accuracy_pct')}
-                  </th>
-                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('avg_time_sec')}>
-                    Avg Time / Q {sortIndicator(categoryBreakdownSort, 'avg_time_sec')}
-                  </th>
-                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('hard')}>
-                    Hard (Q / Acc / Avg) {sortIndicator(categoryBreakdownSort, 'hard')}
-                  </th>
-                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('medium')}>
-                    Medium (Q / Acc / Avg) {sortIndicator(categoryBreakdownSort, 'medium')}
-                  </th>
-                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('easy')}>
-                    Easy (Q / Acc / Avg) {sortIndicator(categoryBreakdownSort, 'easy')}
-                  </th>
-                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('status')}>
-                    Status {sortIndicator(categoryBreakdownSort, 'status')}
-                  </th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('subject_family')}>Subject {sortIndicator(categoryBreakdownSort, 'subject_family')}</th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('category')}>Category {sortIndicator(categoryBreakdownSort, 'category')}</th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('total_questions')}>Total {sortIndicator(categoryBreakdownSort, 'total_questions')}</th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('correct_count')}>Correct {sortIndicator(categoryBreakdownSort, 'correct_count')}</th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('incorrect_count')}>Wrong {sortIndicator(categoryBreakdownSort, 'incorrect_count')}</th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('accuracy_pct')}>Accuracy {sortIndicator(categoryBreakdownSort, 'accuracy_pct')}</th>
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('avg_time_sec')}>Avg Time {sortIndicator(categoryBreakdownSort, 'avg_time_sec')}</th>
+                  {showDifficultyCols && <th className="sortable" onClick={() => handleCategoryBreakdownSort('hard')}>Hard {sortIndicator(categoryBreakdownSort, 'hard')}</th>}
+                  {showDifficultyCols && <th className="sortable" onClick={() => handleCategoryBreakdownSort('medium')}>Medium {sortIndicator(categoryBreakdownSort, 'medium')}</th>}
+                  {showDifficultyCols && <th className="sortable" onClick={() => handleCategoryBreakdownSort('easy')}>Easy {sortIndicator(categoryBreakdownSort, 'easy')}</th>}
+                  <th className="sortable" onClick={() => handleCategoryBreakdownSort('status')}>Status {sortIndicator(categoryBreakdownSort, 'status')}</th>
                   <th>Drilldown</th>
                 </tr>
               </thead>
               <tbody>
                 {!categoryRows.length && (
                   <tr>
-                    <td colSpan="12">No category data yet.</td>
+                    <td colSpan={showDifficultyCols ? 12 : 9}>Sync practice sessions to see category-level breakdowns.</td>
                   </tr>
                 )}
                 {sortedCategoryRows.map((row) => {
@@ -1919,16 +2154,16 @@ function App() {
                   return (
                     <Fragment key={drilldownKey}>
                       <tr>
-                        <td>{formatMaybe(normalizeSubjectFamilyDisplay(row.subject_family))}</td>
+                        <td className="section-col"><SubjectCell row={row} /></td>
                         <td>{formatMaybe(normalizedCategoryCode(row))}</td>
                         <td>{formatMaybe(row.total_questions)}</td>
                         <td>{formatMaybe(row.correct_count)}</td>
                         <td>{formatMaybe(row.incorrect_count)}</td>
                         <td>{formatPercent(row.accuracy_pct)}</td>
                         <td>{formatDurationSeconds(row.avg_time_sec)}</td>
-                        <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>
-                        <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>
-                        <td>{formatDifficultyStat(row.easy_total, row.easy_accuracy_pct, row.easy_avg_time_sec)}</td>
+                        {showDifficultyCols && <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>}
+                        {showDifficultyCols && <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>}
+                        {showDifficultyCols && <td>{formatDifficultyStat(row.easy_total, row.easy_accuracy_pct, row.easy_avg_time_sec)}</td>}
                         <td>
                           <Badge
                             variant={statusVariantFromAccuracy(row.accuracy_pct)}
@@ -1955,7 +2190,7 @@ function App() {
                       </tr>
                       {isExpanded && (
                         <tr className="category-drilldown-row">
-                          <td colSpan="12">
+                          <td colSpan={showDifficultyCols ? 12 : 9}>
                             <div className="subcategory-drilldown-panel">
                               <div className="subcategory-drilldown-head">
                                 <strong>
@@ -2040,7 +2275,7 @@ function App() {
         )}
       </Card>
 
-      <Card className="card">
+      <Card id="sessions" className="card">
         <div className="section-header-filters">
           <h2>Performance by Session</h2>
           <div className="filter-row session-filters">
@@ -2088,7 +2323,7 @@ function App() {
               aria-expanded={!collapsedSections.performanceBySession}
               aria-label="Toggle Performance by Session section"
             >
-              {collapsedSections.performanceBySession ? '▶' : '▼'}
+              {collapsedSections.performanceBySession ? '\u002B' : '\u2212'}
             </button>
           </div>
         </div>
@@ -2098,48 +2333,13 @@ function App() {
               <table>
                 <thead>
                   <tr>
-                    <th
-                      className="sortable"
-                      onClick={() => handleSessionSort('session_date')}
-                    >
-                      Date {sessionSort.key === 'session_date' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
-                    <th
-                      className="sortable"
-                      onClick={() => handleSessionSort('session_external_id')}
-                    >
-                      Session ID {sessionSort.key === 'session_external_id' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
-                    <th
-                      className="sortable"
-                      onClick={() => handleSessionSort('subject')}
-                    >
-                      Subject {sessionSort.key === 'subject' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
-                    <th
-                      className="sortable"
-                      onClick={() => handleSessionSort('question_count_display')}
-                    >
-                      Questions {sessionSort.key === 'question_count_display' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
-                    <th
-                      className="sortable"
-                      onClick={() => handleSessionSort('error_count_display')}
-                    >
-                      Errors {sessionSort.key === 'error_count_display' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
-                    <th
-                      className="sortable"
-                      onClick={() => handleSessionSort('answered_accuracy_pct')}
-                    >
-                      Accuracy % {sessionSort.key === 'answered_accuracy_pct' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
-                    <th
-                      className="sortable"
-                      onClick={() => handleSessionSort('avg_time_sec')}
-                    >
-                      Avg Time {sessionSort.key === 'avg_time_sec' && (sessionSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
+                    <th className="sortable" onClick={() => handleSessionSort('session_date')}>Date {sortIndicator(sessionSort, 'session_date')}</th>
+                    <th className="sortable" onClick={() => handleSessionSort('session_external_id')}>Session ID {sortIndicator(sessionSort, 'session_external_id')}</th>
+                    <th className="sortable" onClick={() => handleSessionSort('subject')}>Subject {sortIndicator(sessionSort, 'subject')}</th>
+                    <th className="sortable" onClick={() => handleSessionSort('question_count_display')}>Questions {sortIndicator(sessionSort, 'question_count_display')}</th>
+                    <th className="sortable" onClick={() => handleSessionSort('error_count_display')}>Errors {sortIndicator(sessionSort, 'error_count_display')}</th>
+                    <th className="sortable" onClick={() => handleSessionSort('answered_accuracy_pct')}>Accuracy % {sortIndicator(sessionSort, 'answered_accuracy_pct')}</th>
+                    <th className="sortable" onClick={() => handleSessionSort('avg_time_sec')}>Avg Time {sortIndicator(sessionSort, 'avg_time_sec')}</th>
                     <th>Hard (Q / Acc / Avg)</th>
                     <th>Medium (Q / Acc / Avg)</th>
                     <th>Easy (Q / Acc / Avg)</th>
@@ -2149,14 +2349,14 @@ function App() {
                 <tbody>
                   {processedSessions.length === 0 && (
                     <tr>
-                      <td colSpan="11">No sessions found.</td>
+                      <td colSpan="11">No sessions yet. Use "Sync GMAT Practice" above to import your first session.</td>
                     </tr>
                   )}
                   {processedSessions.map((row) => (
                     <tr key={`${row.session_external_id}-${row.run_id}`}>
                       <td>{formatDate(row.session_date)}</td>
                       <td>{formatMaybe(row.session_external_id)}</td>
-                      <td>{formatMaybe(normalizeSubjectCodeValue(row.subject))}</td>
+                      <td className="section-col"><SubjectCell row={row} /></td>
                       <td>{formatMaybe(row.question_count_display)}</td>
                       <td>{formatMaybe(row.error_count_display)}</td>
                       <td>{formatPercent(row.answered_accuracy_pct)}</td>
@@ -2205,7 +2405,7 @@ function App() {
         )}
       </Card>
 
-      <Card className="card">
+      <Card id="errors" className="card">
         <div className="section-header">
           <h2>Error Log</h2>
           <button
@@ -2215,12 +2415,12 @@ function App() {
             aria-expanded={!collapsedSections.errorLog}
             aria-label="Toggle Error Log section"
           >
-            {collapsedSections.errorLog ? '▶' : '▼'}
+            {collapsedSections.errorLog ? '\u002B' : '\u2212'}
           </button>
         </div>
         {!collapsedSections.errorLog && (
           <>
-            <form className="filter-row" onSubmit={handleApplyFilter}>
+            <div className="filter-row">
                 <Select
                   value={filters.subject}
                   onChange={(event) => setFilters((prev) => ({ ...prev, subject: event.target.value }))}
@@ -2251,7 +2451,7 @@ function App() {
                   <option value="not selected">not selected</option>
                 </Select>
                 <Input
-                  placeholder="Subcategory, Q Code, or stem text"
+                  placeholder="Search subcategory, Q Code, or stem..."
                   value={filters.search}
                   onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))}
                 />
@@ -2264,42 +2464,32 @@ function App() {
                     <option key={tag} value={tag}>{tag}</option>
                   ))}
                 </Select>
-                <Button variant="outline" type="submit">
-                  Apply Filter
-                </Button>
-            </form>
+                {(filters.subject || filters.difficulty || filters.confidence || filters.search || filters.mistakeTag) && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setFilters({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '' })}
+                  >
+                    Clear
+                  </Button>
+                )}
+            </div>
 
             <div className="table-wrap error-log-table-wrap">
               <table className="review-table error-log-table">
                 <thead>
                   <tr>
-                    <th className="sortable" onClick={() => handleErrorSort('session_date')}>
-                      Date {errorSort.key === 'session_date' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
-                    <th className="sortable" onClick={() => handleErrorSort('session_external_id')}>
-                      Session {errorSort.key === 'session_external_id' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
-                    <th className="sortable section-col" onClick={() => handleErrorSort('subject')}>
-                      Subject {errorSort.key === 'subject' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
+                    <th className="sortable" onClick={() => handleErrorSort('session_date')}>Date {sortIndicator(errorSort, 'session_date')}</th>
+                    <th className="sortable" onClick={() => handleErrorSort('session_external_id')}>Session {sortIndicator(errorSort, 'session_external_id')}</th>
+                    <th className="sortable section-col" onClick={() => handleErrorSort('subject')}>Subject {sortIndicator(errorSort, 'subject')}</th>
                     <th className="category-col">Category</th>
-                    <th className="sortable topic-col" onClick={() => handleErrorSort('topic')}>
-                      Subcategory {errorSort.key === 'topic' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
-                    <th className="sortable" onClick={() => handleErrorSort('difficulty')}>
-                      Difficulty {errorSort.key === 'difficulty' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
-                    <th className="sortable" onClick={() => handleErrorSort('q_code')}>
-                      Q Code {errorSort.key === 'q_code' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
+                    <th className="sortable topic-col" onClick={() => handleErrorSort('topic')}>Subcategory {sortIndicator(errorSort, 'topic')}</th>
+                    <th className="sortable" onClick={() => handleErrorSort('difficulty')}>Difficulty {sortIndicator(errorSort, 'difficulty')}</th>
+                    <th className="sortable" onClick={() => handleErrorSort('q_code')}>Q Code {sortIndicator(errorSort, 'q_code')}</th>
                     <th className="response-col">Response</th>
                     <th>Redo</th>
-                    <th className="sortable" onClick={() => handleErrorSort('time_sec')}>
-                      Time (min:sec) {errorSort.key === 'time_sec' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
-                    <th className="sortable" onClick={() => handleErrorSort('mistake_type')}>
-                      Mistake Type {errorSort.key === 'mistake_type' && (errorSort.order === 'asc' ? '↑' : '↓')}
-                    </th>
+                    <th className="sortable" onClick={() => handleErrorSort('time_sec')}>Time (min:sec) {sortIndicator(errorSort, 'time_sec')}</th>
+                    <th className="sortable" onClick={() => handleErrorSort('mistake_type')}>Mistake Type {sortIndicator(errorSort, 'mistake_type')}</th>
                     <th className="notes-col">Notes</th>
                     <th className="action-col annotate-col">Annotate</th>
                     <th className="action-col open-col">Review</th>
@@ -2308,7 +2498,7 @@ function App() {
                 <tbody>
                   {errors.length === 0 && (
                     <tr>
-                      <td colSpan="14">No error rows match this filter.</td>
+                      <td colSpan="14">No errors match the current filters. Try adjusting or clearing the filters above.</td>
                     </tr>
                   )}
                   {errors.map((row) => (
@@ -2643,7 +2833,7 @@ function App() {
 
       {sessionAnalysis.open && (
         <div
-          className="analysis-overlay session-analysis-overlay"
+          className="analysis-overlay"
           role="dialog"
           aria-modal="true"
           aria-label="Session Analysis"
@@ -2658,52 +2848,33 @@ function App() {
               </Button>
             </div>
 
-            {sessionAnalysis.loading && <p className="muted">Loading session analysis...</p>}
-            {sessionAnalysis.error && <p className="error">{sessionAnalysis.error}</p>}
+            {sessionAnalysis.loading && <p className="muted loading-pulse">Loading session data...</p>}
+            {sessionAnalysis.error && <p className="status error">{sessionAnalysis.error}</p>}
 
             {!sessionAnalysis.loading && !sessionAnalysis.error && sessionAnalysis.data?.session && (
               <>
-                <div className="summary-grid">
-                  <div className="summary-item">
-                    <span>Date</span>
-                    <strong>{formatDate(sessionAnalysis.data.session.session_date)}</strong>
+                <div className="session-stats-primary">
+                  <div className="session-stat-hero">
+                    <span>Accuracy</span>
+                    <strong>{formatPercent(getSessionAnsweredAccuracy(sessionAnalysis.data.session))}</strong>
                   </div>
-                  <div className="summary-item">
-                    <span>Subject</span>
-                    <strong>{formatMaybe(normalizeSubjectCodeValue(sessionAnalysis.data.session.subject))}</strong>
-                  </div>
-                  <div className="summary-item">
+                  <div className="session-stat-hero">
                     <span>Questions</span>
                     <strong>{formatMaybe(getSessionQuestionCount(sessionAnalysis.data.session))}</strong>
                   </div>
-                  <div className="summary-item">
-                    <span>Unanswered</span>
-                    <strong>{formatMaybe(getSessionUnansweredCount(sessionAnalysis.data.session))}</strong>
-                  </div>
-                  <div className="summary-item">
-                    <span>Answered Accuracy</span>
-                    <strong>{formatPercent(getSessionAnsweredAccuracy(sessionAnalysis.data.session))}</strong>
-                  </div>
-                  <div className="summary-item">
-                    <span>Completion</span>
-                    <strong>{formatPercent(getSessionCompletionRate(sessionAnalysis.data.session))}</strong>
-                  </div>
-                  <div className="summary-item">
+                  <div className="session-stat-hero">
                     <span>Avg Time</span>
                     <strong>{formatDurationSeconds(sessionAnalysis.data.session.avg_time_sec)}</strong>
                   </div>
-                  <div className="summary-item">
-                    <span>Avg Correct Time</span>
-                    <strong>{formatDurationSeconds(sessionAnalysis.data.session.avg_correct_time_sec)}</strong>
-                  </div>
-                  <div className="summary-item">
-                    <span>Avg Incorrect Time</span>
-                    <strong>{formatDurationSeconds(sessionAnalysis.data.session.avg_incorrect_time_sec)}</strong>
-                  </div>
-                  <div className="summary-item">
-                    <span>Session ID</span>
-                    <strong>{formatMaybe(sessionAnalysis.data.session.session_external_id)}</strong>
-                  </div>
+                </div>
+                <div className="session-stats-secondary">
+                  <span>{formatDate(sessionAnalysis.data.session.session_date)}</span>
+                  <span>{formatMaybe(normalizeSubjectCodeValue(sessionAnalysis.data.session.subject))}</span>
+                  <span>Completion {formatPercent(getSessionCompletionRate(sessionAnalysis.data.session))}</span>
+                  <span>Unanswered {formatMaybe(getSessionUnansweredCount(sessionAnalysis.data.session))}</span>
+                  <span>Correct avg {formatDurationSeconds(sessionAnalysis.data.session.avg_correct_time_sec)}</span>
+                  <span>Wrong avg {formatDurationSeconds(sessionAnalysis.data.session.avg_incorrect_time_sec)}</span>
+                  <span>ID {formatMaybe(sessionAnalysis.data.session.session_external_id)}</span>
                 </div>
 
                 <div className="analysis-block">
@@ -2791,25 +2962,13 @@ function App() {
                         <tr>
                           <th className="section-col">Subject</th>
                           <th className="category-col">Category</th>
-                          <th className="sortable topic-col" onClick={() => handleSessionAnalysisSort('topic')}>
-                            Subcategory {sessionAnalysisSort.key === 'topic' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
-                          </th>
-                          <th className="sortable" onClick={() => handleSessionAnalysisSort('difficulty')}>
-                            Difficulty {sessionAnalysisSort.key === 'difficulty' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
-                          </th>
-                          <th className="sortable" onClick={() => handleSessionAnalysisSort('q_code')}>
-                            Q Code {sessionAnalysisSort.key === 'q_code' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
-                          </th>
+                          <th className="sortable topic-col" onClick={() => handleSessionAnalysisSort('topic')}>Subcategory {sortIndicator(sessionAnalysisSort, 'topic')}</th>
+                          <th className="sortable" onClick={() => handleSessionAnalysisSort('difficulty')}>Difficulty {sortIndicator(sessionAnalysisSort, 'difficulty')}</th>
+                          <th className="sortable" onClick={() => handleSessionAnalysisSort('q_code')}>Q Code {sortIndicator(sessionAnalysisSort, 'q_code')}</th>
                           <th className="response-col">Response</th>
-                          <th className="sortable" onClick={() => handleSessionAnalysisSort('time_sec')}>
-                            Time {sessionAnalysisSort.key === 'time_sec' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
-                          </th>
-                          <th className="sortable" onClick={() => handleSessionAnalysisSort('mistake_type')}>
-                            Mistake Type {sessionAnalysisSort.key === 'mistake_type' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
-                          </th>
-                          <th className="sortable notes-col" onClick={() => handleSessionAnalysisSort('notes')}>
-                            Notes {sessionAnalysisSort.key === 'notes' && (sessionAnalysisSort.order === 'asc' ? '↑' : '↓')}
-                          </th>
+                          <th className="sortable" onClick={() => handleSessionAnalysisSort('time_sec')}>Time {sortIndicator(sessionAnalysisSort, 'time_sec')}</th>
+                          <th className="sortable" onClick={() => handleSessionAnalysisSort('mistake_type')}>Mistake Type {sortIndicator(sessionAnalysisSort, 'mistake_type')}</th>
+                          <th className="sortable notes-col" onClick={() => handleSessionAnalysisSort('notes')}>Notes {sortIndicator(sessionAnalysisSort, 'notes')}</th>
                           <th className="action-col annotate-col">Annotate</th>
                           <th className="action-col open-col">Open</th>
                         </tr>
@@ -2817,7 +2976,7 @@ function App() {
                       <tbody>
                         {!sessionAnalysis.data.slowWrongQuestions?.length && (
                           <tr>
-                            <td colSpan="11">No wrong questions found.</td>
+                            <td colSpan="11">All questions were answered correctly in this session.</td>
                           </tr>
                         )}
                         {sortedSessionAnalysisWrongQuestions.map((row, idx) => (
@@ -2886,10 +3045,7 @@ function App() {
           <div className="analysis-dialog question-review-dialog" onClick={(event) => event.stopPropagation()}>
             <div className="analysis-shell question-review-shell">
               <div className="analysis-header">
-                <div>
-                  <p className="eyebrow">Local Question Review</p>
-                  <h2>{questionReview.row.q_code ? `Question ${questionReview.row.q_code}` : 'Question Review'}</h2>
-                </div>
+                <h2>{questionReview.row.q_code ? `Question ${questionReview.row.q_code}` : 'Question Review'}</h2>
                 <div className="analysis-actions">
                   {canonicalQuestionUrl(questionReview.row) ? (
                     <Button
@@ -2909,9 +3065,9 @@ function App() {
 
               <div className="question-review-hero">
                 <div className="question-review-meta">
-                  <span className="question-review-chip">{formatMaybe(normalizeSubjectFamilyDisplay(normalizedSubjectCode(questionReview.row)))}</span>
-                  <span className="question-review-chip">{formatMaybe(normalizedCategoryCode(questionReview.row))}</span>
-                  <span className="question-review-chip">{formatMaybe(questionReview.row.difficulty)}</span>
+                  <span className="question-review-chip chip-subject">{formatMaybe(normalizeSubjectFamilyDisplay(normalizedSubjectCode(questionReview.row)))}</span>
+                  <span className="question-review-chip chip-subject">{formatMaybe(normalizedCategoryCode(questionReview.row))}</span>
+                  <span className={`question-review-chip chip-difficulty-${String(questionReview.row.difficulty || '').toLowerCase()}`}>{formatMaybe(questionReview.row.difficulty)}</span>
                   <span className="question-review-chip">{formatMaybe(normalizedSubcategory(questionReview.row))}</span>
                   {formatResponseFormat(questionReview.row.response_format) && (
                     <span className="question-review-chip">{formatResponseFormat(questionReview.row.response_format)}</span>
@@ -2923,24 +3079,50 @@ function App() {
                     <span className="question-review-chip muted-chip">{formatTopicSource(questionReview.row.topic_source)}</span>
                   )}
                 </div>
-                <div className="question-review-stats">
-                  <div>
-                    <span>Your Answer</span>
-                    <strong>{formatMaybe(questionReview.row.my_answer || summarizeStructuredResponse(questionReview.row, 'user_value'))}</strong>
+                {getResponseSlots(questionReview.row).length > 0 ? (
+                  <div className="di-answer-summary">
+                    <div className="di-answer-summary-row di-answer-summary-header">
+                      <span>Part</span>
+                      <span>Your Answer</span>
+                      <span>Correct</span>
+                    </div>
+                    {getResponseSlots(questionReview.row).map((slot, index) => {
+                      const userVal = formatResponseValue(slot, slot?.user_value);
+                      const correctVal = formatResponseValue(slot, slot?.correct_value);
+                      const isMatch = userVal && correctVal && userVal === correctVal;
+                      return (
+                        <div key={slot?.slot_id || `row-${index}`} className={`di-answer-summary-row${isMatch ? ' di-row-correct' : userVal ? ' di-row-wrong' : ''}`}>
+                          <span className="di-part-label">{normalizeQuestionText(slot?.prompt || '') || `Part ${index + 1}`}</span>
+                          <span className="di-answer-yours">{userVal || '—'}</span>
+                          <span className="di-answer-correct">{correctVal || '—'}</span>
+                        </div>
+                      );
+                    })}
+                    <div className="di-answer-summary-footer">
+                      <div><span>Time</span><strong>{formatDurationSeconds(questionReview.row.time_sec)}</strong></div>
+                      <div><span>Confidence</span><strong>{formatMaybe(questionReview.row.confidence)}</strong></div>
+                    </div>
                   </div>
-                  <div>
-                    <span>Correct</span>
-                    <strong>{formatMaybe(questionReview.row.correct_answer || summarizeStructuredResponse(questionReview.row, 'correct_value'))}</strong>
+                ) : (
+                  <div className="question-review-stats">
+                    <div>
+                      <span>Your Answer</span>
+                      <strong>{formatMaybe(questionReview.row.my_answer || summarizeStructuredResponse(questionReview.row, 'user_value'))}</strong>
+                    </div>
+                    <div>
+                      <span>Correct</span>
+                      <strong>{formatMaybe(questionReview.row.correct_answer || summarizeStructuredResponse(questionReview.row, 'correct_value'))}</strong>
+                    </div>
+                    <div>
+                      <span>Time</span>
+                      <strong>{formatDurationSeconds(questionReview.row.time_sec)}</strong>
+                    </div>
+                    <div>
+                      <span>Confidence</span>
+                      <strong>{formatMaybe(questionReview.row.confidence)}</strong>
+                    </div>
                   </div>
-                  <div>
-                    <span>Time</span>
-                    <strong>{formatDurationSeconds(questionReview.row.time_sec)}</strong>
-                  </div>
-                  <div>
-                    <span>Confidence</span>
-                    <strong>{formatMaybe(questionReview.row.confidence)}</strong>
-                  </div>
-                </div>
+                )}
               </div>
 
               <section className="question-review-section">
@@ -2964,8 +3146,11 @@ function App() {
                         const slotOptions = Array.isArray(slot?.options) ? slot.options : [];
                         const userValue = formatResponseValue(slot, slot?.user_value);
                         const correctValue = formatResponseValue(slot, slot?.correct_value);
+                        const slotType = String(slot?.slot_type || '').toLowerCase();
+                        const isDropdown = slotType === 'dropdown';
+                        const isChoiceGrid = slotType === 'choice-grid';
                         return (
-                          <article key={slot?.slot_id || `slot-${index}`} className="response-slot-card">
+                          <article key={slot?.slot_id || `slot-${index}`} className={`response-slot-card${isDropdown ? ' slot-dropdown' : ''}${isChoiceGrid ? ' slot-choice-grid' : ''}`}>
                             <div className="response-slot-head">
                               <div>
                                 <strong>{prompt}</strong>
@@ -2973,14 +3158,22 @@ function App() {
                                   <span className="response-slot-type">{formatSlotType(slot?.slot_type)}</span>
                                 )}
                               </div>
-                              <div className="response-slot-summary">
-                                {userValue && <span>Your response: {userValue}</span>}
-                                {correctValue && <span>Correct response: {correctValue}</span>}
-                              </div>
+                              {(isDropdown && (userValue || correctValue)) ? (
+                                <div className="slot-dropdown-answers">
+                                  {userValue && <span className="slot-answer-yours">You: {userValue}</span>}
+                                  {correctValue && correctValue !== userValue && <span className="slot-answer-correct">Correct: {correctValue}</span>}
+                                  {userValue && correctValue && userValue === correctValue && <span className="slot-answer-correct">Correct</span>}
+                                </div>
+                              ) : (
+                                <div className="response-slot-summary">
+                                  {userValue && <span>Your response: {userValue}</span>}
+                                  {correctValue && <span>Correct response: {correctValue}</span>}
+                                </div>
+                              )}
                             </div>
 
                             {slotOptions.length ? (
-                              <div className="response-slot-options">
+                              <div className={`response-slot-options${isChoiceGrid ? ' slot-options-compact' : ''}`}>
                                 {slotOptions.map((option, optionIndex) => {
                                   const label = String(option?.label || '').trim();
                                   const text = normalizeQuestionText(option?.text || '') || '-';
@@ -2992,13 +3185,13 @@ function App() {
                                       className={`answer-choice-card response-option-card${isMine ? ' mine' : ''}${isCorrect ? ' correct' : ''}`}
                                     >
                                       <div className="answer-choice-head">
-                                        <strong>{label || `Option ${optionIndex + 1}`}</strong>
+                                        <strong>{label || text}</strong>
                                         <div className="answer-choice-flags">
                                           {isMine && <span className="question-mini-chip">Your pick</span>}
                                           {isCorrect && <span className="question-mini-chip success-chip">Correct</span>}
                                         </div>
                                       </div>
-                                      <p>{text}</p>
+                                      {label && text !== label && <p>{text}</p>}
                                     </article>
                                   );
                                 })}

@@ -196,6 +196,28 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_questions_q_id ON question_attempts(q_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_questions_topic ON question_attempts(topic)');
   await run('CREATE INDEX IF NOT EXISTS idx_questions_difficulty ON question_attempts(difficulty)');
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS coach_sessions (
+      id TEXT PRIMARY KEY,
+      title TEXT DEFAULT '',
+      run_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS coach_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL REFERENCES coach_sessions(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_coach_messages_session ON coach_messages(session_id)');
+
   await backfillSparseQuestionAttempts();
 }
 
@@ -1086,10 +1108,12 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
       WHEN COALESCE(NULLIF(s.subject, ''), 'Unknown') = 'Verbal' THEN
         CASE
           WHEN COALESCE(NULLIF(q.topic, ''), '') IN (
-            'Main Idea', 'Detail', 'Purpose', 'Author Attitude', 'Organization', 'Application'
+            'Main Idea / Purpose', 'Detail', 'Structure / Function', 'Author View', 'Application',
+            'Main Idea', 'Purpose', 'Author Attitude', 'Organization'
           ) THEN 'RC'
           WHEN COALESCE(NULLIF(q.topic, ''), '') IN (
-            'Weaken', 'Strengthen', 'Explain', 'Inference', 'Assumption',
+            'Support', 'Attack', 'Assumption', 'Resolve', 'Argument Structure',
+            'Weaken', 'Strengthen', 'Explain', 'Assumption',
             'Boldface', 'Evaluate', 'Flaw', 'Parallel', 'Complete', 'Method'
           ) THEN 'CR'
           ELSE 'Verbal'
@@ -1098,17 +1122,138 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
       ELSE COALESCE(NULLIF(s.subject, ''), 'Unknown')
     END
   `;
+  const categoryHintExpr = `
+    CASE
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('QUANT', 'PS', 'Q') THEN 'PS'
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.category_code, ''), ''))
+      WHEN q.cat_id IN (1336803, 1336813) THEN 'PS'
+      WHEN q.cat_id IN (1337013, 1336843, 1336863) THEN 'CR'
+      WHEN q.cat_id IN (1337023, 1336833, 1336853) THEN 'RC'
+      WHEN q.cat_id IN (1336733, 1336743) THEN 'DS'
+      WHEN q.cat_id = 1336753 THEN 'MSR'
+      WHEN q.cat_id = 1336763 THEN 'TA'
+      WHEN q.cat_id = 1336773 THEN 'GI'
+      WHEN q.cat_id = 1336783 THEN 'TPA'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('QUANT', 'PS', 'Q') THEN 'PS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('QUANT', 'PS', 'Q') THEN 'PS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.subject_code, ''), '')) = 'Q' THEN 'PS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_code, ''), '')) = 'DI' THEN 'DI'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_code, ''), '')) = 'V' THEN 'V'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'Quant' THEN 'PS'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'DI' THEN 'DI'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'Verbal' THEN 'V'
+      ELSE ''
+    END
+  `;
   const topicExpr = `
     CASE
-      WHEN COALESCE(NULLIF(q.topic, ''), '') <> '' THEN q.topic
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'MSR' THEN 'Multi-Source Reasoning'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TA' THEN 'Table Analysis'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'GI' THEN 'Graphics Interpretation'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TPA' THEN 'Two-Part Analysis'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'Data Sufficiency'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'PS' THEN 'Problem Solving'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'Data Sufficiency'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'PS' THEN 'Problem Solving'
+      WHEN COALESCE(NULLIF(q.topic, ''), '') <> '' THEN
+        CASE
+          WHEN (${categoryHintExpr}) = 'CR' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Support', 'Strengthen') THEN 'Support'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Attack', 'Weaken', 'Flaw') THEN 'Attack'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Assumption', 'Evaluate') THEN 'Assumption'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Inference', 'Complete') THEN 'Inference'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Resolve', 'Explain') THEN 'Resolve'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Argument Structure', 'Boldface', 'Method', 'Parallel') THEN 'Argument Structure'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'RC' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Main Idea / Purpose', 'Main Idea', 'Purpose') THEN 'Main Idea / Purpose'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') = 'Detail' THEN 'Detail'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') = 'Inference' THEN 'Inference'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Structure / Function', 'Organization') THEN 'Structure / Function'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Author View', 'Author Attitude') THEN 'Author View'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') = 'Application' THEN 'Application'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'PS' THEN
+            CASE
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%overlapping sets%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%venn%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%set theory%' THEN 'Overlapping Sets'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%mean%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%median%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%standard deviation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%variance%' THEN 'Statistics'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%combin%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%permut%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%counting%' THEN 'Counting & Probability'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%distance%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%speed%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%work%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%time%' THEN 'Rates, Work & Motion'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%function%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%sequence%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inequal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%absolute value%' THEN 'Functions, Sequences & Inequalities'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%word problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%age problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%digit problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%mixture%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%problem solving%' THEN 'General Word Problems'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%percent%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%interest%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%fraction%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%ratio%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%proportion%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%decimal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%average%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%fdp%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%remainder%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%multiple%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%factor%' THEN 'Arithmetic, FDP & Ratios'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%triangle%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%circle%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%area%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%volume%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%coordinate%' THEN 'Geometry'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%number properties%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%divis%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%integer%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%odd%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%even%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%prime%' THEN 'Number Properties'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%equation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%quadratic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%linear%' THEN 'Algebra & Equations'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'DS' THEN
+            CASE
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%data sufficiency%' THEN 'Unclear Topic'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%unclear topic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%poor quality%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%bad question%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%ambiguous%' THEN 'Unclear Topic'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%overlapping sets%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%venn%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%set theory%' THEN 'Overlapping Sets'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%mean%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%median%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%standard deviation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%variance%' THEN 'Statistics'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%combin%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%permut%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%counting%' THEN 'Counting & Probability'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%distance%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%speed%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%work%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%time%' THEN 'Rates, Work & Motion'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%function%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%sequence%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inequal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%absolute value%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%custom character%' THEN 'Functions, Sequences & Inequalities'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%word problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%age problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%digit problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%mixture%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%problem solving%' THEN 'General Word Problems'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%percent%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%interest%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%fraction%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%ratio%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%proportion%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%decimal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%average%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%fdp%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%remainder%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%multiple%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%factor%' THEN 'Arithmetic, FDP & Ratios'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%triangle%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%circle%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%area%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%volume%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%coordinate%' THEN 'Geometry'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%number properties%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%divis%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%integer%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%odd%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%even%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%prime%' THEN 'Number Properties'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%equation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%quadratic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%linear%' THEN 'Algebra & Equations'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'GI' THEN
+            CASE
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%graphs%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%graphics interpretation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%graph%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%chart%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%plot%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%axis%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t graphs%' THEN 'Graphs'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Interpretation'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Interpretation'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non-math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%verbal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%reading%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inference%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%author%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%purpose%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t non-math related%' THEN 'Non-Math Interpretation'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%number properties%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t math related%' THEN 'Math-Based Interpretation'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'TA' THEN
+            CASE
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%tables%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%table analysis%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%table%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t tables%' THEN 'Tables'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Analysis'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Analysis'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non-math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%verbal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%reading%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inference%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%author%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%purpose%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t non-math related%' THEN 'Non-Math Analysis'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%number properties%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t math related%' THEN 'Math-Based Analysis'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'MSR' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Reasoning'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Reasoning'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non-math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%verbal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%reading%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inference%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%author%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%purpose%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%msr non-math related%' THEN 'Non-Math Reasoning'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%multi-source reasoning%' THEN 'Unknown'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%msr math related%' THEN 'Math-Based Reasoning'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'TPA' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Reasoning'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Reasoning'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non-math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%verbal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%reading%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inference%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%author%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%purpose%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%tpa non-math related%' THEN 'Non-Math Reasoning'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%two-part analysis%' THEN 'Unknown'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%tpa math related%' THEN 'Math-Based Reasoning'
+              ELSE q.topic
+            END
+          ELSE q.topic
+        END
+      WHEN (${categoryHintExpr}) = 'GI' THEN 'Graphs'
+      WHEN (${categoryHintExpr}) = 'TA' THEN 'Tables'
+      WHEN (${categoryHintExpr}) = 'MSR' THEN
+        CASE
+          WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Reasoning'
+          WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Reasoning'
+          ELSE 'Unknown'
+        END
+      WHEN (${categoryHintExpr}) = 'TPA' THEN
+        CASE
+          WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Reasoning'
+          WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Reasoning'
+          ELSE 'Unknown'
+        END
+      WHEN (${categoryHintExpr}) = 'DS' THEN 'Unclear Topic'
       ELSE 'Unknown'
     END
   `;
@@ -1295,10 +1440,12 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
       WHEN COALESCE(NULLIF(s.subject, ''), 'Unknown') = 'Verbal' THEN
         CASE
           WHEN COALESCE(NULLIF(q.topic, ''), '') IN (
-            'Main Idea', 'Detail', 'Purpose', 'Author Attitude', 'Organization', 'Application'
+            'Main Idea / Purpose', 'Detail', 'Structure / Function', 'Author View', 'Application',
+            'Main Idea', 'Purpose', 'Author Attitude', 'Organization'
           ) THEN 'RC'
           WHEN COALESCE(NULLIF(q.topic, ''), '') IN (
-            'Weaken', 'Strengthen', 'Explain', 'Inference', 'Assumption',
+            'Support', 'Attack', 'Assumption', 'Resolve', 'Argument Structure',
+            'Weaken', 'Strengthen', 'Explain', 'Assumption',
             'Boldface', 'Evaluate', 'Flaw', 'Parallel', 'Complete', 'Method'
           ) THEN 'CR'
           ELSE 'Verbal'
@@ -1307,17 +1454,138 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
       ELSE COALESCE(NULLIF(s.subject, ''), 'Unknown')
     END
   `;
+  const categoryHintExpr = `
+    CASE
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('QUANT', 'PS', 'Q') THEN 'PS'
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.category_code, ''), ''))
+      WHEN q.cat_id IN (1336803, 1336813) THEN 'PS'
+      WHEN q.cat_id IN (1337013, 1336843, 1336863) THEN 'CR'
+      WHEN q.cat_id IN (1337023, 1336833, 1336853) THEN 'RC'
+      WHEN q.cat_id IN (1336733, 1336743) THEN 'DS'
+      WHEN q.cat_id = 1336753 THEN 'MSR'
+      WHEN q.cat_id = 1336763 THEN 'TA'
+      WHEN q.cat_id = 1336773 THEN 'GI'
+      WHEN q.cat_id = 1336783 THEN 'TPA'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('QUANT', 'PS', 'Q') THEN 'PS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('QUANT', 'PS', 'Q') THEN 'PS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.subject_code, ''), '')) = 'Q' THEN 'PS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_code, ''), '')) = 'DI' THEN 'DI'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_code, ''), '')) = 'V' THEN 'V'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'Quant' THEN 'PS'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'DI' THEN 'DI'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'Verbal' THEN 'V'
+      ELSE ''
+    END
+  `;
   const topicExpr = `
     CASE
-      WHEN COALESCE(NULLIF(q.topic, ''), '') <> '' THEN q.topic
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'MSR' THEN 'Multi-Source Reasoning'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TA' THEN 'Table Analysis'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'GI' THEN 'Graphics Interpretation'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TPA' THEN 'Two-Part Analysis'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'Data Sufficiency'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'PS' THEN 'Problem Solving'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'Data Sufficiency'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'PS' THEN 'Problem Solving'
+      WHEN COALESCE(NULLIF(q.topic, ''), '') <> '' THEN
+        CASE
+          WHEN (${categoryHintExpr}) = 'CR' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Support', 'Strengthen') THEN 'Support'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Attack', 'Weaken', 'Flaw') THEN 'Attack'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Assumption', 'Evaluate') THEN 'Assumption'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Inference', 'Complete') THEN 'Inference'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Resolve', 'Explain') THEN 'Resolve'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Argument Structure', 'Boldface', 'Method', 'Parallel') THEN 'Argument Structure'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'RC' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Main Idea / Purpose', 'Main Idea', 'Purpose') THEN 'Main Idea / Purpose'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') = 'Detail' THEN 'Detail'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') = 'Inference' THEN 'Inference'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Structure / Function', 'Organization') THEN 'Structure / Function'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Author View', 'Author Attitude') THEN 'Author View'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') = 'Application' THEN 'Application'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'PS' THEN
+            CASE
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%overlapping sets%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%venn%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%set theory%' THEN 'Overlapping Sets'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%mean%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%median%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%standard deviation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%variance%' THEN 'Statistics'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%combin%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%permut%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%counting%' THEN 'Counting & Probability'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%distance%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%speed%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%work%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%time%' THEN 'Rates, Work & Motion'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%function%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%sequence%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inequal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%absolute value%' THEN 'Functions, Sequences & Inequalities'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%word problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%age problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%digit problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%mixture%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%problem solving%' THEN 'General Word Problems'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%percent%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%interest%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%fraction%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%ratio%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%proportion%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%decimal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%average%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%fdp%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%remainder%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%multiple%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%factor%' THEN 'Arithmetic, FDP & Ratios'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%triangle%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%circle%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%area%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%volume%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%coordinate%' THEN 'Geometry'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%number properties%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%divis%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%integer%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%odd%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%even%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%prime%' THEN 'Number Properties'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%equation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%quadratic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%linear%' THEN 'Algebra & Equations'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'DS' THEN
+            CASE
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%data sufficiency%' THEN 'Unclear Topic'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%unclear topic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%poor quality%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%bad question%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%ambiguous%' THEN 'Unclear Topic'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%overlapping sets%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%venn%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%set theory%' THEN 'Overlapping Sets'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%mean%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%median%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%standard deviation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%variance%' THEN 'Statistics'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%combin%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%permut%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%counting%' THEN 'Counting & Probability'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%distance%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%speed%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%work%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%time%' THEN 'Rates, Work & Motion'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%function%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%sequence%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inequal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%absolute value%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%custom character%' THEN 'Functions, Sequences & Inequalities'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%word problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%age problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%digit problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%mixture%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%problem solving%' THEN 'General Word Problems'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%percent%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%interest%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%fraction%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%ratio%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%proportion%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%decimal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%average%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%fdp%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%remainder%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%multiple%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%factor%' THEN 'Arithmetic, FDP & Ratios'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%triangle%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%circle%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%area%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%volume%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%coordinate%' THEN 'Geometry'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%number properties%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%divis%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%integer%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%odd%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%even%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%prime%' THEN 'Number Properties'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%equation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%quadratic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%linear%' THEN 'Algebra & Equations'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'GI' THEN
+            CASE
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%graphs%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%graphics interpretation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%graph%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%chart%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%plot%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%axis%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t graphs%' THEN 'Graphs'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Interpretation'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Interpretation'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non-math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%verbal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%reading%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inference%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%author%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%purpose%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t non-math related%' THEN 'Non-Math Interpretation'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%number properties%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t math related%' THEN 'Math-Based Interpretation'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'TA' THEN
+            CASE
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%tables%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%table analysis%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%table%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t tables%' THEN 'Tables'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Analysis'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Analysis'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non-math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%verbal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%reading%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inference%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%author%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%purpose%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t non-math related%' THEN 'Non-Math Analysis'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%number properties%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t math related%' THEN 'Math-Based Analysis'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'MSR' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Reasoning'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Reasoning'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non-math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%verbal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%reading%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inference%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%author%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%purpose%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%msr non-math related%' THEN 'Non-Math Reasoning'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%multi-source reasoning%' THEN 'Unknown'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%msr math related%' THEN 'Math-Based Reasoning'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'TPA' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Reasoning'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Reasoning'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non-math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%verbal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%reading%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inference%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%author%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%purpose%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%tpa non-math related%' THEN 'Non-Math Reasoning'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%two-part analysis%' THEN 'Unknown'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%tpa math related%' THEN 'Math-Based Reasoning'
+              ELSE q.topic
+            END
+          ELSE q.topic
+        END
+      WHEN (${categoryHintExpr}) = 'GI' THEN 'Graphs'
+      WHEN (${categoryHintExpr}) = 'TA' THEN 'Tables'
+      WHEN (${categoryHintExpr}) = 'MSR' THEN
+        CASE
+          WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Reasoning'
+          WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Reasoning'
+          ELSE 'Unknown'
+        END
+      WHEN (${categoryHintExpr}) = 'TPA' THEN
+        CASE
+          WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Reasoning'
+          WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Reasoning'
+          ELSE 'Unknown'
+        END
+      WHEN (${categoryHintExpr}) = 'DS' THEN 'Unclear Topic'
       ELSE 'Unknown'
     END
   `;
@@ -1409,10 +1677,12 @@ async function getPatterns(runId) {
       WHEN COALESCE(NULLIF(s.subject, ''), 'Unknown') = 'Verbal' THEN
         CASE
           WHEN COALESCE(NULLIF(q.topic, ''), '') IN (
-            'Main Idea', 'Detail', 'Purpose', 'Author Attitude', 'Organization', 'Application'
+            'Main Idea / Purpose', 'Detail', 'Structure / Function', 'Author View', 'Application',
+            'Main Idea', 'Purpose', 'Author Attitude', 'Organization'
           ) THEN 'RC'
           WHEN COALESCE(NULLIF(q.topic, ''), '') IN (
-            'Weaken', 'Strengthen', 'Explain', 'Inference', 'Assumption',
+            'Support', 'Attack', 'Assumption', 'Resolve', 'Argument Structure',
+            'Weaken', 'Strengthen', 'Explain', 'Assumption',
             'Boldface', 'Evaluate', 'Flaw', 'Parallel', 'Complete', 'Method'
           ) THEN 'CR'
           ELSE 'Verbal'
@@ -1441,10 +1711,12 @@ async function getPatterns(runId) {
       WHEN COALESCE(NULLIF(s.subject, ''), 'Unknown') = 'Verbal' THEN
         CASE
           WHEN COALESCE(NULLIF(q.topic, ''), '') IN (
-            'Main Idea', 'Detail', 'Purpose', 'Author Attitude', 'Organization', 'Application'
+            'Main Idea / Purpose', 'Detail', 'Structure / Function', 'Author View', 'Application',
+            'Main Idea', 'Purpose', 'Author Attitude', 'Organization'
           ) THEN 'RC'
           WHEN COALESCE(NULLIF(q.topic, ''), '') IN (
-            'Weaken', 'Strengthen', 'Explain', 'Inference', 'Assumption',
+            'Support', 'Attack', 'Assumption', 'Resolve', 'Argument Structure',
+            'Weaken', 'Strengthen', 'Explain', 'Assumption',
             'Boldface', 'Evaluate', 'Flaw', 'Parallel', 'Complete', 'Method'
           ) THEN 'CR'
           ELSE 'Verbal'
@@ -1453,17 +1725,138 @@ async function getPatterns(runId) {
       ELSE COALESCE(NULLIF(s.subject, ''), 'Unknown')
     END
   `;
+  const categoryHintExpr = `
+    CASE
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('QUANT', 'PS', 'Q') THEN 'PS'
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.category_code, ''), ''))
+      WHEN q.cat_id IN (1336803, 1336813) THEN 'PS'
+      WHEN q.cat_id IN (1337013, 1336843, 1336863) THEN 'CR'
+      WHEN q.cat_id IN (1337023, 1336833, 1336853) THEN 'RC'
+      WHEN q.cat_id IN (1336733, 1336743) THEN 'DS'
+      WHEN q.cat_id = 1336753 THEN 'MSR'
+      WHEN q.cat_id = 1336763 THEN 'TA'
+      WHEN q.cat_id = 1336773 THEN 'GI'
+      WHEN q.cat_id = 1336783 THEN 'TPA'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('QUANT', 'PS', 'Q') THEN 'PS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('QUANT', 'PS', 'Q') THEN 'PS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('CR', 'RC', 'DS', 'MSR', 'TA', 'GI', 'TPA') THEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.subject_code, ''), '')) = 'Q' THEN 'PS'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_code, ''), '')) = 'DI' THEN 'DI'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_code, ''), '')) = 'V' THEN 'V'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'Quant' THEN 'PS'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'DI' THEN 'DI'
+      WHEN COALESCE(NULLIF(s.subject, ''), '') = 'Verbal' THEN 'V'
+      ELSE ''
+    END
+  `;
   const topicExpr = `
     CASE
-      WHEN COALESCE(NULLIF(q.topic, ''), '') <> '' THEN q.topic
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'MSR' THEN 'Multi-Source Reasoning'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TA' THEN 'Table Analysis'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'GI' THEN 'Graphics Interpretation'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TPA' THEN 'Two-Part Analysis'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'DS' THEN 'Data Sufficiency'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'PS' THEN 'Problem Solving'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'DS' THEN 'Data Sufficiency'
-      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) = 'PS' THEN 'Problem Solving'
+      WHEN COALESCE(NULLIF(q.topic, ''), '') <> '' THEN
+        CASE
+          WHEN (${categoryHintExpr}) = 'CR' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Support', 'Strengthen') THEN 'Support'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Attack', 'Weaken', 'Flaw') THEN 'Attack'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Assumption', 'Evaluate') THEN 'Assumption'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Inference', 'Complete') THEN 'Inference'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Resolve', 'Explain') THEN 'Resolve'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Argument Structure', 'Boldface', 'Method', 'Parallel') THEN 'Argument Structure'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'RC' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Main Idea / Purpose', 'Main Idea', 'Purpose') THEN 'Main Idea / Purpose'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') = 'Detail' THEN 'Detail'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') = 'Inference' THEN 'Inference'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Structure / Function', 'Organization') THEN 'Structure / Function'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Author View', 'Author Attitude') THEN 'Author View'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') = 'Application' THEN 'Application'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'PS' THEN
+            CASE
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%overlapping sets%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%venn%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%set theory%' THEN 'Overlapping Sets'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%mean%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%median%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%standard deviation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%variance%' THEN 'Statistics'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%combin%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%permut%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%counting%' THEN 'Counting & Probability'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%distance%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%speed%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%work%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%time%' THEN 'Rates, Work & Motion'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%function%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%sequence%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inequal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%absolute value%' THEN 'Functions, Sequences & Inequalities'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%word problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%age problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%digit problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%mixture%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%problem solving%' THEN 'General Word Problems'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%percent%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%interest%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%fraction%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%ratio%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%proportion%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%decimal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%average%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%fdp%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%remainder%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%multiple%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%factor%' THEN 'Arithmetic, FDP & Ratios'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%triangle%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%circle%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%area%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%volume%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%coordinate%' THEN 'Geometry'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%number properties%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%divis%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%integer%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%odd%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%even%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%prime%' THEN 'Number Properties'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%equation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%quadratic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%linear%' THEN 'Algebra & Equations'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'DS' THEN
+            CASE
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%data sufficiency%' THEN 'Unclear Topic'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%unclear topic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%poor quality%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%bad question%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%ambiguous%' THEN 'Unclear Topic'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%overlapping sets%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%venn%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%set theory%' THEN 'Overlapping Sets'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%mean%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%median%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%standard deviation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%variance%' THEN 'Statistics'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%combin%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%permut%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%counting%' THEN 'Counting & Probability'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%distance%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%speed%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%work%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%time%' THEN 'Rates, Work & Motion'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%function%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%sequence%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inequal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%absolute value%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%custom character%' THEN 'Functions, Sequences & Inequalities'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%word problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%age problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%digit problem%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%mixture%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%problem solving%' THEN 'General Word Problems'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%percent%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%interest%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%fraction%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%ratio%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%proportion%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%decimal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%average%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%fdp%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%remainder%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%multiple%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%factor%' THEN 'Arithmetic, FDP & Ratios'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%triangle%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%circle%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%area%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%volume%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%coordinate%' THEN 'Geometry'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%number properties%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%divis%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%integer%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%odd%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%even%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%prime%' THEN 'Number Properties'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%equation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%quadratic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%linear%' THEN 'Algebra & Equations'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'GI' THEN
+            CASE
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%graphs%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%graphics interpretation%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%graph%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%chart%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%plot%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%axis%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t graphs%' THEN 'Graphs'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Interpretation'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Interpretation'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non-math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%verbal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%reading%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inference%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%author%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%purpose%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t non-math related%' THEN 'Non-Math Interpretation'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%number properties%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t math related%' THEN 'Math-Based Interpretation'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'TA' THEN
+            CASE
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%tables%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%table analysis%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%table%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t tables%' THEN 'Tables'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Analysis'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Analysis'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non-math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%verbal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%reading%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inference%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%author%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%purpose%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t non-math related%' THEN 'Non-Math Analysis'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%number properties%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%g&t math related%' THEN 'Math-Based Analysis'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'MSR' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Reasoning'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Reasoning'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non-math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%verbal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%reading%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inference%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%author%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%purpose%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%msr non-math related%' THEN 'Non-Math Reasoning'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%multi-source reasoning%' THEN 'Unknown'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%msr math related%' THEN 'Math-Based Reasoning'
+              ELSE q.topic
+            END
+          WHEN (${categoryHintExpr}) = 'TPA' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Reasoning'
+              WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Reasoning'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non-math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%non math%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%verbal%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%reading%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%inference%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%author%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%purpose%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%tpa non-math related%' THEN 'Non-Math Reasoning'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%two-part analysis%' THEN 'Unknown'
+              WHEN LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math based%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math-related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%math related%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%algebra%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%arithmetic%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%rate%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%probab%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%geometry%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%statistics%' OR LOWER(COALESCE(NULLIF(q.topic, ''), '')) LIKE '%tpa math related%' THEN 'Math-Based Reasoning'
+              ELSE q.topic
+            END
+          ELSE q.topic
+        END
+      WHEN (${categoryHintExpr}) = 'GI' THEN 'Graphs'
+      WHEN (${categoryHintExpr}) = 'TA' THEN 'Tables'
+      WHEN (${categoryHintExpr}) = 'MSR' THEN
+        CASE
+          WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Reasoning'
+          WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Reasoning'
+          ELSE 'Unknown'
+        END
+      WHEN (${categoryHintExpr}) = 'TPA' THEN
+        CASE
+          WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'math' THEN 'Math-Based Reasoning'
+          WHEN COALESCE(NULLIF(q.content_domain, ''), '') = 'non_math' THEN 'Non-Math Reasoning'
+          ELSE 'Unknown'
+        END
+      WHEN (${categoryHintExpr}) = 'DS' THEN 'Unclear Topic'
       ELSE 'Unknown'
     END
   `;
@@ -1491,6 +1884,7 @@ async function getPatterns(runId) {
         ${topicExpr} AS topic,
         COUNT(*) AS mistakes
       FROM question_attempts q
+      INNER JOIN sessions s ON s.id = q.session_id
       WHERE ${runClause}q.correct = 0 AND ${answeredWhere}
       GROUP BY ${topicExpr}
       ORDER BY mistakes DESC, topic ASC
@@ -1769,9 +2163,42 @@ async function getSessionAnalysis(sessionId) {
   );
 
   if (!session) return null;
+  const verbalCategoryHintExpr = `
+    CASE
+      WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('CR', 'RC') THEN UPPER(COALESCE(NULLIF(q.category_code, ''), ''))
+      WHEN q.cat_id IN (1337013, 1336843, 1336863) THEN 'CR'
+      WHEN q.cat_id IN (1337023, 1336833, 1336853) THEN 'RC'
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) IN ('CR', 'RC') THEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), ''))
+      WHEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), '')) IN ('CR', 'RC') THEN UPPER(COALESCE(NULLIF(q.subject_sub, ''), ''))
+      ELSE ''
+    END
+  `;
   const topicExpr = `
     CASE
-      WHEN COALESCE(NULLIF(q.topic, ''), '') <> '' THEN q.topic
+      WHEN COALESCE(NULLIF(q.topic, ''), '') <> '' THEN
+        CASE
+          WHEN (${verbalCategoryHintExpr}) = 'CR' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Support', 'Strengthen') THEN 'Support'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Attack', 'Weaken', 'Flaw') THEN 'Attack'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Assumption', 'Evaluate') THEN 'Assumption'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Inference', 'Complete') THEN 'Inference'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Resolve', 'Explain') THEN 'Resolve'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Argument Structure', 'Boldface', 'Method', 'Parallel') THEN 'Argument Structure'
+              ELSE q.topic
+            END
+          WHEN (${verbalCategoryHintExpr}) = 'RC' THEN
+            CASE
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Main Idea / Purpose', 'Main Idea', 'Purpose') THEN 'Main Idea / Purpose'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') = 'Detail' THEN 'Detail'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') = 'Inference' THEN 'Inference'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Structure / Function', 'Organization') THEN 'Structure / Function'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') IN ('Author View', 'Author Attitude') THEN 'Author View'
+              WHEN COALESCE(NULLIF(q.topic, ''), '') = 'Application' THEN 'Application'
+              ELSE q.topic
+            END
+          ELSE q.topic
+        END
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'MSR' THEN 'Multi-Source Reasoning'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'TA' THEN 'Table Analysis'
       WHEN UPPER(COALESCE(NULLIF(q.subject_sub_raw, ''), '')) = 'GI' THEN 'Graphics Interpretation'
@@ -1938,6 +2365,9 @@ async function getLatestRunForSource(source) {
 
 module.exports = {
   dbPath,
+  run,
+  all,
+  get,
   initDb,
   backfillSparseQuestionAttempts,
   saveScrapeResult,

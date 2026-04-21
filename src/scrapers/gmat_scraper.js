@@ -764,6 +764,9 @@ function hasImmediateStatusChild(el, fragments = []) {
 
 function elementLooksSelected(el) {
   if (!el) return false;
+  // Native <option selected> or <option> with .selected property
+  if (el.tagName === 'OPTION' && el.selected) return true;
+  if (el.getAttribute?.('selected') != null) return true;
   const classText = String(el.className || '').toLowerCase();
   if (
     classText.includes('selected') ||
@@ -775,6 +778,8 @@ function elementLooksSelected(el) {
   }
   const ariaChecked = String(el.getAttribute?.('aria-checked') || '').toLowerCase();
   if (ariaChecked === 'true') return true;
+  const ariaSelected = String(el.getAttribute?.('aria-selected') || '').toLowerCase();
+  if (ariaSelected === 'true') return true;
   if (el.querySelector?.('input:checked')) return true;
   return false;
 }
@@ -895,6 +900,8 @@ function answerOptionSelectors() {
     '.question-choices-multi [class*="choice"]',
     '[class*="question-choices"] .multi-choice',
     '[class*="question-choices"] [class*="choice"]',
+    '.inline-result',
+    '.vertical-choice',
     '[class*="choice"]',
     '[class*="option"]',
     '[role="radio"]',
@@ -925,7 +932,10 @@ function queryAnswerOptionNodes(root = document) {
 
 function optionNodeText(el) {
   const raw = String(el?.innerText || el?.textContent || '');
-  return normalizeBlockText(raw);
+  const text = normalizeBlockText(raw);
+  // For empty vertical-choice elements, use sibling .choice-content text
+  if (!text) return verticalChoiceSiblingText(el);
+  return text;
 }
 
 function nestedLeafOptionSelectors() {
@@ -977,11 +987,24 @@ function elementLooksAggregateOptionContainer(el) {
   return nestedLeafOptionCount(el) >= 2;
 }
 
+function verticalChoiceSiblingText(el) {
+  if (!el) return '';
+  const row = el.closest?.('tr') || el.parentElement;
+  if (!row) return '';
+  const content = row.querySelector?.('.choice-content');
+  return normalizeBlockText(content?.innerText || content?.textContent || '');
+}
+
 function optionNodeLooksUseful(el) {
   if (!el) return false;
   if (elementLooksAggregateOptionContainer(el)) return false;
   const text = optionNodeText(el);
-  if (!text) return false;
+  // Allow empty-text elements that are stateful (e.g. .vertical-choice.incorrect)
+  if (!text) {
+    const isStateful = elementLooksSelected(el) || elementLooksCorrect(el) || elementLooksIncorrect(el);
+    if (isStateful && verticalChoiceSiblingText(el)) return true;
+    return false;
+  }
   if (text.length > 240) return false;
   if (text.split(/\r?\n/).filter((line) => normalizeBlockText(line)).length > 6) return false;
   if (/^(your answer|correct answer|selected answer|answer explanation|explanation)\b/i.test(text)) return false;
@@ -1160,9 +1183,179 @@ function summarizeCompositeSlots(slots = [], key = 'user_value', maxLength = 160
   return `${summary.slice(0, maxLength - 1)}…`;
 }
 
+function isNavigationDropdown(sel) {
+  const parent = sel.closest?.('[class*="filter"],[class*="nav"],[class*="toolbar"],[class*="sidebar"],[class*="header"]');
+  if (parent) return true;
+  const label = normalizeBlockText(
+    sel.getAttribute?.('aria-label') || sel.getAttribute?.('name') || sel.getAttribute?.('id') || ''
+  ).toLowerCase();
+  if (/category|correctness|sudden|filter|sort|page/i.test(label)) return true;
+  const siblingText = normalizeBlockText(sel.parentElement?.textContent || '').toLowerCase();
+  if (/^(category|correctness|sudden death|filter|sort)/i.test(siblingText)) return true;
+  return false;
+}
+
+function findQuestionContentRoot() {
+  const selectors = questionStemRootSelectors();
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (el) return el;
+  }
+  return null;
+}
+
+function extractSlotsFromSelectDropdowns() {
+  const contentRoot = findQuestionContentRoot() || document.body;
+  const selects = Array.from(contentRoot.querySelectorAll('select')).filter((sel) => !isNavigationDropdown(sel));
+  if (!selects.length) return [];
+  const slots = [];
+  selects.forEach((sel, index) => {
+    const opts = Array.from(sel.options || sel.querySelectorAll('option'));
+    if (!opts.length) return;
+    const options = opts
+      .filter((opt) => normalizeBlockText(opt.textContent || ''))
+      .map((opt, oi) => ({
+        id: deriveOptionId(opt, oi, opt.textContent || ''),
+        label: null,
+        text: normalizeBlockText(opt.textContent || ''),
+        selected: opt.selected,
+        correct: elementLooksCorrect(opt) || elementLooksCorrect(opt.parentElement),
+        incorrect: elementLooksIncorrect(opt) || elementLooksIncorrect(opt.parentElement),
+      }));
+    const userOption =
+      options.find((o) => o.incorrect) ||
+      options.find((o) => o.selected && !o.correct) ||
+      null;
+    const correctOption = options.find((o) => o.correct) || null;
+    if (!options.length) return;
+    const container = sel.parentElement || sel;
+    slots.push({
+      slot_id: `slot_${index + 1}`,
+      slot_type: 'dropdown',
+      prompt: deriveCompositeSlotPrompt(container, options, index),
+      options,
+      user_value: userOption?.id || null,
+      correct_value: correctOption?.id || null,
+    });
+  });
+  return slots;
+}
+
+function extractSlotsFromVerticalChoiceTable() {
+  const table = document.querySelector('table.question-choices-vertical.results');
+  if (!table) return [];
+  const headers = Array.from(table.querySelectorAll('th.column-choice')).map((th) => normalizeBlockText(th.innerText || ''));
+  if (!headers.length) return [];
+  const rows = Array.from(table.querySelectorAll('tr')).filter((tr) => tr.querySelector('.vertical-choice'));
+  if (!rows.length) return [];
+
+  const columnSlots = headers.map((header, ci) => ({
+    slot_id: `slot_${ci + 1}`,
+    slot_type: 'choice-grid',
+    prompt: `Part ${header || ci + 1}`,
+    options: [],
+    user_value: null,
+    correct_value: null,
+  }));
+
+  rows.forEach((row) => {
+    const cells = Array.from(row.querySelectorAll('td'));
+    const choiceContentEl = row.querySelector('.choice-content');
+    const choiceText = normalizeBlockText(choiceContentEl?.innerText || choiceContentEl?.textContent || '');
+    if (!choiceText) return;
+    const optionId = normalizeBlockText(choiceText).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || choiceText;
+
+    cells.forEach((cell, ci) => {
+      const vc = cell.querySelector('.vertical-choice');
+      if (!vc || ci >= columnSlots.length) return;
+      const isIncorrect = elementLooksIncorrect(vc);
+      const isCorrected = elementLooksCorrect(vc);
+      columnSlots[ci].options.push({
+        id: optionId,
+        label: null,
+        text: choiceText,
+        selected: isIncorrect,
+        correct: isCorrected,
+        incorrect: isIncorrect,
+      });
+      if (isIncorrect) columnSlots[ci].user_value = optionId;
+      if (isCorrected) columnSlots[ci].correct_value = optionId;
+    });
+  });
+
+  return columnSlots.filter((s) => s.options.length > 0);
+}
+
+function extractSlotsFromInlineResults() {
+  const contentRoot = findQuestionContentRoot() || document.body;
+  const inlineResults = Array.from(contentRoot.querySelectorAll('.inline-result'));
+  if (!inlineResults.length) return [];
+
+  // Group consecutive inline-result pairs (incorrect + corrected) into slots
+  const slots = [];
+  let slotIndex = 0;
+  for (let i = 0; i < inlineResults.length; i++) {
+    const el = inlineResults[i];
+    const isIncorrect = elementLooksIncorrect(el);
+    const isCorrected = elementLooksCorrect(el);
+    if (!isIncorrect && !isCorrected) continue;
+
+    const text = normalizeBlockText(el.innerText || el.textContent || '');
+    if (!text) continue;
+    const optionId = text.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || text;
+
+    // Check if the next sibling is the pair (incorrect/corrected are paired)
+    const next = inlineResults[i + 1];
+    const nextIsIncorrect = next ? elementLooksIncorrect(next) : false;
+    const nextIsCorrected = next ? elementLooksCorrect(next) : false;
+    const nextText = next ? normalizeBlockText(next.innerText || next.textContent || '') : '';
+    const nextId = nextText ? nextText.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') : '';
+
+    if (isIncorrect && nextIsCorrected && nextText) {
+      // Paired: user's wrong answer followed by correct answer
+      slots.push({
+        slot_id: `slot_${slotIndex + 1}`,
+        slot_type: 'dropdown',
+        prompt: `Part ${slotIndex + 1}`,
+        options: [
+          { id: optionId, label: null, text, selected: true, correct: false, incorrect: true },
+          { id: nextId, label: null, text: nextText, selected: false, correct: true, incorrect: false },
+        ],
+        user_value: optionId,
+        correct_value: nextId,
+      });
+      slotIndex++;
+      i++; // skip the pair partner
+    } else {
+      // Single result
+      slots.push({
+        slot_id: `slot_${slotIndex + 1}`,
+        slot_type: 'dropdown',
+        prompt: `Part ${slotIndex + 1}`,
+        options: [{ id: optionId, label: null, text, selected: isIncorrect, correct: isCorrected, incorrect: isIncorrect }],
+        user_value: isIncorrect ? optionId : null,
+        correct_value: isCorrected ? optionId : null,
+      });
+      slotIndex++;
+    }
+  }
+  return slots;
+}
+
 function extractDiCompositeResponseFromDom() {
-  const markedNodes = statefulAnswerNodes(document);
-  if (!markedNodes.length) return null;
+  // Try vertical-choice table first (Two-Part Analysis)
+  const verticalSlots = extractSlotsFromVerticalChoiceTable();
+  if (verticalSlots.length) return { response_format: 'composite', slots: verticalSlots };
+
+  // Try inline-result pattern (MSR/fill-in-the-blank dropdowns)
+  const inlineSlots = extractSlotsFromInlineResults();
+  if (inlineSlots.length) return { response_format: 'composite', slots: inlineSlots };
+
+  const markedNodes = statefulAnswerNodes(document).filter((node) => {
+    // Exclude <option> nodes inside navigation/filter dropdowns
+    if (node.tagName === 'OPTION' && node.closest?.('select') && isNavigationDropdown(node.closest('select'))) return false;
+    return true;
+  });
 
   const slotMap = new Map();
   markedNodes.forEach((node) => {
@@ -1193,6 +1386,12 @@ function extractDiCompositeResponseFromDom() {
       correct_value: correctOption?.id || null,
     });
   });
+
+  // Fallback: extract directly from <select> dropdowns if the stateful-node approach yielded nothing
+  if (!slots.length) {
+    const dropdownSlots = extractSlotsFromSelectDropdowns();
+    if (dropdownSlots.length) return { response_format: 'composite', slots: dropdownSlots };
+  }
 
   if (!slots.length) return null;
 
@@ -1702,10 +1901,15 @@ async function navigateHashSafe(hashValue, waitMs) {
 
 function extractCategoryCandidatesFromCurrentPage(sessionId) {
   const values = [];
-  const attrs = ['href', 'data-href', 'data-url', 'data-link', 'onclick'];
-  const nodes = [document.body, ...document.querySelectorAll('*')];
+  const selector = [
+    '[href*="custom-quiz/"]', '[data-href*="custom-quiz/"]',
+    '[data-url*="custom-quiz/"]', '[data-link*="custom-quiz/"]',
+    '[onclick*="custom-quiz/"]',
+  ].join(',');
+  const nodes = document.querySelectorAll(selector);
 
   for (const node of nodes) {
+    const attrs = ['href', 'data-href', 'data-url', 'data-link', 'onclick'];
     for (const attr of attrs) {
       const raw = node?.getAttribute?.(attr);
       const parsed = parseCategoryRoute(raw);
@@ -1782,11 +1986,16 @@ function extractCategorySubCodesFromCurrentPage(sessionId) {
     }
   }
 
-  const attrs = ['href', 'data-href', 'data-url', 'data-link', 'onclick'];
-  const nodes = [document.body, ...document.querySelectorAll('*')];
+  const catSelector = [
+    '[href*="custom-quiz/"]', '[data-href*="custom-quiz/"]',
+    '[data-url*="custom-quiz/"]', '[data-link*="custom-quiz/"]',
+    '[onclick*="custom-quiz/"]',
+  ].join(',');
+  const catNodes = document.querySelectorAll(catSelector);
 
-  for (const node of nodes) {
+  for (const node of catNodes) {
     let parsed = null;
+    const attrs = ['href', 'data-href', 'data-url', 'data-link', 'onclick'];
     for (const attr of attrs) {
       const raw = node?.getAttribute?.(attr);
       parsed = parseCategoryRoute(raw);
@@ -1873,7 +2082,9 @@ async function scrapeCategoryRowsFromCurrentPage(cfg = CONFIG, sessionId = null)
     catQs.push(row);
   };
 
-  while (true) {
+  const MAX_PAGINATION_PAGES = 50;
+  let paginationPage = 0;
+  while (paginationPage++ < MAX_PAGINATION_PAGES) {
     const reviewNodes = Array.from(
       document.querySelectorAll(
         'a[href*="review/categories/"],[data-href*="review/categories/"],[data-url*="review/categories/"],[data-link*="review/categories/"],[onclick*="review/categories/"]'
@@ -2000,18 +2211,22 @@ function detectReviewContentSignals({ diContext = false, expectedQCode = null, s
     choiceCount === 0 &&
     statefulCount === 0 &&
     answerLabelCount === 0;
-  const compositeSlotCount =
-    diContext && statefulCount > 0
-      ? (extractDiCompositeResponseFromDom()?.slots || []).length
-      : 0;
   const hasStemLikeText = normalizeBlockText(bodyText).length >= 120;
 
-  const contentReady =
+  // Defer expensive DI composite extraction until basic route+content signals are present
+  const basicContentReady =
     choiceCount > 0 ||
-    compositeSlotCount > 0 ||
     hasAnswerLabelText ||
     (diContext && statefulCount > 0) ||
     (diContext && usefulOptionCount >= 2 && hasStemLikeText);
+  const compositeSlotCount =
+    diContext && statefulCount > 0 && basicContentReady
+      ? (extractDiCompositeResponseFromDom()?.slots || []).length
+      : 0;
+
+  const contentReady =
+    basicContentReady ||
+    compositeSlotCount > 0;
 
   return {
     hash,
@@ -2535,7 +2750,7 @@ async function scrapePart1(cfg = CONFIG) {
         question_url: toAbsoluteQuestionUrl(q.question_url) || null,
       }));
     const wrongRefs = dedupeReviewRefs(
-      wrongFromCategories.length ? wrongFromCategories : [...wrongFromCategories, ...wrongFromApi]
+      wrongFromCategories.length ? wrongFromCategories : wrongFromApi
     );
 
     const questions = [...catQs];
@@ -2704,7 +2919,7 @@ async function scrapePart2(sessions, cfg = CONFIG) {
   const maxReviewCatCandidates = Math.max(1, Number(cfg.maxReviewCatCandidates || 4));
   const maxQIdCandidates = Math.max(1, Number(cfg.maxQIdCandidates || 2));
   const maxReviewAttemptsPerQuestion = Math.max(1, Number(cfg.maxReviewAttemptsPerQuestion || 6));
-  const retrySameUrlOnPageError = cfg.retrySameUrlOnPageError !== false;
+  const retrySameUrlOnPageError = Boolean(cfg.retrySameUrlOnPageError);
   const preferredReviewCatBySession = new Map();
   const parseReviewRouteFromNode = (node) => {
     if (!node?.getAttribute) return null;
@@ -3073,7 +3288,7 @@ async function scrapePart2(sessions, cfg = CONFIG) {
     // Topic from question text
     const sessionHints = subCodeHintsBySession.get(String(session_id));
     const hintedSubCode =
-      sessionHints?.get(Number(usedReviewCatId || reviewCatId || cat_id)) ||
+      sessionHints?.get(Number(usedReviewCatId || cat_id)) ||
       sessionHints?.get(Number(cat_id)) ||
       null;
     const pageSubCode = hintedSubCode || detectSubSubjectCodeFromCurrentPage();

@@ -1,0 +1,45 @@
+
+> gmat-error-log@0.1.0 dev
+> concurrently -k "npm:dev:api" "npm:dev:web"
+
+[dev:web] 
+[dev:web] > gmat-error-log@0.1.0 dev:web
+[dev:web] > vite --config client/vite.config.js
+[dev:web] 
+[dev:api] 
+[dev:api] > gmat-error-log@0.1.0 dev:api
+[dev:api] > node --watch src/server.js
+[dev:api] 
+[dev:api] [dotenv@17.3.1] injecting env (10) from .env -- tip: 🔐 prevent committing .env to code: https://dotenvx.com/precommit
+[dev:web] Port 5173 is in use, trying another one...
+[dev:web] 
+[dev:web]   VITE v6.4.1  ready in 93 ms
+[dev:web] 
+[dev:web]   ➜  Local:   http://localhost:5174/
+[dev:web]   ➜  Network: use --host to expose
+[dev:api] [dotenv@17.3.1] injecting env (0) from .env -- tip: ⚡️ secrets for agents: https://dotenvx.com/as2
+[dev:api] node:events:486
+[dev:api]       throw er; // Unhandled 'error' event
+[dev:api]       ^
+[dev:api] 
+[dev:api] Error: listen EADDRINUSE: address already in use 127.0.0.1:4310
+[dev:[dev:api] Failed running 'src/server.js'. Waiting for file changes before restarting...
+[dev:web] npm run dev:web exited with code 143
+--> Sending SIGTERM to other processes..
+[dev:api] npm run dev:api exited with code 0
+process/task_queues:89:21)
+[dev:api] Emitted 'error' event on Server instance at:
+[dev:api]     at emitErrorNT (node:net:1976:8)
+[dev:api]     at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
+[dev:api]   code: 'EADDRINUSE',
+[dev:api]   errno: -48,
+[dev:api]   syscall: 'listen',
+[dev:api]   address: '127.0.0.1',
+[dev:api]   port: 4310
+[dev:api] }
+[dev:api] 
+[dev:api] Node.js v24.12.0
+[dev:api] Failed running 'src/server.js'. Waiting for file changes before restarting...
+[dev:api] npm run dev:api exited with code 0
+--> Sending SIGTERM to other processes..
+[dev:web] npm run dev:web exited with code SIGTERM

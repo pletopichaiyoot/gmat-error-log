@@ -19,6 +19,16 @@ const {
 const { LlmConfigError, generatePerformanceReview, answerCoachQuestion } = require('./llm-coach-agent');
 const { classifyScrapedQuestions } = require('./question-topic-classifier');
 const { runScrapeFromOpenBrowser, openUrlInOpenBrowser } = require('./scraper-runner');
+const {
+  createSession: createCoachSession,
+  getSession: getCoachSession,
+  listSessions: listCoachSessions,
+  addMessage: addCoachMessage,
+  getMessages: getCoachMessages,
+  updateSessionTitle: updateCoachSessionTitle,
+  deleteSession: deleteCoachSession,
+} = require('./coach-session');
+const { isMemoryEnabled, getAllMemories, deleteMemory, deleteAllMemories } = require('./memory');
 
 const app = express();
 const PORT = Number(process.env.PORT || 4310);
@@ -96,6 +106,16 @@ const SOURCE_PRESETS = [
     clientId: 789329902,
     reviewCategoryId: null,
     defaultSince: '20250101000000',
+  },
+  {
+    id: 'gmat-club-error-log',
+    label: 'GMAT Club Error Log',
+    appUrl: 'https://gmatclub.com/forum/analytics.php#error_log',
+    clientId: null,
+    reviewCategoryId: null,
+    defaultSince: '20250101000000',
+    scraperFile: 'gmat_club_scraper.js',
+    tabPattern: 'gmatclub\\.com',
   },
 ];
 
@@ -397,7 +417,8 @@ app.post('/api/ai/review', async (req, res) => {
     }
 
     const focus = String(req.body?.focus || '').trim();
-    const result = await generatePerformanceReview({ runId, focus });
+    const sessionId = String(req.body?.sessionId || '').trim() || null;
+    const result = await generatePerformanceReview({ runId, focus, sessionId });
 
     res.json({
       ok: true,
@@ -434,12 +455,33 @@ app.post('/api/ai/chat', async (req, res) => {
       return;
     }
 
-    const history = Array.isArray(req.body?.history) ? req.body.history : [];
-    const result = await answerCoachQuestion({ runId, question, history });
+    let sessionId = String(req.body?.sessionId || '').trim() || null;
+
+    // Auto-create session if none provided
+    if (!sessionId) {
+      const session = await createCoachSession({ runId });
+      sessionId = session.id;
+    }
+
+    // Save user message
+    await addCoachMessage(sessionId, { role: 'user', content: question });
+
+    const result = await answerCoachQuestion({ runId, question, sessionId });
+
+    // Save assistant response
+    await addCoachMessage(sessionId, { role: 'assistant', content: result.text });
+
+    // Auto-title: set title from first user question if session has no title yet
+    const session = await getCoachSession(sessionId);
+    if (session && !session.title) {
+      const title = question.length > 80 ? question.slice(0, 77) + '...' : question;
+      await updateCoachSessionTitle(sessionId, title);
+    }
 
     res.json({
       ok: true,
       answer: result.text,
+      sessionId,
       contextMeta: result.contextMeta || null,
     });
   } catch (error) {
@@ -450,6 +492,106 @@ app.post('/api/ai/chat', async (req, res) => {
       });
       return;
     }
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Coach session endpoints ---
+
+app.post('/api/ai/sessions', async (req, res) => {
+  try {
+    const runId = req.body?.runId != null ? Number(req.body.runId) || null : null;
+    const session = await createCoachSession({ runId });
+    res.json({ ok: true, session });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/ai/sessions', async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(1, Number(req.query.limit) || 20), 100);
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const sessions = await listCoachSessions({ limit, offset });
+    res.json({ ok: true, sessions });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/ai/sessions/:id', async (req, res) => {
+  try {
+    const session = await getCoachSession(req.params.id);
+    if (!session) {
+      res.status(404).json({ error: 'Session not found.' });
+      return;
+    }
+    const messages = await getCoachMessages(req.params.id);
+    res.json({ ok: true, session, messages });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/ai/sessions/:id', async (req, res) => {
+  try {
+    const title = String(req.body?.title || '').trim();
+    const updated = await updateCoachSessionTitle(req.params.id, title);
+    if (!updated) {
+      res.status(404).json({ error: 'Session not found.' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/ai/sessions/:id', async (req, res) => {
+  try {
+    const deleted = await deleteCoachSession(req.params.id);
+    if (!deleted) {
+      res.status(404).json({ error: 'Session not found.' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Memory management endpoints ---
+
+app.get('/api/ai/memories', async (req, res) => {
+  try {
+    if (!isMemoryEnabled()) {
+      return res.json({ ok: true, enabled: false, memories: [] });
+    }
+    const memories = await getAllMemories();
+    res.json({ ok: true, enabled: true, memories });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/ai/memories', async (req, res) => {
+  try {
+    const deleted = await deleteAllMemories();
+    res.json({ ok: deleted });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/ai/memories/:id', async (req, res) => {
+  try {
+    const memoryId = req.params.id;
+    if (!memoryId) {
+      return res.status(400).json({ error: 'Memory ID is required.' });
+    }
+    const deleted = await deleteMemory(memoryId);
+    res.json({ ok: deleted });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -624,16 +766,18 @@ app.post('/api/scrape', async (req, res) => {
       fullDefaultSince: preset.defaultSince,
     });
 
+    const isCustomScraper = !!preset.scraperFile;
     const { data, tabUrl, debug } = await runScrapeFromOpenBrowser({
       since: sinceValue,
       clientId: preset.clientId,
-      autoDetectClientId: true,
+      autoDetectClientId: !isCustomScraper,
       reviewCategoryId: preset.reviewCategoryId,
-      autoDetectReviewCategoryId: !preset.reviewCategoryId,
+      autoDetectReviewCategoryId: !preset.reviewCategoryId && !isCustomScraper,
       source: preset.label,
       appUrl: preset.appUrl,
       cdpUrl: validatedCdpUrl,
-      scraperPath: path.resolve(__dirname, 'scrapers', 'gmat_scraper.js'),
+      scraperPath: path.resolve(__dirname, 'scrapers', preset.scraperFile || 'gmat_scraper.js'),
+      tabPattern: preset.tabPattern || null,
     });
 
     let classification = null;

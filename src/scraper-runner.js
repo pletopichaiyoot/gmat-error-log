@@ -265,7 +265,8 @@ async function runScrapeFromOpenBrowser(options = {}) {
     cdpFallbackUsed = cdpConnection.fallbackUsed;
 
     const pages = browser.contexts().flatMap((ctx) => ctx.pages());
-    const gmatPages = pages.filter((page) => /gmatofficialpractice\.mba\.com/i.test(page.url()));
+    const tabRegex = new RegExp(options.tabPattern || 'gmatofficialpractice\\.mba\\.com', 'i');
+    const gmatPages = pages.filter((page) => tabRegex.test(page.url()));
     gmatPage =
       (appSlug
         ? gmatPages.find((page) => page.url().includes(`/app/${appSlug}`))
@@ -273,7 +274,7 @@ async function runScrapeFromOpenBrowser(options = {}) {
 
     if (!gmatPage) {
       throw new Error(
-        'No open GMAT tab found. Open GMAT Official Practice in the same Chrome instance and stay logged in.'
+        `No matching tab found. Open the target site in the same Chrome instance and stay logged in.`
       );
     }
 

@@ -3,8 +3,10 @@ const { HumanMessage, SystemMessage, AIMessage } = require('@langchain/core/mess
 const { ChatOpenAI } = require('@langchain/openai');
 
 const { listRuns, listSessions, listErrors, getPatterns } = require('./db');
+const { isMemoryEnabled, searchMemories, addMemory } = require('./memory');
+const { getRecentHistory } = require('./coach-session');
 
-const HISTORY_LIMIT = 8;
+const HISTORY_LIMIT = 20;
 const SESSION_LIMIT = 24;
 const ERROR_LIMIT = 24;
 const CONTEXT_CHAR_LIMIT = 12000;
@@ -476,9 +478,11 @@ const CoachGraphState = Annotation.Root({
   runId: Annotation(),
   focus: Annotation(),
   question: Annotation(),
+  sessionId: Annotation(),
   history: Annotation(),
   contextText: Annotation(),
   contextMeta: Annotation(),
+  memories: Annotation(),
   userPrompt: Annotation(),
   responseText: Annotation(),
 });
@@ -542,11 +546,75 @@ async function loadContextNode(state) {
   };
 }
 
+async function loadSessionHistoryNode(state) {
+  if (!state.sessionId) return { history: [] };
+  try {
+    const messages = await getRecentHistory(state.sessionId, HISTORY_LIMIT);
+    return { history: messages };
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[coach] failed to load session history:', err.message);
+    return { history: [] };
+  }
+}
+
+async function loadMemoriesNode(state) {
+  if (!isMemoryEnabled()) return { memories: [] };
+
+  const query = state.mode === 'chat'
+    ? clipText(state.question || '', 500)
+    : clipText(state.focus || 'GMAT performance review', 200);
+
+  if (!query.trim()) return { memories: [] };
+
+  const results = await searchMemories(query, { limit: 5 });
+
+  const memoryTexts = results
+    .map((r) => {
+      const text = typeof r === 'string' ? r : (r?.memory || r?.text || r?.content || '');
+      return text.trim();
+    })
+    .filter(Boolean);
+
+  return { memories: memoryTexts };
+}
+
+async function saveMemoryNode(state) {
+  if (!isMemoryEnabled()) return {};
+  if (!state.responseText || state.responseText === 'No response generated.') return {};
+
+  const mode = state.mode || 'chat';
+  const userPart = mode === 'chat'
+    ? state.question || ''
+    : `Performance review${state.focus ? ` (focus: ${clipText(state.focus, 200)})` : ''}`;
+
+  const messages = [
+    { role: 'user', content: clipText(userPart, 400) },
+    { role: 'assistant', content: clipText(state.responseText, 1000) },
+  ];
+
+  const metadata = {
+    mode,
+    runId: state.runId ? String(state.runId) : null,
+    sessionId: state.sessionId || null,
+    timestamp: new Date().toISOString(),
+  };
+
+  await addMemory(messages, metadata);
+  return {};
+}
+
 async function llmResponseNode(state) {
   const model = buildModel();
+
+  const memoryBlock = Array.isArray(state.memories) && state.memories.length > 0
+    ? `Coaching memory from previous sessions:\n${state.memories.map((m, i) => `${i + 1}. ${m}`).join('\n')}`
+    : '';
+
   const messages = [
     new SystemMessage(systemPromptForMode(state.mode)),
     new SystemMessage(`Performance context:\n${state.contextText}`),
+    ...(memoryBlock ? [new SystemMessage(memoryBlock)] : []),
     ...historyToMessages(state.history),
     new HumanMessage(state.userPrompt),
   ];
@@ -631,23 +699,29 @@ function getGraph() {
 
   compiledGraph = new StateGraph(CoachGraphState)
     .addNode('loadContext', loadContextNode)
+    .addNode('loadSessionHistory', loadSessionHistoryNode)
     .addNode('buildReviewPrompt', buildReviewPrompt)
     .addNode('buildChatPrompt', buildChatPrompt)
+    .addNode('loadMemories', loadMemoriesNode)
     .addNode('callModel', llmResponseNode)
+    .addNode('saveMemory', saveMemoryNode)
     .addEdge(START, 'loadContext')
-    .addConditionalEdges('loadContext', modeRouter, {
+    .addEdge('loadContext', 'loadSessionHistory')
+    .addConditionalEdges('loadSessionHistory', modeRouter, {
       buildReviewPrompt: 'buildReviewPrompt',
       buildChatPrompt: 'buildChatPrompt',
     })
-    .addEdge('buildReviewPrompt', 'callModel')
-    .addEdge('buildChatPrompt', 'callModel')
-    .addEdge('callModel', END)
+    .addEdge('buildReviewPrompt', 'loadMemories')
+    .addEdge('buildChatPrompt', 'loadMemories')
+    .addEdge('loadMemories', 'callModel')
+    .addEdge('callModel', 'saveMemory')
+    .addEdge('saveMemory', END)
     .compile();
 
   return compiledGraph;
 }
 
-async function runCoachGraph({ mode, runId, focus, question, history }) {
+async function runCoachGraph({ mode, runId, focus, question, sessionId }) {
   const graph = getGraph();
 
   const result = await graph.invoke({
@@ -655,9 +729,11 @@ async function runCoachGraph({ mode, runId, focus, question, history }) {
     runId: parseOptionalRunId(runId),
     focus: String(focus || '').trim(),
     question: String(question || '').trim(),
-    history: normalizeChatHistory(history),
+    sessionId: sessionId || null,
+    history: [],
     contextText: '',
     contextMeta: null,
+    memories: [],
     userPrompt: '',
     responseText: '',
   });
@@ -668,17 +744,17 @@ async function runCoachGraph({ mode, runId, focus, question, history }) {
   };
 }
 
-async function generatePerformanceReview({ runId = null, focus = '' } = {}) {
+async function generatePerformanceReview({ runId = null, focus = '', sessionId = null } = {}) {
   return runCoachGraph({
     mode: 'review',
     runId,
     focus,
     question: '',
-    history: [],
+    sessionId,
   });
 }
 
-async function answerCoachQuestion({ runId = null, question = '', history = [] } = {}) {
+async function answerCoachQuestion({ runId = null, question = '', sessionId = null } = {}) {
   const cleanQuestion = String(question || '').trim();
   if (!cleanQuestion) {
     throw new LlmConfigError('Question is required for chat.', 'Provide a non-empty question.');
@@ -689,7 +765,7 @@ async function answerCoachQuestion({ runId = null, question = '', history = [] }
     runId,
     focus: '',
     question: cleanQuestion,
-    history,
+    sessionId,
   });
 }
 

@@ -7,104 +7,98 @@ const {
 } = require('./llm-coach-agent');
 const { deriveQuestionMetadata } = require('./question-metadata');
 
-const MATH_LABELS = [
-  'Arithmetic',
-  'Algebra',
+const PS_LABELS = [
+  'Algebra & Equations',
+  'Arithmetic, FDP & Ratios',
   'Number Properties',
-  'Ratios & Percents',
-  'Rates & Work',
-  'Counting & Probability',
+  'Rates, Work & Motion',
   'Statistics',
+  'Overlapping Sets',
+  'Counting & Probability',
   'Geometry',
-  'Functions & Sequences',
-  'Word Problems',
-  'Data Sufficiency',
-  'Problem Solving',
+  'Functions, Sequences & Inequalities',
+  'General Word Problems',
 ];
 
 const DS_LABELS = [
-  'Sequences',
-  'Functions and Custom Characters',
-  'Word Problems',
-  'Arithmetic',
-  'Absolute Values',
-  'Statistics and Sets Problems',
-  'Algebra',
-  'Percent and Interest Problems',
-  'Remainders',
-  'Multiples and Factors',
-  'Fractions and Ratios',
-  'Geometry',
+  'Algebra & Equations',
+  'Arithmetic, FDP & Ratios',
   'Number Properties',
-  'Inequalities',
-  'Work and Rate Problems',
-  'Probability',
-  'Poor Quality',
+  'Rates, Work & Motion',
+  'Statistics',
   'Overlapping Sets',
-  'Mixture Problems',
-  'Distance and Speed Problems',
-  'Combinations',
+  'Counting & Probability',
+  'Geometry',
+  'Functions, Sequences & Inequalities',
+  'General Word Problems',
+  'Unclear Topic',
 ];
 
-const GT_LABELS = [
-  'G&T Tables',
-  'G&T Non-Math Related',
-  'G&T Math Related',
-  'G&T Graphs',
+const GI_LABELS = [
+  'Graphs',
+  'Math-Based Interpretation',
+  'Non-Math Interpretation',
+];
+
+const TA_LABELS = [
+  'Tables',
+  'Math-Based Analysis',
+  'Non-Math Analysis',
 ];
 
 const MSR_LABELS = [
-  'MSR Non-Math Related',
-  'MSR Math Related',
+  'Math-Based Reasoning',
+  'Non-Math Reasoning',
 ];
 
 const TPA_LABELS = [
-  'TPA Math Related',
-  'TPA Non-Math Related',
+  'Math-Based Reasoning',
+  'Non-Math Reasoning',
+];
+
+const CR_LABELS = [
+  'Support',
+  'Attack',
+  'Assumption',
+  'Inference',
+  'Resolve',
+  'Argument Structure',
+];
+
+const RC_LABELS = [
+  'Main Idea / Purpose',
+  'Detail',
+  'Inference',
+  'Structure / Function',
+  'Author View',
+  'Application',
 ];
 
 const VERBAL_LABELS = [
-  'Weaken',
-  'Strengthen',
-  'Assumption',
-  'Inference',
-  'Explain',
-  'Boldface',
-  'Evaluate',
-  'Flaw',
-  'Method',
-  'Parallel',
-  'Main Idea',
-  'Detail',
-  'Purpose',
-  'Author Attitude',
-  'Organization',
-  'Application',
-  'Complete',
-];
-
-const DI_FORMAT_LABELS = [
-  'Table Analysis',
-  'Graphics Interpretation',
-  'Two-Part Analysis',
-  'Multi-Source Reasoning',
+  ...new Set([
+    ...CR_LABELS,
+    ...RC_LABELS,
+  ]),
 ];
 
 const CATEGORY_LABELS = {
+  PS: PS_LABELS,
+  CR: CR_LABELS,
+  RC: RC_LABELS,
   DS: DS_LABELS,
-  GI: GT_LABELS,
-  TA: GT_LABELS,
+  GI: GI_LABELS,
+  TA: TA_LABELS,
   MSR: MSR_LABELS,
   TPA: TPA_LABELS,
 };
 
 const ALL_TOPIC_LABELS = [
   ...new Set([
-    ...MATH_LABELS,
+    ...PS_LABELS,
     ...VERBAL_LABELS,
-    ...DI_FORMAT_LABELS,
     ...DS_LABELS,
-    ...GT_LABELS,
+    ...GI_LABELS,
+    ...TA_LABELS,
     ...MSR_LABELS,
     ...TPA_LABELS,
     'Other',
@@ -122,55 +116,129 @@ function clipText(value, maxLen = 2000) {
 }
 
 function normalizeDsTopic(text) {
-  if (/poor quality|bad question|ambiguous/.test(text)) return 'Poor Quality';
+  if (/data sufficiency/.test(text)) return 'Unclear Topic';
+  if (/unclear topic|poor quality|bad question|ambiguous/.test(text)) return 'Unclear Topic';
   if (/overlapping sets|venn/.test(text)) return 'Overlapping Sets';
-  if (/mixture/.test(text)) return 'Mixture Problems';
-  if (/distance|speed/.test(text)) return 'Distance and Speed Problems';
-  if (/combin|permut/.test(text)) return 'Combinations';
-  if (/sequence/.test(text)) return 'Sequences';
-  if (/functions?|custom character/.test(text)) return 'Functions and Custom Characters';
-  if (/word problem|age problem|digit problem/.test(text)) return 'Word Problems';
-  if (/absolute value/.test(text)) return 'Absolute Values';
-  if (/statistics|set problem|set theory/.test(text)) return 'Statistics and Sets Problems';
-  if (/percent|interest/.test(text)) return 'Percent and Interest Problems';
-  if (/remainder/.test(text)) return 'Remainders';
-  if (/multiple|factor/.test(text)) return 'Multiples and Factors';
-  if (/fraction|ratio|proportion/.test(text)) return 'Fractions and Ratios';
-  if (/inequal/.test(text)) return 'Inequalities';
-  if (/rate|work/.test(text)) return 'Work and Rate Problems';
-  if (/probab|counting/.test(text)) return 'Probability';
+  if (/statistics|mean|median|standard deviation|variance/.test(text)) return 'Statistics';
+  if (/set problem|set theory/.test(text)) return 'Overlapping Sets';
+  if (/combin|permut|probab|counting/.test(text)) return 'Counting & Probability';
+  if (/distance|speed|rate|work/.test(text)) return 'Rates, Work & Motion';
+  if (/sequence|functions?|custom character|inequal|absolute value/.test(text)) return 'Functions, Sequences & Inequalities';
+  if (/word problem|age problem|digit problem|mixture/.test(text)) return 'General Word Problems';
+  if (/percent|interest|remainder|multiple|factor|fraction|ratio|proportion|arithmetic|decimal|average|price|cost|profit|revenue|sale|sold/.test(text)) {
+    return 'Arithmetic, FDP & Ratios';
+  }
   if (/geometry|triangle|circle|area|volume|coordinate/.test(text)) return 'Geometry';
   if (/number properties|divis|integer|odd|even|prime/.test(text)) return 'Number Properties';
-  if (/algebra|equation|quadratic|linear/.test(text)) return 'Algebra';
-  if (/arithmetic|decimal|average/.test(text)) return 'Arithmetic';
+  if (/algebra|equation|quadratic|linear/.test(text)) return 'Algebra & Equations';
   return '';
 }
 
-function normalizeGtTopic(text, categoryCode) {
-  if (/non[- ]?math|verbal|reading|inference|author|purpose/.test(text)) return 'G&T Non-Math Related';
-  if (/math[- ]?related|algebra|arithmetic|rate|probab|geometry|number properties|statistics/.test(text)) {
-    return 'G&T Math Related';
+function normalizePsTopic(text) {
+  if (/overlapping sets|venn|set theory/.test(text)) return 'Overlapping Sets';
+  if (/statistics|mean|median|standard deviation|variance/.test(text)) return 'Statistics';
+  if (/combin|permut|probab|counting/.test(text)) return 'Counting & Probability';
+  if (/distance|speed|rate|work|time/.test(text)) return 'Rates, Work & Motion';
+  if (/functions?|sequence|inequal|absolute value/.test(text)) return 'Functions, Sequences & Inequalities';
+  if (/word problem|age problem|digit problem|mixture|problem solving/.test(text)) return 'General Word Problems';
+  if (/percent|interest|fraction|ratio|proportion|arithmetic|decimal|average|fdp|price|cost|profit|revenue|sale|sold/.test(text)) return 'Arithmetic, FDP & Ratios';
+  if (/geometry|triangle|circle|area|volume|coordinate/.test(text)) return 'Geometry';
+  if (/number properties|divis|remainder|integer|odd|even|prime|multiple|factor/.test(text)) return 'Number Properties';
+  if (/algebra|equation|quadratic|linear/.test(text)) return 'Algebra & Equations';
+  return '';
+}
+
+function looksLikeShellText(text) {
+  return /skip to main content|my account|study plan|game center|practice questions|practice exams|resources search/i.test(text);
+}
+
+function inferDsTopicFromQuestion(item) {
+  const stem = String(item?.questionStem || '').trim();
+  if (!stem || looksLikeShellText(stem)) return '';
+  const choices = formatChoices(item?.answerChoices);
+  const combined = `${stem}\n${choices}`.toLowerCase();
+  const inferred = normalizeDsTopic(combined);
+  if (!inferred || inferred === 'Unclear Topic') return '';
+  return inferred;
+}
+
+function refineTopicWithHeuristics(topic, batchItem) {
+  const normalizedTopic = String(topic || '').trim();
+  const categoryCode = String(batchItem?.categoryCode || batchItem?.subjectSubRaw || '').trim().toUpperCase();
+
+  if (categoryCode === 'DS' && (!normalizedTopic || normalizedTopic === 'Unclear Topic' || normalizedTopic === 'Other')) {
+    const inferred = inferDsTopicFromQuestion(batchItem);
+    if (inferred) return inferred;
   }
-  if (categoryCode === 'TA' || /table/.test(text)) return 'G&T Tables';
-  if (categoryCode === 'GI' || /graph|chart|plot|axis/.test(text)) return 'G&T Graphs';
+
+  return normalizedTopic;
+}
+
+function normalizeGiTopic(text, contentDomain) {
+  const domain = normalizeContentDomain(contentDomain);
+  if (/graphs|graphics interpretation|graph|chart|plot|axis/.test(text)) return 'Graphs';
+  if (domain === 'math') return 'Math-Based Interpretation';
+  if (domain === 'non_math') return 'Non-Math Interpretation';
+  if (/non[- ]?math|verbal|reading|inference|author|purpose/.test(text)) return 'Non-Math Interpretation';
+  if (/math[- ]?based|math[- ]?related|algebra|arithmetic|rate|probab|geometry|number properties|statistics/.test(text)) {
+    return 'Math-Based Interpretation';
+  }
+  return '';
+}
+
+function normalizeTaTopic(text, contentDomain) {
+  const domain = normalizeContentDomain(contentDomain);
+  if (/tables|table analysis|table/.test(text)) return 'Tables';
+  if (domain === 'math') return 'Math-Based Analysis';
+  if (domain === 'non_math') return 'Non-Math Analysis';
+  if (/non[- ]?math|verbal|reading|inference|author|purpose/.test(text)) return 'Non-Math Analysis';
+  if (/math[- ]?based|math[- ]?related|algebra|arithmetic|rate|probab|geometry|number properties|statistics/.test(text)) {
+    return 'Math-Based Analysis';
+  }
   return '';
 }
 
 function normalizeMsrTopic(text, contentDomain) {
   const domain = normalizeContentDomain(contentDomain);
-  if (domain === 'math') return 'MSR Math Related';
-  if (domain === 'non_math') return 'MSR Non-Math Related';
-  if (/non[- ]?math|verbal|reading|inference|author|purpose/.test(text)) return 'MSR Non-Math Related';
-  if (/math[- ]?related|algebra|arithmetic|rate|probab|geometry|statistics/.test(text)) return 'MSR Math Related';
+  if (domain === 'math') return 'Math-Based Reasoning';
+  if (domain === 'non_math') return 'Non-Math Reasoning';
+  if (/non[- ]?math|verbal|reading|inference|author|purpose/.test(text)) return 'Non-Math Reasoning';
+  if (/math[- ]?based|math[- ]?related|algebra|arithmetic|rate|probab|geometry|statistics/.test(text)) return 'Math-Based Reasoning';
   return '';
 }
 
 function normalizeTpaTopic(text, contentDomain) {
   const domain = normalizeContentDomain(contentDomain);
-  if (domain === 'math') return 'TPA Math Related';
-  if (domain === 'non_math') return 'TPA Non-Math Related';
-  if (/non[- ]?math|verbal|reading|inference|author|purpose/.test(text)) return 'TPA Non-Math Related';
-  if (/math[- ]?related|algebra|arithmetic|rate|probab|geometry|statistics/.test(text)) return 'TPA Math Related';
+  if (domain === 'math') return 'Math-Based Reasoning';
+  if (domain === 'non_math') return 'Non-Math Reasoning';
+  if (/non[- ]?math|verbal|reading|inference|author|purpose/.test(text)) return 'Non-Math Reasoning';
+  if (/math[- ]?based|math[- ]?related|algebra|arithmetic|rate|probab|geometry|statistics/.test(text)) return 'Math-Based Reasoning';
+  return '';
+}
+
+function normalizeVerbalTopic(text, categoryCode) {
+  const category = String(categoryCode || '').trim().toUpperCase();
+
+  if (category === 'CR') {
+    if (/strengthen|support/.test(text)) return 'Support';
+    if (/weaken|flaw|vulnerable to criticism/.test(text)) return 'Attack';
+    if (/assumption|evaluate|relevant to know/.test(text)) return 'Assumption';
+    if (/inference|must be true|best supported|complete/.test(text)) return 'Inference';
+    if (/explain|resolve|paradox|discrepancy/.test(text)) return 'Resolve';
+    if (/boldface|method|technique|strategy|parallel/.test(text)) return 'Argument Structure';
+    return '';
+  }
+
+  if (category === 'RC') {
+    if (/main idea|main point|primary purpose|central idea|purpose/.test(text)) return 'Main Idea / Purpose';
+    if (/detail|according to the passage/.test(text)) return 'Detail';
+    if (/inference|must be true|best supported/.test(text)) return 'Inference';
+    if (/organization|structure of the passage|serves to|function of/.test(text)) return 'Structure / Function';
+    if (/author('|’)s attitude|tone|author view/.test(text)) return 'Author View';
+    if (/application|apply.*principle|analogous/.test(text)) return 'Application';
+    return '';
+  }
+
   return '';
 }
 
@@ -191,8 +259,14 @@ function normalizeTopicLabel(rawValue, options = {}) {
   if (categoryCode === 'DS') {
     return normalizeDsTopic(text);
   }
-  if (categoryCode === 'GI' || categoryCode === 'TA') {
-    return normalizeGtTopic(text, categoryCode);
+  if (categoryCode === 'PS') {
+    return normalizePsTopic(text);
+  }
+  if (categoryCode === 'GI') {
+    return normalizeGiTopic(text, contentDomain);
+  }
+  if (categoryCode === 'TA') {
+    return normalizeTaTopic(text, contentDomain);
   }
   if (categoryCode === 'MSR') {
     return normalizeMsrTopic(text, contentDomain);
@@ -200,42 +274,18 @@ function normalizeTopicLabel(rawValue, options = {}) {
   if (categoryCode === 'TPA') {
     return normalizeTpaTopic(text, contentDomain);
   }
+  if (categoryCode === 'CR' || categoryCode === 'RC') {
+    return normalizeVerbalTopic(text, categoryCode);
+  }
 
-  if (/probab|counting|permut|combinat/.test(text)) return 'Counting & Probability';
-  if (/ratio|percent|proportion/.test(text)) return 'Ratios & Percents';
-  if (/rate|work|speed|distance|time/.test(text)) return 'Rates & Work';
-  if (/number properties|divis|remainder|integer|odd|even|prime|factor|multiple/.test(text)) return 'Number Properties';
-  if (/functions?|sequence/.test(text)) return 'Functions & Sequences';
-  if (/geometry|triangle|circle|area|volume|coordinate/.test(text)) return 'Geometry';
-  if (/statistics|mean|median|standard deviation|variance/.test(text)) return 'Statistics';
-  if (/algebra|equation|inequal|quadratic|linear/.test(text)) return 'Algebra';
-  if (/arithmetic|fraction|decimal|average/.test(text)) return 'Arithmetic';
-  if (/word problem|age problem|mixture|digit problem/.test(text)) return 'Word Problems';
-  if (/data sufficiency|\bds\b/.test(text)) return 'Data Sufficiency';
-  if (/problem solving|\bps\b/.test(text)) return 'Problem Solving';
+  const psTopic = normalizePsTopic(text);
+  if (psTopic) return psTopic;
 
-  if (/strengthen|support/.test(text)) return 'Strengthen';
-  if (/weaken/.test(text)) return 'Weaken';
-  if (/assumption/.test(text)) return 'Assumption';
-  if (/inference|must be true|best supported/.test(text)) return 'Inference';
-  if (/explain|resolve|paradox|discrepancy/.test(text)) return 'Explain';
-  if (/boldface/.test(text)) return 'Boldface';
-  if (/evaluate|relevant to know/.test(text)) return 'Evaluate';
-  if (/flaw|vulnerable to criticism/.test(text)) return 'Flaw';
-  if (/method|technique|strategy/.test(text)) return 'Method';
-  if (/parallel/.test(text)) return 'Parallel';
-  if (/main idea|main point|primary purpose|central idea/.test(text)) return 'Main Idea';
-  if (/detail|according to the passage/.test(text)) return 'Detail';
-  if (/purpose|serves to|function of/.test(text)) return 'Purpose';
-  if (/author('|’)s attitude|tone/.test(text)) return 'Author Attitude';
-  if (/organization|structure of the passage/.test(text)) return 'Organization';
-  if (/application|apply.*principle|analogous/.test(text)) return 'Application';
-  if (/complete/.test(text)) return 'Complete';
+  const verbalTopic = normalizeVerbalTopic(text, categoryCode || options.subjectCode || '');
+  if (verbalTopic) return verbalTopic;
 
-  if (/table analysis/.test(text)) return 'Table Analysis';
-  if (/graphics interpretation/.test(text)) return 'Graphics Interpretation';
-  if (/two-part analysis/.test(text)) return 'Two-Part Analysis';
-  if (/multi-source reasoning/.test(text)) return 'Multi-Source Reasoning';
+  if (/graphics interpretation|graphs|graph|chart|plot|axis/.test(text)) return 'Graphs';
+  if (/table analysis|tables|table/.test(text)) return 'Tables';
 
   return '';
 }
@@ -280,10 +330,10 @@ function normalizeContentDomain(rawValue) {
 function inferContentDomainFromTopic(topic) {
   const normalizedTopic = normalizeTopicLabel(topic);
   if (!normalizedTopic) return '';
-  if (MATH_LABELS.includes(normalizedTopic)) return 'math';
+  if (PS_LABELS.includes(normalizedTopic) || DS_LABELS.includes(normalizedTopic)) return 'math';
   if (VERBAL_LABELS.includes(normalizedTopic)) return 'non_math';
-  if (['MSR Math Related', 'TPA Math Related', 'G&T Math Related'].includes(normalizedTopic)) return 'math';
-  if (['MSR Non-Math Related', 'TPA Non-Math Related', 'G&T Non-Math Related'].includes(normalizedTopic)) {
+  if (['Math-Based Reasoning', 'Math-Based Interpretation', 'Math-Based Analysis'].includes(normalizedTopic)) return 'math';
+  if (['Non-Math Reasoning', 'Non-Math Interpretation', 'Non-Math Analysis'].includes(normalizedTopic)) {
     return 'non_math';
   }
   return '';
@@ -333,23 +383,25 @@ async function classifyBatch(model, batch) {
       [
         'Classify each GMAT question into exactly one topic label.',
         'Return strict JSON only as an array of objects: [{"id":"...","topic":"...","content_domain":""}].',
-        `Allowed Quant labels: ${MATH_LABELS.join(', ')}`,
+        `Allowed Quant labels: ${PS_LABELS.join(', ')}`,
         `Allowed Verbal labels: ${VERBAL_LABELS.join(', ')}`,
         `Allowed DS labels: ${DS_LABELS.join(', ')}`,
-        `Allowed G&T labels for GI/TA: ${GT_LABELS.join(', ')}`,
+        `Allowed GI labels: ${GI_LABELS.join(', ')}`,
+        `Allowed TA labels: ${TA_LABELS.join(', ')}`,
         `Allowed MSR labels: ${MSR_LABELS.join(', ')}`,
         `Allowed TPA labels: ${TPA_LABELS.join(', ')}`,
-        `Allowed DI format fallback labels: ${DI_FORMAT_LABELS.join(', ')}`,
         'Allowed fallback label: Other',
         'Keep the same hierarchy: subject -> category -> subcategory.',
         'Keep verbal category labels as CR or RC. Do not replace CR or RC with a white-label category name.',
-        'Use the existing Quant and Verbal topic labels unless the item is DS or another DI category.',
-        'Use the category_code on each item to choose a white-label subcategory only for DS and DI categories whenever possible.',
+        'Use the grouped Quant labels for PS.',
+        'Use the grouped verbal labels for CR and RC.',
+        'Use the category_code on each item to choose a grouped subcategory whenever possible.',
         'Never return any label containing "Too Hard".',
-        'For DS, use the DS whitelist labels instead of generic math labels.',
-        'For GI and TA, use only the G&T whitelist labels.',
+        'For DS, use the DS whitelist labels instead of generic PS labels.',
+        'Use "Unclear Topic" for DS only when the scraped content is malformed, generic site chrome, or truly insufficient to determine a DS domain.',
+        'If the DS stem is readable, choose the best-fit DS label instead of defaulting to "Unclear Topic".',
+        'For GI and TA, use only the category-specific whitelist labels.',
         'For MSR and TPA, use only the MSR/TPA whitelist labels.',
-        'Use DI format fallback labels only when the category-specific whitelist truly does not fit.',
         'If subject_sub_raw is TPA or MSR, also classify content_domain as either "math" or "non_math".',
         'For non-TPA/MSR questions, return content_domain as an empty string.',
       ].join('\n')
@@ -365,10 +417,11 @@ async function classifyBatch(model, batch) {
     for (const item of parsed) {
       const id = String(item?.id || '').trim();
       const batchItem = batch.find((candidate) => candidate.id === id);
-      const topic = normalizeTopicLabel(item?.topic, {
+      const normalizedTopic = normalizeTopicLabel(item?.topic, {
         categoryCode: batchItem?.categoryCode || batchItem?.subjectSubRaw || '',
         contentDomain: item?.content_domain,
       });
+      const topic = refineTopicWithHeuristics(normalizedTopic, batchItem);
       const contentDomain = normalizeContentDomain(item?.content_domain);
       if (!id || !topic) continue;
       map.set(id, {
