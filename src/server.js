@@ -6,7 +6,11 @@ require('dotenv').config();
 const {
   dbPath,
   initDb,
+  get: dbGet,
   saveScrapeResult,
+  enrichSessionAttempts,
+  enrichGmatClubSessionAttempts,
+  listGmatClubEnrichTargets,
   listRuns,
   listSessions,
   countSessions,
@@ -18,7 +22,14 @@ const {
 } = require('./db');
 const { LlmConfigError, generatePerformanceReview, answerCoachQuestion } = require('./llm-coach-agent');
 const { classifyScrapedQuestions } = require('./question-topic-classifier');
-const { runScrapeFromOpenBrowser, openUrlInOpenBrowser } = require('./scraper-runner');
+const {
+  runScrapeFromOpenBrowser,
+  openUrlInOpenBrowser,
+  runStartTestScrapeFromOpenBrowser,
+  runStartTestPhase2FromOpenBrowser,
+  runGmatClubPhase2FromOpenBrowser,
+  openStartTestProductInOpenBrowser,
+} = require('./scraper-runner');
 const {
   createSession: createCoachSession,
   getSession: getCoachSession,
@@ -46,70 +57,88 @@ const TODAY_SAFETY_BUFFER_HOURS = Math.max(
 );
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
+// Source presets — seven GMAT Official Practice books (platform: 'starttest')
+// and one legacy GMAT Club forum scraper (platform: 'gmatclub'). After the
+// 2026-04-22 migration, the mba.com/app/... URLs are dead; the user now lands
+// on StartTest 2 via the mba.com login flow. The `appUrl` for starttest sources
+// is the mba.com login entry so the /api/open-chrome launcher still works; the
+// scraper itself navigates inside the already-logged-in tab via CDP.
+const STARTTEST_ENTRY_URL = 'https://www.mba.com/my-account';
 const SOURCE_PRESETS = [
   {
+    id: 'og-main-2024-2025',
+    label: 'GMAT™ Official Guide 2024-2025',
+    platform: 'starttest',
+    productId: 1373434,
+    productName: 'GMAT™ Official Guide 2024-2025',
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
+    defaultSince: '20260101000000',
+  },
+  {
     id: 'og-verbal-review-2024-2025',
-    label: 'OG Verbal Review 2024-2025',
-    appUrl:
-      'https://gmatofficialpractice.mba.com/app/gmat-official-guide-2024-2025-verbal-review-online-question-bank',
-    clientId: 789329902,
-    reviewCategoryId: 1337003,
+    label: 'GMAT™ Official Guide 2024-2025 - Verbal',
+    platform: 'starttest',
+    productId: 1554373,
+    productName: 'GMAT™ Official Guide 2024-2025 - Verbal',
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
     defaultSince: '20260101000000',
   },
   {
     id: 'og-quantitative-review-2024-2025',
-    label: 'OG Quantitative Review 2024-2025',
-    appUrl:
-      'https://gmatofficialpractice.mba.com/app/gmat-official-guide-2024-2025-quantitative-review-online-question-bank',
-    clientId: 640835702,
-    reviewCategoryId: null,
-    defaultSince: '20250101000000',
+    label: 'GMAT™ Official Guide 2024-2025 - Quantitative',
+    platform: 'starttest',
+    productId: 1519887,
+    productName: 'GMAT™ Official Guide 2024-2025 - Quantitative',
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
+    defaultSince: '20260101000000',
   },
   {
     id: 'og-data-insights-review-2024-2025',
-    label: 'OG Data Insights Review 2024-2025',
-    appUrl:
-      'https://gmatofficialpractice.mba.com/app/gmat-official-guide-2024-2025-data-insights-review-online-question-bank',
-    clientId: 789329902,
-    reviewCategoryId: null,
-    defaultSince: '20250101000000',
-  },
-  {
-    id: 'og-main-2024-2025',
-    label: 'OG Main 2024-2025',
-    appUrl:
-      'https://gmatofficialpractice.mba.com/app/gmat-official-guide-2024-2025-online-question-bank',
-    clientId: 789329902,
-    reviewCategoryId: null,
-    defaultSince: '20250101000000',
+    label: 'GMAT™ Official Guide 2024-2025 - Data Insights',
+    platform: 'starttest',
+    productId: 1452568,
+    productName: 'GMAT™ Official Guide 2024-2025 - Data Insights',
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
+    defaultSince: '20260101000000',
   },
   {
     id: 'focus-quant-practice',
-    label: 'GMAT Focus Quantitative Practice',
-    appUrl: 'https://gmatofficialpractice.mba.com/app/gmat-focus-official-practice-questions-quantitative',
-    clientId: 789329902,
-    reviewCategoryId: null,
-    defaultSince: '20250101000000',
+    label: 'GMAT™ Official Practice - Quantitative',
+    platform: 'starttest',
+    productId: 1213806,
+    productName: 'GMAT™ Official Practice - Quantitative',
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
+    defaultSince: '20260101000000',
   },
   {
     id: 'focus-verbal-practice',
-    label: 'GMAT Focus Verbal Practice',
-    appUrl: 'https://gmatofficialpractice.mba.com/app/gmat-focus-official-practice-questions-verbal',
-    clientId: 789329902,
-    reviewCategoryId: null,
-    defaultSince: '20250101000000',
+    label: 'GMAT™ Official Practice - Verbal',
+    platform: 'starttest',
+    productId: 1213807,
+    productName: 'GMAT™ Official Practice - Verbal',
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
+    defaultSince: '20260101000000',
   },
   {
     id: 'focus-data-insights-practice',
-    label: 'GMAT Focus Data Insights Practice',
-    appUrl: 'https://gmatofficialpractice.mba.com/app/gmat-focus-official-practice-questions-data-insights',
-    clientId: 789329902,
-    reviewCategoryId: null,
-    defaultSince: '20250101000000',
+    label: 'GMAT™ Official Practice - Data Insights',
+    platform: 'starttest',
+    productId: 1213805,
+    productName: 'GMAT™ Official Practice - Data Insights',
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
+    defaultSince: '20260101000000',
   },
   {
     id: 'gmat-club-error-log',
     label: 'GMAT Club Error Log',
+    platform: 'gmatclub',
     appUrl: 'https://gmatclub.com/forum/analytics.php#error_log',
     clientId: null,
     reviewCategoryId: null,
@@ -310,6 +339,8 @@ app.get('/api/sources', (req, res) => {
       id: preset.id,
       label: preset.label,
       appUrl: preset.appUrl,
+      platform: preset.platform || 'legacy',
+      productName: preset.productName || null,
     })),
   });
 });
@@ -320,10 +351,11 @@ app.get('/api/sessions', async (req, res) => {
     const page = Math.max(1, Number(req.query.page || 1));
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
     const offset = (page - 1) * pageSize;
+    const platform = ['gmatclub', 'starttest'].includes(req.query.platform) ? req.query.platform : null;
 
     const [rows, total] = await Promise.all([
-      listSessions(runId, { limit: pageSize, offset }),
-      countSessions(runId),
+      listSessions(runId, { limit: pageSize, offset, platform }),
+      countSessions(runId, { platform }),
     ]);
 
     res.json({
@@ -373,6 +405,7 @@ app.get('/api/errors', async (req, res) => {
       confidence: req.query.confidence || '',
       search: req.query.search || '',
       mistakeTag: req.query.mistakeTag || '',
+      platform: ['gmatclub', 'starttest'].includes(req.query.platform) ? req.query.platform : null,
       sortKey: req.query.sortKey || 'session_date',
       sortOrder: req.query.sortOrder === 'asc' ? 'asc' : 'desc',
     };
@@ -747,6 +780,159 @@ app.post('/api/open-question', async (req, res) => {
   }
 });
 
+// Phase 2 endpoint: deep-enrich a single practice session. Takes the DB session
+// id (sessions.id), looks up its session_external_id + source, and runs the
+// per-item iframe loop in the user's logged-in CDP tab. Long-running (~3–5
+// minutes for a 20-question session). Each item adds ~5–8 s for the outer
+// page load + 3–6 s of human-like jitter. Aborts on any anomaly.
+app.post('/api/sessions/:sessionId/enrich', async (req, res) => {
+  try {
+    const sessionId = Number(req.params.sessionId);
+    if (!Number.isInteger(sessionId) || sessionId <= 0) {
+      res.status(400).json({ ok: false, error: 'Invalid session id.' });
+      return;
+    }
+    const validatedCdpUrl = getValidatedCdpUrl(req.body?.cdpUrl);
+    const sessionRow = await dbGet(
+      `
+        SELECT s.id, s.session_external_id, s.source, s.total_q_api
+        FROM sessions s
+        WHERE s.id = ?
+      `,
+      [sessionId]
+    );
+    if (!sessionRow) {
+      res.status(404).json({ ok: false, error: 'Session not found.' });
+      return;
+    }
+    const preset = resolveSourcePreset(sessionRow.source);
+    if (!preset) {
+      res.status(400).json({
+        ok: false,
+        error: `Unknown source "${sessionRow.source}".`,
+      });
+      return;
+    }
+
+    let phase2;
+    let dbResult;
+    if (preset.platform === 'starttest') {
+      phase2 = await runStartTestPhase2FromOpenBrowser({
+        cdpUrl: validatedCdpUrl,
+        sourceId: preset.id,
+        sid: String(sessionRow.session_external_id),
+        totalQ: Number(sessionRow.total_q_api) || 0,
+      });
+      dbResult = await enrichSessionAttempts({
+        sessionExternalId: sessionRow.session_external_id,
+        source: sessionRow.source,
+        enrichedItems: phase2.result?.items || [],
+      });
+    } else if (preset.platform === 'gmatclub') {
+      const targets = await listGmatClubEnrichTargets(sessionRow.id);
+      if (!targets.length) {
+        res.status(400).json({
+          ok: false,
+          error: 'No questions in this session have a question_url to enrich.',
+        });
+        return;
+      }
+      phase2 = await runGmatClubPhase2FromOpenBrowser({
+        cdpUrl: validatedCdpUrl,
+        targets: targets.map((t) => ({ q_id: t.q_id, q_code: t.q_code, url: t.question_url })),
+      });
+      dbResult = await enrichGmatClubSessionAttempts({
+        sessionExternalId: sessionRow.session_external_id,
+        source: sessionRow.source,
+        enrichedItems: phase2.result?.items || [],
+      });
+    } else {
+      res.status(400).json({
+        ok: false,
+        error: `Phase 2 enrichment is not supported for platform "${preset.platform}".`,
+      });
+      return;
+    }
+
+    res.json(withOptionalDebug({
+      ok: true,
+      sessionId,
+      sessionExternalId: sessionRow.session_external_id,
+      source: sessionRow.source,
+      qhTotal: phase2.result?.qhTotal || 0,
+      enrichedCount: phase2.result?.items?.length || 0,
+      dbUpdated: dbResult.updated,
+      dbSkipped: dbResult.skipped,
+      dbErrors: dbResult.errors,
+      scrapeErrors: phase2.result?.errors || [],
+      aborted: !!phase2.result?.aborted,
+      abortReason: phase2.result?.abortReason || null,
+      warning: phase2.result?.aborted
+        ? `Phase 2 aborted at item ${phase2.result.items.length}/${phase2.result.qhTotal}: ${phase2.result.abortReason}. Items already enriched were saved.`
+        : '',
+    }, {
+      debug: phase2.debug || null,
+    }));
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error('[api/sessions/:sessionId/enrich] failed', error);
+    res.status(Number(error.statusCode || 500)).json(withOptionalDebug({
+      ok: false,
+      error: error.message,
+      hint: 'Confirm the GMAT tab is on the matching product home before triggering. Phase 2 aborts on any anomaly so partial DB writes are still applied for items completed.',
+    }, {
+      details: clipText(error.stack || error.message || String(error), 4000),
+      debug: error.scrapeDebug || null,
+    }));
+  }
+});
+
+// Helper: lets the web app "open" a specific StartTest product in the user's
+// logged-in Chrome tab via CDP. Under the hood this calls `navigateToProduct`
+// in the starttest scraper (Home → click product link). Used so the user can
+// click one button to switch products instead of finding it in the tab menu.
+app.post('/api/open-product', async (req, res) => {
+  try {
+    const { source, cdpUrl } = req.body || {};
+    const validatedCdpUrl = getValidatedCdpUrl(cdpUrl);
+    const preset = resolveSourcePreset(source);
+    if (!preset) {
+      res.status(400).json({ ok: false, error: 'Unknown source. Please choose a source from the dropdown.' });
+      return;
+    }
+    if (preset.platform !== 'starttest') {
+      res.status(400).json({
+        ok: false,
+        error: `Source "${preset.label}" is not a StartTest product — nothing to open via /api/open-product.`,
+      });
+      return;
+    }
+    const result = await openStartTestProductInOpenBrowser({
+      sourceId: preset.id,
+      cdpUrl: validatedCdpUrl,
+    });
+    res.json(withOptionalDebug({
+      ok: true,
+      source: preset.label,
+      expectedHeading: result.expectedHeading,
+      activeHeading: result.activeHeading,
+      matches: result.matches,
+      tabUrl: result.tabUrl,
+    }, {
+      debug: result.debug || null,
+    }));
+  } catch (error) {
+    res.status(Number(error.statusCode || 500)).json(withOptionalDebug({
+      ok: false,
+      error: error.message,
+      hint: 'Confirm your Chrome tab is on starttest.com (signed in via mba.com first). If it is, try again; otherwise re-login.',
+    }, {
+      details: clipText(error.stack || error.message || String(error), 4000),
+      debug: error.openDebug || null,
+    }));
+  }
+});
+
 app.post('/api/scrape', async (req, res) => {
   try {
     const { source, cdpUrl, scrapeWindow, customSince } = req.body || {};
@@ -766,19 +952,37 @@ app.post('/api/scrape', async (req, res) => {
       fullDefaultSince: preset.defaultSince,
     });
 
-    const isCustomScraper = !!preset.scraperFile;
-    const { data, tabUrl, debug } = await runScrapeFromOpenBrowser({
-      since: sinceValue,
-      clientId: preset.clientId,
-      autoDetectClientId: !isCustomScraper,
-      reviewCategoryId: preset.reviewCategoryId,
-      autoDetectReviewCategoryId: !preset.reviewCategoryId && !isCustomScraper,
-      source: preset.label,
-      appUrl: preset.appUrl,
-      cdpUrl: validatedCdpUrl,
-      scraperPath: path.resolve(__dirname, 'scrapers', preset.scraperFile || 'gmat_scraper.js'),
-      tabPattern: preset.tabPattern || null,
-    });
+    // Route to the StartTest 2 scraper for starttest sources (the seven GMAT
+    // Official Practice books post-2026-04-22 migration). Fall back to the
+    // legacy injected-script flow for the remaining gmatclub source.
+    let data, tabUrl, debug;
+    if (preset.platform === 'starttest') {
+      const result = await runStartTestScrapeFromOpenBrowser({
+        sourceId: preset.id,
+        since: sinceValue,
+        cdpUrl: validatedCdpUrl,
+      });
+      data = result.data;
+      tabUrl = result.tabUrl;
+      debug = result.debug;
+    } else {
+      const isCustomScraper = !!preset.scraperFile;
+      const result = await runScrapeFromOpenBrowser({
+        since: sinceValue,
+        clientId: preset.clientId,
+        autoDetectClientId: !isCustomScraper,
+        reviewCategoryId: preset.reviewCategoryId,
+        autoDetectReviewCategoryId: !preset.reviewCategoryId && !isCustomScraper,
+        source: preset.label,
+        appUrl: preset.appUrl,
+        cdpUrl: validatedCdpUrl,
+        scraperPath: path.resolve(__dirname, 'scrapers', preset.scraperFile || 'gmat_scraper.js'),
+        tabPattern: preset.tabPattern || null,
+      });
+      data = result.data;
+      tabUrl = result.tabUrl;
+      debug = result.debug;
+    }
 
     let classification = null;
     try {

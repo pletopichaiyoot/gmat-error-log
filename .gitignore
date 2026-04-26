@@ -5,3 +5,25 @@ node_modules
 client/dist
 GMAT Error Log.xlsx
 .env
+.env.local
+.env.*.local
+
+# Playwright MCP test artifacts (console logs, page snapshots, screenshots)
+.playwright-mcp/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Logs and runtime debug output
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Misc temp / scratch
+*.tmp
+*.bak
+.cache/
+coverage/

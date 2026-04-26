@@ -468,9 +468,20 @@ function normalizeDiSubcategoryDisplay(value, categoryCode, contentDomain) {
   return text;
 }
 
+// StartTest stores subcategory as a short abbreviation ("VEO", "ARI", "COR")
+// while the human-readable name lives in `topic`. Prefer `topic` whenever
+// `subcategory` looks abbreviation-shaped (all-caps, ≤5 letters, no spaces).
+function pickReadableSubcategory(row) {
+  const sub = String(row?.subcategory || '').trim();
+  const topic = String(row?.topic || '').trim();
+  const looksAbbrev = sub.length > 0 && sub.length <= 5 && /^[A-Z0-9]+$/.test(sub);
+  if (looksAbbrev && topic) return topic;
+  return sub || topic || '';
+}
+
 function normalizedSubcategory(row) {
   const category = normalizedCategoryCode(row);
-  const raw = String(row?.subcategory || row?.topic || '').trim();
+  const raw = pickReadableSubcategory(row);
   if (!raw) return '-';
   const contentDomain = String(row?.content_domain || '').trim();
   return (
@@ -538,6 +549,24 @@ function SubjectCell({ row }) {
     <div className="section-cell">
       <span className="section-chip">{normalizeSubjectFamilyDisplay(subjectCode)}</span>
     </div>
+  );
+}
+
+function getSourcePlatform(sourceLabel) {
+  const raw = String(sourceLabel || '').trim();
+  if (!raw) return null;
+  if (/gmat\s*club/i.test(raw)) return 'gmatclub';
+  return 'starttest';
+}
+
+function SourceBadge({ source }) {
+  const platform = getSourcePlatform(source);
+  if (!platform) return <span className="muted">-</span>;
+  const label = platform === 'gmatclub' ? 'GMAT Club' : 'Official Guide';
+  return (
+    <span className={`source-chip source-${platform}`} title={source || ''}>
+      {label}
+    </span>
   );
 }
 
@@ -631,10 +660,13 @@ function App() {
     categoryBreakdown: [],
     subtopicBreakdown: [],
   });
-  const [filters, setFilters] = useState({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '' });
+  const [filters, setFilters] = useState({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' });
   const [syncCenterOpen, setSyncCenterOpen] = useState(false);
   const [isOpening, setIsOpening] = useState(false);
+  const [isOpeningProduct, setIsOpeningProduct] = useState(false);
   const [isScraping, setIsScraping] = useState(false);
+  const [isEnriching, setIsEnriching] = useState(false);
+  const [lastEnrichResult, setLastEnrichResult] = useState(null);
   const [syncDebug, setSyncDebug] = useState(null);
   const [patternDrilldown, setPatternDrilldown] = useState({
     open: false,
@@ -664,6 +696,7 @@ function App() {
   });
   const [openingQuestionKey, setOpeningQuestionKey] = useState('');
   const [sessionSubjectFilter, setSessionSubjectFilter] = useState('');
+  const [sessionPlatformFilter, setSessionPlatformFilter] = useState('');
   const [sessionSort, setSessionSort] = useState({ key: 'session_date', order: 'desc' });
   const [sessionAnalysisSort, setSessionAnalysisSort] = useState({ key: 'time_sec', order: 'desc' });
   const [errorSort, setErrorSort] = useState({ key: 'session_date', order: 'desc' });
@@ -826,11 +859,12 @@ function App() {
     ]);
   }
 
-  async function loadSessions(page, runId = selectedRunId) {
+  async function loadSessions(page, runId = selectedRunId, platform = sessionPlatformFilter) {
     const params = new URLSearchParams();
     if (runId) params.set('runId', runId);
     params.set('page', page);
     params.set('pageSize', sessionPagination.pageSize);
+    if (platform) params.set('platform', platform);
     const data = await fetchJson(`/api/sessions?${params.toString()}`);
     setSessions(data.sessions || []);
     setSessionPagination({
@@ -852,6 +886,7 @@ function App() {
     if (customFilters.confidence) params.set('confidence', customFilters.confidence);
     if (customFilters.search) params.set('search', customFilters.search);
     if (customFilters.mistakeTag) params.set('mistakeTag', customFilters.mistakeTag);
+    if (customFilters.platform) params.set('platform', customFilters.platform);
     params.set('sortKey', customSort.key);
     params.set('sortOrder', customSort.order);
 
@@ -934,7 +969,13 @@ function App() {
       loadErrorsByFilters(filters).catch(() => {});
     }, filters.search ? 350 : 0);
     return () => clearTimeout(id);
-  }, [filters.subject, filters.difficulty, filters.confidence, filters.search, filters.mistakeTag, filters.topic]);
+  }, [filters.subject, filters.difficulty, filters.confidence, filters.search, filters.mistakeTag, filters.topic, filters.platform]);
+
+  // Reload sessions list when the source-platform filter changes
+  useEffect(() => {
+    loadSessions(1, selectedRunId, sessionPlatformFilter).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionPlatformFilter]);
 
   async function handleOpenChrome() {
     if (!selectedSource) return;
@@ -974,6 +1015,93 @@ function App() {
       });
     } finally {
       setIsOpening(false);
+    }
+  }
+
+  // Navigate the user's already-logged-in Chrome tab to the selected GMAT
+  // product's home page. Used before Run Scrape so the scraper finds the
+  // right product's session table without having to switch products itself.
+  async function handleOpenProduct() {
+    if (!selectedSource) return;
+    setIsOpeningProduct(true);
+    setStatus({ message: `Navigating your GMAT tab to "${selectedSource}"...`, isError: false });
+    try {
+      const result = await fetchJson('/api/open-product', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cdpUrl: DEFAULT_CDP_URL, source: selectedSource }),
+      });
+      const mismatch = result.matches === false;
+      setStatus({
+        message: mismatch
+          ? `Tab did not switch to "${result.expectedHeading}" (tab shows "${result.activeHeading}"). Check your GMAT account owns this book.`
+          : `GMAT tab is on "${result.activeHeading || result.expectedHeading || result.source}". Ready to scrape.`,
+        isError: mismatch,
+      });
+      setSyncDebug({
+        action: 'open-product',
+        ok: true,
+        at: new Date().toISOString(),
+        source: result.source,
+        expectedHeading: result.expectedHeading,
+        activeHeading: result.activeHeading,
+        matches: result.matches,
+        tabUrl: result.tabUrl,
+        debug: result.debug || null,
+      });
+    } catch (error) {
+      setStatus({ message: formatRequestError(error), isError: true });
+      setSyncDebug({
+        action: 'open-product',
+        ok: false,
+        at: new Date().toISOString(),
+        error: error?.message || 'Open product failed',
+        hint: error?.hint || '',
+        details: error?.details || '',
+        debug: error?.debug || null,
+      });
+    } finally {
+      setIsOpeningProduct(false);
+    }
+  }
+
+  // Phase 2 (per-session deep enrichment). Long-running (~3–5 min for 20 items).
+  // Hits each item's review page sequentially with human-like jitter; saves
+  // stem/choices/passage/precise time/user-answer to the existing rows.
+  async function handleEnrichSession(sessionId) {
+    if (!sessionId || isEnriching) return;
+    setIsEnriching(true);
+    setLastEnrichResult(null);
+    setStatus({
+      message: 'Phase 2 enrichment running. This may take a few minutes — keep your GMAT tab on the matching product home and don\'t click around in it.',
+      isError: false,
+    });
+    try {
+      const result = await fetchJson(`/api/sessions/${sessionId}/enrich`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cdpUrl: DEFAULT_CDP_URL }),
+      });
+      const summary = result.aborted
+        ? `Phase 2 aborted at ${result.dbUpdated}/${result.qhTotal} items: ${result.abortReason}. Saved partial data.`
+        : `Phase 2 complete: ${result.dbUpdated}/${result.qhTotal} items enriched.`;
+      setStatus({ message: summary, isError: !!result.aborted });
+      setLastEnrichResult(result);
+      // Refresh the session analysis modal so newly-enriched fields show up.
+      if (sessionAnalysis.data?.session?.id === sessionId) {
+        await handleOpenSessionAnalysis(sessionAnalysis.data.session);
+      }
+    } catch (error) {
+      setStatus({ message: formatRequestError(error), isError: true });
+      setLastEnrichResult({
+        ok: false,
+        error: error?.message || 'Enrich failed',
+        hint: error?.hint || '',
+        details: error?.details || '',
+        debug: error?.debug || null,
+      });
+    } finally {
+      setIsEnriching(false);
     }
   }
 
@@ -2281,6 +2409,15 @@ function App() {
           <div className="filter-row session-filters">
             <Select
               className="filter-select"
+              value={sessionPlatformFilter}
+              onChange={(e) => setSessionPlatformFilter(e.target.value)}
+            >
+              <option value="">All sources</option>
+              <option value="starttest">Official Guide</option>
+              <option value="gmatclub">GMAT Club</option>
+            </Select>
+            <Select
+              className="filter-select"
               value={sessionSubjectFilter}
               onChange={(e) => setSessionSubjectFilter(e.target.value)}
             >
@@ -2304,12 +2441,13 @@ function App() {
                 onChange={(e) => setSessionDateRange((prev) => ({ ...prev, end: e.target.value }))}
               />
             </div>
-            {(sessionSubjectFilter || sessionDateRange.start || sessionDateRange.end) && (
+            {(sessionSubjectFilter || sessionPlatformFilter || sessionDateRange.start || sessionDateRange.end) && (
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => {
                   setSessionSubjectFilter('');
+                  setSessionPlatformFilter('');
                   setSessionDateRange({ start: '', end: '' });
                 }}
               >
@@ -2334,7 +2472,7 @@ function App() {
                 <thead>
                   <tr>
                     <th className="sortable" onClick={() => handleSessionSort('session_date')}>Date {sortIndicator(sessionSort, 'session_date')}</th>
-                    <th className="sortable" onClick={() => handleSessionSort('session_external_id')}>Session ID {sortIndicator(sessionSort, 'session_external_id')}</th>
+                    <th className="sortable" onClick={() => handleSessionSort('source')}>Source {sortIndicator(sessionSort, 'source')}</th>
                     <th className="sortable" onClick={() => handleSessionSort('subject')}>Subject {sortIndicator(sessionSort, 'subject')}</th>
                     <th className="sortable" onClick={() => handleSessionSort('question_count_display')}>Questions {sortIndicator(sessionSort, 'question_count_display')}</th>
                     <th className="sortable" onClick={() => handleSessionSort('error_count_display')}>Errors {sortIndicator(sessionSort, 'error_count_display')}</th>
@@ -2355,7 +2493,7 @@ function App() {
                   {processedSessions.map((row) => (
                     <tr key={`${row.session_external_id}-${row.run_id}`}>
                       <td>{formatDate(row.session_date)}</td>
-                      <td>{formatMaybe(row.session_external_id)}</td>
+                      <td><SourceBadge source={row.source} /></td>
                       <td className="section-col"><SubjectCell row={row} /></td>
                       <td>{formatMaybe(row.question_count_display)}</td>
                       <td>{formatMaybe(row.error_count_display)}</td>
@@ -2422,6 +2560,14 @@ function App() {
           <>
             <div className="filter-row">
                 <Select
+                  value={filters.platform}
+                  onChange={(event) => setFilters((prev) => ({ ...prev, platform: event.target.value }))}
+                >
+                  <option value="">All sources</option>
+                  <option value="starttest">Official Guide</option>
+                  <option value="gmatclub">GMAT Club</option>
+                </Select>
+                <Select
                   value={filters.subject}
                   onChange={(event) => setFilters((prev) => ({ ...prev, subject: event.target.value }))}
                 >
@@ -2464,11 +2610,11 @@ function App() {
                     <option key={tag} value={tag}>{tag}</option>
                   ))}
                 </Select>
-                {(filters.subject || filters.difficulty || filters.confidence || filters.search || filters.mistakeTag) && (
+                {(filters.subject || filters.difficulty || filters.confidence || filters.search || filters.mistakeTag || filters.platform) && (
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setFilters({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '' })}
+                    onClick={() => setFilters({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' })}
                   >
                     Clear
                   </Button>
@@ -2480,7 +2626,7 @@ function App() {
                 <thead>
                   <tr>
                     <th className="sortable" onClick={() => handleErrorSort('session_date')}>Date {sortIndicator(errorSort, 'session_date')}</th>
-                    <th className="sortable" onClick={() => handleErrorSort('session_external_id')}>Session {sortIndicator(errorSort, 'session_external_id')}</th>
+                    <th className="sortable" onClick={() => handleErrorSort('source')}>Source {sortIndicator(errorSort, 'source')}</th>
                     <th className="sortable section-col" onClick={() => handleErrorSort('subject')}>Subject {sortIndicator(errorSort, 'subject')}</th>
                     <th className="category-col">Category</th>
                     <th className="sortable topic-col" onClick={() => handleErrorSort('topic')}>Subcategory {sortIndicator(errorSort, 'topic')}</th>
@@ -2504,7 +2650,7 @@ function App() {
                   {errors.map((row) => (
                     <tr key={row.id}>
                       <td>{formatDate(row.session_date)}</td>
-                      <td>{formatMaybe(row.session_external_id)}</td>
+                      <td><SourceBadge source={row.source} /></td>
                       <td className="section-col"><SubjectCell row={row} /></td>
                       <td className="category-col">{formatMaybe(normalizedCategoryCode(row))}</td>
                       <td className="topic-col">{formatMaybe(normalizedSubcategory(row))}</td>
@@ -2649,6 +2795,17 @@ function App() {
                     >
                       {isOpening ? 'Opening...' : 'Open Chrome (CDP)'}
                     </Button>
+                    {sources.find((s) => s.id === selectedSource)?.platform === 'starttest' && (
+                      <Button
+                        variant="outline"
+                        type="button"
+                        disabled={isOpeningProduct || !selectedSource}
+                        onClick={handleOpenProduct}
+                        title="Switch your GMAT Chrome tab to the selected product's home page"
+                      >
+                        {isOpeningProduct ? 'Switching...' : 'Open in GMAT'}
+                      </Button>
+                    )}
                     <Button
                       type="button"
                       disabled={isScraping || !selectedSource || (scrapeWindow === 'custom' && !customSince)}
@@ -2842,11 +2999,38 @@ function App() {
           <div className="analysis-dialog session-analysis-dialog" onClick={(event) => event.stopPropagation()}>
             <div className="analysis-shell">
             <div className="analysis-header">
-              <h2>Session Analysis</h2>
-              <Button variant="outline" type="button" onClick={handleCloseSessionAnalysis}>
-                Close
-              </Button>
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                <h2 style={{ margin: 0 }}>Session Analysis</h2>
+                {sessionAnalysis.data?.session?.source && (
+                  <SourceBadge source={sessionAnalysis.data.session.source} />
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                {sessionAnalysis.data?.session && sources.some((s) => s.label === sessionAnalysis.data.session.source && (s.platform === 'starttest' || s.platform === 'gmatclub')) && (
+                  <Button
+                    variant="outline"
+                    type="button"
+                    disabled={isEnriching}
+                    onClick={() => handleEnrichSession(sessionAnalysis.data.session.id)}
+                    title="Phase 2: deep-enrich this session by visiting each question's page. Long-running; keep the matching tab open."
+                  >
+                    {isEnriching ? 'Enriching…' : 'Enrich Phase 2'}
+                  </Button>
+                )}
+                <Button variant="outline" type="button" onClick={handleCloseSessionAnalysis}>
+                  Close
+                </Button>
+              </div>
             </div>
+            {lastEnrichResult && sessionAnalysis.data?.session && (
+              <div className={`status ${lastEnrichResult.ok === false || lastEnrichResult.aborted ? 'error' : ''}`} style={{ marginBottom: '8px', fontSize: '0.85rem' }}>
+                {lastEnrichResult.ok === false
+                  ? `Phase 2 failed: ${lastEnrichResult.error}`
+                  : lastEnrichResult.aborted
+                    ? `Phase 2 aborted: ${lastEnrichResult.dbUpdated}/${lastEnrichResult.qhTotal} saved (${lastEnrichResult.abortReason})`
+                    : `Phase 2: ${lastEnrichResult.dbUpdated}/${lastEnrichResult.qhTotal} items enriched.`}
+              </div>
+            )}
 
             {sessionAnalysis.loading && <p className="muted loading-pulse">Loading session data...</p>}
             {sessionAnalysis.error && <p className="status error">{sessionAnalysis.error}</p>}
@@ -3204,29 +3388,136 @@ function App() {
                       })}
                     </div>
                   ) : parseAnswerChoices(questionReview.row.answer_choices).length ? (
-                    <div className="answer-choice-list">
-                      {parseAnswerChoices(questionReview.row.answer_choices).map((choice, index) => {
-                        const label = String(choice?.label || String.fromCharCode(65 + index)).trim();
-                        const text = normalizeQuestionText(choice?.text || '');
-                        const isMine = String(questionReview.row.my_answer || '').trim().toUpperCase() === label.toUpperCase();
-                        const isCorrect = String(questionReview.row.correct_answer || '').trim().toUpperCase() === label.toUpperCase();
+                    (() => {
+                      const choices = parseAnswerChoices(questionReview.row.answer_choices);
+                      const fmt = String(questionReview.row.response_format || '').toLowerCase();
+                      const myAns = String(questionReview.row.my_answer || '').trim();
+                      const corrAns = String(questionReview.row.correct_answer || '').trim();
+                      // Trust per-choice flags only when at least one option is
+                      // actually marked. The two flags are evaluated
+                      // independently — some StartTest rows capture which
+                      // option the user picked but not which one is correct,
+                      // and we want to fall back per-flag in that case.
+                      const anyMine = choices.some((c) => c?.isUserSelected === true);
+                      const anyCorrectFlagged = choices.some((c) => c?.isCorrect === true);
+                      const Legend = (
+                        <div className="answer-choice-legend">
+                          <span className="legend-item"><span className="legend-dot legend-dot-correct" />Correct answer</span>
+                          <span className="legend-item"><span className="legend-dot legend-dot-right" />Your pick · right</span>
+                          <span className="legend-item"><span className="legend-dot legend-dot-wrong" />Your pick · wrong</span>
+                        </div>
+                      );
+
+                      if (fmt === 'matrix' && Array.isArray(choices[0]?.options)) {
+                        const headers = Array.isArray(choices[0]?.headers) ? choices[0].headers : [];
+                        const colCount = headers.length || (choices[0]?.options?.length ?? 0);
                         return (
-                          <article
-                            key={`${label}-${index}`}
-                            className={`answer-choice-card${isMine ? ' mine' : ''}${isCorrect ? ' correct' : ''}`}
-                          >
-                            <div className="answer-choice-head">
-                              <strong>{label}</strong>
-                              <div className="answer-choice-flags">
-                                {isMine && <span className="question-mini-chip">Your pick</span>}
-                                {isCorrect && <span className="question-mini-chip success-chip">Correct</span>}
-                              </div>
+                          <div className="answer-matrix-wrap">
+                            {Legend}
+                            <div
+                              className="answer-matrix-grid"
+                              style={{ gridTemplateColumns: `minmax(0,1fr) repeat(${colCount}, minmax(80px, max-content))` }}
+                            >
+                              <div className="amg-corner" />
+                              {Array.from({ length: colCount }).map((_, ci) => (
+                                <div key={`h-${ci}`} className="amg-header">{headers[ci] || ''}</div>
+                              ))}
+                              {choices.map((row, ri) => (
+                                <Fragment key={`r-${ri}`}>
+                                  <div className="amg-row-label">
+                                    <span className="amg-row-num">{ri + 1}</span>
+                                    <span>{normalizeQuestionText(row?.text || row?.label || '') || '-'}</span>
+                                  </div>
+                                  {Array.from({ length: colCount }).map((_, ci) => {
+                                    const opt = (row?.options || [])[ci] || {};
+                                    const userPicked = !!opt.isUserSelected;
+                                    const correct = !!opt.isCorrect;
+                                    const cls = userPicked && correct ? 'cell-right'
+                                      : userPicked ? 'cell-wrong'
+                                      : correct ? 'cell-correct'
+                                      : '';
+                                    const sym = userPicked && correct ? '✓'
+                                      : userPicked ? '✗'
+                                      : correct ? '✓'
+                                      : '';
+                                    return <div key={`c-${ri}-${ci}`} className={`amg-cell ${cls}`}>{sym}</div>;
+                                  })}
+                                </Fragment>
+                              ))}
                             </div>
-                            <p>{text || '-'}</p>
-                          </article>
+                          </div>
                         );
-                      })}
-                    </div>
+                      }
+
+                      if (fmt === 'dropdown') {
+                        const correctParts = corrAns ? corrAns.split(/\s*,\s*/) : [];
+                        return (
+                          <div className="answer-blank-wrap">
+                            {Legend}
+                            <div className="answer-blank-list">
+                              {choices.map((blank, bi) => {
+                                const userText = String(blank?.text || '').trim();
+                                const isPlaceholder = !userText || /^select\.\.\.?$/i.test(userText);
+                                const correctText = (correctParts[bi] || '').trim();
+                                const userIsRight = !isPlaceholder && correctText && userText === correctText;
+                                return (
+                                  <article key={`b-${bi}`} className="answer-blank-card">
+                                    <header className="answer-blank-head">
+                                      <strong>{blank?.label || `Blank ${bi + 1}`}</strong>
+                                    </header>
+                                    <div className="answer-blank-body">
+                                      <div className={`answer-blank-cell ${userIsRight ? 'cell-right' : isPlaceholder ? 'cell-empty' : 'cell-wrong'}`}>
+                                        <span className="answer-blank-meta">Your pick</span>
+                                        <span className="answer-blank-text">{isPlaceholder ? '—' : userText}</span>
+                                      </div>
+                                      <div className={`answer-blank-cell ${userIsRight ? 'cell-right' : 'cell-correct'}`}>
+                                        <span className="answer-blank-meta">Correct</span>
+                                        <span className="answer-blank-text">{correctText || '—'}</span>
+                                      </div>
+                                    </div>
+                                  </article>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div className="answer-choice-wrap">
+                          {Legend}
+                          <div className="answer-choice-list">
+                            {choices.map((choice, index) => {
+                              const label = String(choice?.label || String.fromCharCode(65 + index)).trim();
+                              const text = normalizeQuestionText(choice?.text || '');
+                              const isMine = anyMine
+                                ? !!choice?.isUserSelected
+                                : myAns.toUpperCase() === label.toUpperCase();
+                              const isCorrect = anyCorrectFlagged
+                                ? !!choice?.isCorrect
+                                : corrAns.toUpperCase() === label.toUpperCase();
+                              const variant = isMine && isCorrect ? 'mine correct'
+                                : isMine ? 'mine wrong'
+                                : isCorrect ? 'correct-only'
+                                : '';
+                              return (
+                                <article key={`${label}-${index}`} className={`answer-choice-card ${variant}`}>
+                                  <div className="answer-choice-head">
+                                    <strong>{label}</strong>
+                                    <div className="answer-choice-flags">
+                                      {isMine && isCorrect && <span className="question-mini-chip success-chip">Your pick · Correct</span>}
+                                      {isMine && !isCorrect && <span className="question-mini-chip">Your pick · Wrong</span>}
+                                      {!isMine && isCorrect && <span className="question-mini-chip accent-chip">Correct answer</span>}
+                                    </div>
+                                  </div>
+                                  <p>{text || '-'}</p>
+                                </article>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })()
                   ) : (
                     <p className="muted">No answer choices were scraped for this question.</p>
                   )}

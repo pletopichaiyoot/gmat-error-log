@@ -92,6 +92,58 @@ const CATEGORY_LABELS = {
   TPA: TPA_LABELS,
 };
 
+// ─── StartTest 2 / ITD platform-authoritative taxonomy → canonical labels ───
+//
+// StartTest's Diagnostic Report exposes a `data-index="Subject.Category.Sub.Topic"`
+// hierarchy — see the `tr.review-area` rows. Phase 1 extracts those into our
+// (subject_code, category_code, subcategory, topic) fields with
+// `topic_source = 'starttest-report'`. The leaf labels StartTest uses
+// ("Computation", "Algebraic Manipulation", "Main Idea") don't all line up
+// with the canonical 30-label vocabulary used elsewhere in the dashboard.
+//
+// The two maps below provide a deterministic, no-LLM translation. The path
+// map ("Q.PS.ARI") is keyed by tier-3 (subject_code + category_code +
+// subcategory upper-cased) and is preferred. The leaf-label map is a fallback
+// for cases where the same topic name maps consistently regardless of path.
+//
+// Anything not matched here passes through with `topic_source = 'starttest-report'`
+// — the dashboard will show the StartTest leaf label verbatim.
+const STARTTEST_PATH_TO_CANONICAL = Object.freeze({
+  // Quant Problem Solving — tier-3 code → canonical PS bucket
+  'Q.PS.ALG': 'Algebra & Equations',
+  'Q.PS.ARI': 'Arithmetic, FDP & Ratios',
+  'Q.PS.NUM': 'Number Properties',
+  'Q.PS.NPR': 'Number Properties',
+  'Q.PS.STA': 'Statistics',
+  'Q.PS.STS': 'Statistics',
+  'Q.PS.SET': 'Overlapping Sets',
+  'Q.PS.CNT': 'Counting & Probability',
+  'Q.PS.GEO': 'Geometry',
+  'Q.PS.FNS': 'Functions, Sequences & Inequalities',
+  'Q.PS.FUN': 'Functions, Sequences & Inequalities',
+  'Q.PS.RWM': 'Rates, Work & Motion',
+  'Q.PS.WRD': 'General Word Problems',
+  'Q.PS.WPR': 'General Word Problems',
+});
+
+// Contextual leaf-label map. Keys are `<SUBJECT_CODE>|<CATEGORY_CODE>|<topic>`,
+// with `*` as a wildcard for category_code. Looked up most-specific to least-
+// specific. Without context-awareness a leaf like "Percent" appearing under
+// a DI item could be misrouted to a Quant canonical label.
+const STARTTEST_LEAF_TO_CANONICAL = Object.freeze({
+  // Verbal RC vocabulary evolution
+  'V|RC|Main Idea': 'Main Idea / Purpose',
+  // Verbal CR vocabulary evolution
+  'V|CR|Strengthen': 'Support',
+  'V|CR|Weaken': 'Attack',
+  // Quant PS leaf labels (apply across PS sub-categories — wildcard category)
+  'Q|*|Algebraic Manipulation': 'Algebra & Equations',
+  'Q|*|Computation': 'Arithmetic, FDP & Ratios',
+  'Q|*|Percent': 'Arithmetic, FDP & Ratios',
+  'Q|*|Ratio, Proportion': 'Arithmetic, FDP & Ratios',
+  'Q|*|Ratio Proportion': 'Arithmetic, FDP & Ratios',
+});
+
 const ALL_TOPIC_LABELS = [
   ...new Set([
     ...PS_LABELS,
@@ -435,13 +487,82 @@ async function classifyBatch(model, batch) {
   }
 }
 
+// Apply the deterministic StartTest taxonomy → canonical mapping. Returns the
+// canonical label, or null if no confident map exists.
+function mapStartTestToCanonical(question) {
+  const subjectCode = String(question?.subject_code || '').trim().toUpperCase();
+  const categoryCode = String(question?.category_code || '').trim().toUpperCase();
+  const subcategory = String(question?.subcategory || '').trim().toUpperCase();
+  const topic = String(question?.topic || '').trim();
+
+  // Path-based map first (most specific, e.g., "Q.PS.ARI").
+  if (subjectCode && categoryCode && subcategory) {
+    const path = `${subjectCode}.${categoryCode}.${subcategory}`;
+    if (STARTTEST_PATH_TO_CANONICAL[path]) return STARTTEST_PATH_TO_CANONICAL[path];
+  }
+  // Contextual leaf-label map. Try most-specific (subject+category+leaf) first,
+  // then subject-only with wildcard category. This prevents a Quant-flavored
+  // leaf label from re-routing a DI item to a Quant canonical bucket.
+  if (topic && subjectCode) {
+    const specific = `${subjectCode}|${categoryCode || ''}|${topic}`;
+    if (STARTTEST_LEAF_TO_CANONICAL[specific]) return STARTTEST_LEAF_TO_CANONICAL[specific];
+    const wildcard = `${subjectCode}|*|${topic}`;
+    if (STARTTEST_LEAF_TO_CANONICAL[wildcard]) return STARTTEST_LEAF_TO_CANONICAL[wildcard];
+  }
+  // Pass-through if the StartTest leaf is already a canonical label
+  // (e.g., "Inference", "Support", "Attack", "Statistics").
+  if (topic && ALL_TOPIC_LABELS.includes(topic)) return topic;
+  return null;
+}
+
 async function classifyScrapedQuestions(data, options = {}) {
   const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
   const items = [];
   let sequence = 0;
+  let preserved = 0;     // questions skipped because they have a non-LLM topic_source
+  let canonicalized = 0; // starttest-report rows mapped to canonical (no LLM)
 
   for (const session of sessions) {
     for (const question of Array.isArray(session?.questions) ? session.questions : []) {
+      const existingSource = String(question?.topic_source || '').trim().toLowerCase();
+
+      // (B) For StartTest sources, try the deterministic canonical map first.
+      // If it matches, set the canonical label and mark as `starttest-canonical`
+      // so the LLM never touches this row.
+      if (existingSource === 'starttest-report') {
+        const canonical = mapStartTestToCanonical(question);
+        if (canonical) {
+          question.topic = canonical;
+          question.subcategory = canonical;
+          question.topic_source = 'starttest-canonical';
+          canonicalized += 1;
+          preserved += 1;
+          continue;
+        }
+        // No confident map — leave the StartTest leaf label in place.
+        // Still skip the LLM (StartTest's label is platform-authoritative).
+        preserved += 1;
+        continue;
+      }
+
+      // (A) + (C) Idempotency: never overwrite a non-LLM source. This
+      // protects 'starttest-canonical', 'heuristic', and any future source.
+      if (existingSource && existingSource !== 'llm') {
+        preserved += 1;
+        continue;
+      }
+
+      // Skip re-classification when the row is already llm-classified with a
+      // canonical topic — saves LLM cost on re-scrapes. The metadata-derivation
+      // pass below still picks up category_code/subject_code from the topic.
+      if (existingSource === 'llm') {
+        const existingTopic = String(question?.topic || '').trim();
+        if (existingTopic && ALL_TOPIC_LABELS.includes(existingTopic)) {
+          preserved += 1;
+          continue;
+        }
+      }
+
       const questionStem = clipText(question?.question_stem || '', MAX_STEM_CHARS);
       const answerChoices = Array.isArray(question?.answer_choices) ? question.answer_choices : [];
       if (!questionStem && !answerChoices.length) continue;
@@ -464,9 +585,11 @@ async function classifyScrapedQuestions(data, options = {}) {
     return {
       attempted: 0,
       classified: 0,
+      canonicalized,
+      preserved,
       batches: 0,
       skipped: true,
-      reason: 'no_question_content',
+      reason: preserved ? 'all_preserved_no_llm_needed' : 'no_question_content',
     };
   }
 
@@ -493,9 +616,38 @@ async function classifyScrapedQuestions(data, options = {}) {
     }
   }
 
+  // Backfill session.subject for sources that don't carry a subject signal
+  // (e.g., GMAT Club, where the analytics table has no forum/subject column).
+  // Pick the dominant subject_code across the session's questions.
+  for (const session of sessions) {
+    if (String(session?.subject || '').trim()) continue;
+    const counts = { Q: 0, V: 0, DI: 0 };
+    const questions = Array.isArray(session?.questions) ? session.questions : [];
+    for (const question of questions) {
+      const meta = deriveQuestionMetadata(question, session);
+      const code = String(meta?.subject_code || '').trim().toUpperCase();
+      if (code === 'Q' || code === 'V' || code === 'DI') counts[code] += 1;
+    }
+    const total = counts.Q + counts.V + counts.DI;
+    if (!total) continue;
+    const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    const [code, n] = dominant;
+    // Use the dominant only if it accounts for at least half of classified
+    // questions; otherwise leave the session as Mixed.
+    if (n / total < 0.5) {
+      session.subject = 'Mixed';
+      continue;
+    }
+    if (code === 'Q') session.subject = 'Quant';
+    else if (code === 'V') session.subject = 'Verbal';
+    else if (code === 'DI') session.subject = 'DI';
+  }
+
   return {
     attempted: items.length,
     classified,
+    canonicalized,
+    preserved,
     batches: Math.ceil(items.length / batchSize),
     skipped: false,
   };
@@ -503,5 +655,8 @@ async function classifyScrapedQuestions(data, options = {}) {
 
 module.exports = {
   ALL_TOPIC_LABELS,
+  STARTTEST_PATH_TO_CANONICAL,
+  STARTTEST_LEAF_TO_CANONICAL,
+  mapStartTestToCanonical,
   classifyScrapedQuestions,
 };

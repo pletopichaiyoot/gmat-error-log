@@ -54,6 +54,11 @@ function inferCategoryCodeFromTopic(value) {
   if (!upper) return '';
 
   if (upper === 'DATA SUFFICIENCY') return 'DS';
+  if (upper === 'UNCLEAR TOPIC') return 'DS';
+  // PS/DS share these subcategory labels. Default to PS so sources without an
+  // explicit category signal (e.g., GMAT Club forum rows) still get a valid
+  // subject. StartTest rows already carry an authoritative `category_code`,
+  // so this fallback never fires for them.
   if (
     [
       'ALGEBRA & EQUATIONS',
@@ -66,10 +71,9 @@ function inferCategoryCodeFromTopic(value) {
       'GEOMETRY',
       'FUNCTIONS, SEQUENCES & INEQUALITIES',
       'GENERAL WORD PROBLEMS',
-      'UNCLEAR TOPIC',
     ].includes(upper)
   ) {
-    return upper === 'UNCLEAR TOPIC' ? 'DS' : '';
+    return 'PS';
   }
   if (upper === 'MULTI-SOURCE REASONING' || upper === 'MSR MATH RELATED' || upper === 'MSR NON-MATH RELATED') return 'MSR';
   if (upper === 'MATH-BASED REASONING' || upper === 'NON-MATH REASONING') return '';

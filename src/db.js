@@ -892,10 +892,23 @@ async function getLatestRunId() {
   return row ? row.id : null;
 }
 
-async function listSessions(runId, { limit, offset } = {}) {
+function platformWhereClause(platform) {
+  // Heuristic match — matches the frontend's getSourcePlatform().
+  if (platform === 'gmatclub') return "LOWER(COALESCE(s.source, '')) LIKE '%gmat club%'";
+  if (platform === 'starttest') return "LOWER(COALESCE(s.source, '')) NOT LIKE '%gmat club%'";
+  return null;
+}
+
+async function listSessions(runId, { limit, offset, platform } = {}) {
   const params = [];
-  const whereClause = runId ? 'WHERE s.run_id = ?' : '';
-  if (runId) params.push(runId);
+  const conditions = [];
+  if (runId) {
+    conditions.push('s.run_id = ?');
+    params.push(runId);
+  }
+  const platformClause = platformWhereClause(platform);
+  if (platformClause) conditions.push(platformClause);
+  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const unansweredExpr = unansweredPlaceholderExpr('q');
   const answeredCountExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) THEN 1 ELSE 0 END)`;
   const answeredCorrectExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN 1 ELSE 0 END)`;
@@ -1037,18 +1050,29 @@ async function listSessions(runId, { limit, offset } = {}) {
   );
 }
 
-async function countSessions(runId) {
+async function countSessions(runId, { platform } = {}) {
   const params = [];
-  const whereClause = runId ? 'WHERE run_id = ?' : '';
-  if (runId) params.push(runId);
+  const conditions = [];
+  if (runId) {
+    conditions.push('run_id = ?');
+    params.push(runId);
+  }
+  // Mirror listSessions but on the bare table (no `s.` alias here).
+  if (platform === 'gmatclub') {
+    conditions.push("LOWER(COALESCE(source, '')) LIKE '%gmat club%'");
+  } else if (platform === 'starttest') {
+    conditions.push("LOWER(COALESCE(source, '')) NOT LIKE '%gmat club%'");
+  }
+  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const row = await get(`SELECT COUNT(*) as total FROM sessions ${whereClause}`, params);
   return row ? row.total : 0;
 }
 
-async function listErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag, sortKey, sortOrder, limit, offset }) {
+async function listErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag, platform, sortKey, sortOrder, limit, offset }) {
   const ALLOWED_SORT = {
     session_date: 's.session_date',
     session_external_id: 's.session_external_id',
+    source: 's.source',
     q_code: 'q.q_code',
     subject: 'subject',
     difficulty: 'q.difficulty',
@@ -1269,6 +1293,8 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
     where.push('q.run_id = ?');
     params.push(runId);
   }
+  const platformClause = platformWhereClause(platform);
+  if (platformClause) where.push(platformClause);
 
   if (subject) {
     const normalizedSubjectFilter = String(subject || '').trim().toUpperCase();
@@ -1388,7 +1414,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
   return rows.map((row) => enrichQuestionMetadata(row));
 }
 
-async function countErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag }) {
+async function countErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag, platform }) {
   const params = [];
   const where = ['q.correct = 0', `NOT (${unansweredPlaceholderExpr('q')})`];
   // Re-use expressions for subject and topic logic to ensure consistency
@@ -1594,6 +1620,8 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
     where.push('q.run_id = ?');
     params.push(runId);
   }
+  const platformClause2 = platformWhereClause(platform);
+  if (platformClause2) where.push(platformClause2);
   if (subject) {
     const normalizedSubjectFilter = String(subject || '').trim().toUpperCase();
     if (['Q', 'V', 'DI'].includes(normalizedSubjectFilter)) {
@@ -2363,6 +2391,357 @@ async function getLatestRunForSource(source) {
   );
 }
 
+// Phase 2 enrichment: takes a session id (StartTest sid) and the array of items
+// returned by runPhase2 in starttest_scraper.js. For each enriched item, find
+// the existing question_attempts row by composite q_id ("<sid>-seq-<N>") or by
+// already-enriched ItemName, and UPDATE it with full stem/choices/answer/etc.
+// User annotations (mistake_type, notes) are preserved automatically because
+// the UPDATE statement only touches enrichment columns.
+async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems }) {
+  const sessionRow = await get(
+    `
+      SELECT id
+      FROM sessions
+      WHERE session_external_id = ?
+        AND COALESCE(source, '') = COALESCE(?, '')
+      ORDER BY id DESC
+      LIMIT 1
+    `,
+    [Number(sessionExternalId) || sessionExternalId, source || null]
+  );
+  if (!sessionRow?.id) {
+    return { matched: 0, updated: 0, skipped: 0, errors: [{ message: 'session-not-found', sessionExternalId, source }] };
+  }
+  const sessionDbId = sessionRow.id;
+
+  let updated = 0;
+  let skipped = 0;
+  const errors = [];
+
+  for (const item of (Array.isArray(enrichedItems) ? enrichedItems : [])) {
+    const seq = Number.isInteger(item?.seq) ? item.seq : null;
+    if (seq === null) {
+      errors.push({ message: 'item missing seq', item: { vItemName: item?.vItemName } });
+      continue;
+    }
+    const compositeId = `${sessionExternalId}-seq-${seq}`;
+    const itemName = item.vItemName || item.itemMeta?.ItemName || null;
+    const formQuestionId = item.itemMeta?.FormQuestionID;
+    const stableKey =
+      Array.isArray(item.vItemInformation) && item.vItemInformation[1]
+        ? item.vItemInformation[1].Key || null
+        : null;
+
+    // Match on EITHER the Phase 1 composite OR a previously-enriched ItemName.
+    const targetRow = await get(
+      `
+        SELECT id, mistake_type, notes, correct, q_id
+        FROM question_attempts
+        WHERE session_id = ?
+          AND (q_id = ? OR q_id = ?)
+        LIMIT 1
+      `,
+      [sessionDbId, compositeId, itemName || compositeId]
+    );
+    if (!targetRow) {
+      skipped += 1;
+      continue;
+    }
+
+    // Build derived fields.
+    const responseFormat = item.choicesType || null;
+
+    // answer_choices is stored as a FLAT ARRAY of {label, text, ...} so the
+    // dashboard's parseAnswerChoices can render it the same way it renders
+    // legacy data. Per-choice extras (color, isCorrect, isUserSelected, value)
+    // are added on top — the UI ignores fields it doesn't know about.
+    // Only strip a leading enumerator like "A) " or "A." — require a real
+    // separator. A bare leading letter (e.g. "Bacteria are not...") MUST
+    // be left untouched, otherwise the first letter of the choice text gets
+    // eaten and the label is misread from the body.
+    const cleanText = (s) => String(s || '').replace(/^\s*[A-Za-z][\).]\s+/, '').replace(/\s+/g, ' ').trim();
+    let answerChoicesArr = [];
+    if (item.choicesType === 'single' && Array.isArray(item.choices)) {
+      answerChoicesArr = item.choices.map((c, idx) => {
+        const valNum = Number(c?.value);
+        const letterFromValue = (Number.isInteger(valNum) && valNum >= 1 && valNum <= 26)
+          ? String.fromCharCode(64 + valNum) : null;
+        // Same separator-required guard: "A) ..." → "A", but "Bacteria..." → null.
+        const letterFromLabel = String(c?.label || '').match(/^\s*([A-E])[\).]/)?.[1] || null;
+        const label = letterFromLabel || letterFromValue || String.fromCharCode(65 + idx);
+        return {
+          label,
+          text: cleanText(c?.label),
+          value: c?.value,
+          color: c?.color || null,
+          isCorrect: !!c?.isCorrect,
+          isUserSelected: !!c?.isUserSelected,
+        };
+      });
+    } else if (item.choicesType === 'matrix' && item.choices?.rows) {
+      // Matrix: one element per sub-question (row). The UI's per-row
+      // rendering will need its own component later; for now we expose enough
+      // data that it could render a table.
+      answerChoicesArr = item.choices.rows.map((row, idx) => ({
+        label: `Q${idx + 1}`,
+        text: row.label || '',
+        options: row.options || [],
+        headers: item.choices.headers || [],
+      }));
+    } else if (item.choicesType === 'dropdown' && Array.isArray(item.choices?.dropdowns)) {
+      answerChoicesArr = item.choices.dropdowns.map((d, idx) => ({
+        label: `Blank ${idx + 1}`,
+        text: d?.selectedText ?? d?.selected ?? '',
+        value: d?.selected,
+        options: d?.options || [],
+      }));
+    }
+
+    const responseDetailsPayload = {
+      itemType: item.vItemType || null,
+      vPassageName: item.vPassageName || null,
+      vItemInformation: item.vItemInformation || null,
+      answerSelection: item.answerSelection ?? null,
+      vPreviousTimeSpentMs: typeof item.vPreviousTimeSpent === 'number' ? item.vPreviousTimeSpent : null,
+      passage: item.passage || null,
+      keyPoint: item.keyPoint || null,
+      rationale: item.rationale || null,
+      yourScoreText: item.yourScoreText || null,
+      correctKey: item.correctKey || null,
+    };
+
+    // Derive my_answer. We prefer the letter form (A/B/C/D/E) for single-choice
+    // items so it matches the convention used by the legacy Nuxt scraper's data,
+    // making the dashboard's "my answer" column readable across both eras.
+    //   - Single-choice: letter from the checked radio's label ("A) ..." → "A").
+    //     Falls back to numeric value if no leading letter is found.
+    //   - Matrix: CSV from answerSelection[1] (e.g. "1,1,2").
+    //   - Fallback: first checked choice in the DOM.
+    const choiceValueToLetter = (val) => {
+      const n = Number(val);
+      return Number.isInteger(n) && n >= 1 && n <= 26 ? String.fromCharCode(64 + n) : null;
+    };
+    let myAnswer = null;
+    if (item.choicesType === 'single' && Array.isArray(item.choices)) {
+      const checked = item.choices.find((c) => c && (c.checked || c.isUserSelected));
+      if (checked) {
+        const labelLetter = (checked.label || '').match(/^\s*([A-E])\s*[\).]?/)?.[1];
+        myAnswer = labelLetter || choiceValueToLetter(checked.value) || String(checked.value);
+      }
+    } else if (item.choicesType === 'matrix' && item.choices?.rows) {
+      // Matrix has two layouts that need different my_answer formats:
+      //   - MSR Yes/No-style: pick one COLUMN per ROW. Key1 has rowCount entries
+      //     (e.g. "1,2,2" for 3 rows). my_answer = col index per row.
+      //   - Two-Part Analysis: pick one ROW per COLUMN. Key1 has colCount entries
+      //     (e.g. "4,5" for 2 cols). my_answer = row index per col.
+      // Detect from Key1 arity; fall back to row-walk for ambiguous cases.
+      const rows = item.choices.rows;
+      const colCount = (item.choices.headers || []).length || (rows[0]?.options?.length ?? 0);
+      const keyParts = (item.correctKey || '').split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+      const isTwoPart = keyParts.length > 0
+        && keyParts.length === colCount
+        && colCount !== rows.length;
+      if (isTwoPart) {
+        const parts = [];
+        for (let c = 0; c < colCount; c += 1) {
+          const rIdx = rows.findIndex((row) => row.options?.[c]?.isUserSelected);
+          parts.push(rIdx >= 0 ? String(rIdx + 1) : '');
+        }
+        myAnswer = parts.join(',');
+      } else {
+        const parts = rows.map((row) => {
+          const idx = (row.options || []).findIndex((o) => o && o.isUserSelected);
+          return idx >= 0 ? String(idx + 1) : '';
+        });
+        myAnswer = parts.join(',');
+      }
+    } else if (item.choicesType === 'dropdown' && item.choices && Array.isArray(item.choices.dropdowns)) {
+      // Graphics Interpretation: join each dropdown's selected text with commas.
+      // Skip the placeholder "Select..." that appears when the user didn't pick.
+      const parts = item.choices.dropdowns.map((d) => {
+        const t = String(d?.selectedText ?? d?.selected ?? '').trim();
+        return /^select\.\.\.?$/i.test(t) ? '' : t;
+      });
+      myAnswer = parts.some(Boolean) ? parts.join(',') : null;
+    } else if (Array.isArray(item.answerSelection) && item.answerSelection.length > 1 && item.answerSelection[1] != null) {
+      myAnswer = String(item.answerSelection[1]); // last-resort fallback
+    } else if (Array.isArray(item.choices)) {
+      const checked = item.choices.find((c) => c && c.checked);
+      if (checked) myAnswer = String(checked.value);
+    }
+    // Correct answer comes from the hidden <input name="Key1"> form field on
+    // the ITDReview page — authoritative for both single-choice (one value)
+    // and matrix items (CSV like "2,2,1"). For single-choice MC we convert
+    // the numeric value to a letter to match the legacy convention.
+    let correctAnswer = null;
+    const rawKey = (item.correctKey || '').trim();
+    if (rawKey) {
+      if (item.choicesType === 'dropdown' && item.choices?.dropdowns?.length) {
+        // Graphics Interpretation: Key1 like "A1,B3" — codes that index into
+        // each dropdown's option list. Translate to readable text.
+        const parts = rawKey.split(/[,;]/).map((s) => s.trim());
+        correctAnswer = parts.map((part, idx) => {
+          const d = item.choices.dropdowns[idx];
+          if (!d) return part;
+          const opt = (d.options || []).find((o) => o.value === part);
+          return opt ? opt.text : part;
+        }).join(',');
+      } else if (item.choicesType === 'matrix' || rawKey.includes(',') || rawKey.includes(';')) {
+        correctAnswer = rawKey.replace(/;/g, ','); // normalize separator
+      } else {
+        const n = Number(rawKey);
+        correctAnswer = (Number.isInteger(n) && n >= 1 && n <= 26)
+          ? String.fromCharCode(64 + n)
+          : rawKey;
+      }
+    }
+    // Fallback: if no Key1 was found (some item types) but we know the user
+    // got it right, the user's pick IS the correct answer.
+    if (!correctAnswer && Number(targetRow.correct) === 1 && myAnswer) {
+      correctAnswer = myAnswer;
+    }
+
+    // Convert ms → seconds; preserve existing time_sec if not available.
+    const timeSecPrecise =
+      typeof item.vPreviousTimeSpent === 'number' && Number.isFinite(item.vPreviousTimeSpent)
+        ? Math.max(1, Math.round(item.vPreviousTimeSpent / 1000))
+        : null;
+
+    try {
+      await run(
+        `
+          UPDATE question_attempts
+          SET q_id = COALESCE(?, q_id),
+              q_code = COALESCE(?, q_code),
+              question_stem = COALESCE(?, question_stem),
+              answer_choices = ?,
+              response_format = COALESCE(?, response_format),
+              response_details = ?,
+              my_answer = COALESCE(?, my_answer),
+              correct_answer = COALESCE(?, correct_answer),
+              time_sec = COALESCE(?, time_sec)
+          WHERE id = ?
+        `,
+        [
+          itemName || null,
+          formQuestionId != null ? String(formQuestionId) : (stableKey || null),
+          item.stem || null,
+          JSON.stringify(answerChoicesArr),
+          responseFormat,
+          JSON.stringify(responseDetailsPayload),
+          myAnswer,
+          correctAnswer,
+          timeSecPrecise,
+          targetRow.id,
+        ]
+      );
+      updated += 1;
+    } catch (err) {
+      errors.push({ seq, itemName, message: err.message });
+    }
+  }
+
+  return { sessionDbId, matched: enrichedItems.length, updated, skipped, errors };
+}
+
+// GMAT Club Phase-2 enrichment writer. The runner returns one item per
+// visited topic; each item carries the `q_id` we sent in (e.g. "gc-att-86204128")
+// so we can match the row back without iterating sessions/sequences.
+async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrichedItems }) {
+  const sessionRow = await get(
+    `
+      SELECT id
+      FROM sessions
+      WHERE session_external_id = ?
+        AND COALESCE(source, '') = COALESCE(?, '')
+      ORDER BY id DESC
+      LIMIT 1
+    `,
+    [Number(sessionExternalId) || sessionExternalId, source || null]
+  );
+  if (!sessionRow?.id) {
+    return { matched: 0, updated: 0, skipped: 0, errors: [{ message: 'session-not-found', sessionExternalId, source }] };
+  }
+  const sessionDbId = sessionRow.id;
+
+  let updated = 0;
+  let skipped = 0;
+  const errors = [];
+
+  for (const item of (Array.isArray(enrichedItems) ? enrichedItems : [])) {
+    const qId = String(item?.q_id || '').trim();
+    if (!qId) {
+      errors.push({ message: 'item missing q_id', url: item?.source_url });
+      continue;
+    }
+
+    const targetRow = await get(
+      `
+        SELECT id, question_stem, answer_choices, correct_answer
+        FROM question_attempts
+        WHERE session_id = ? AND q_id = ?
+        LIMIT 1
+      `,
+      [sessionDbId, qId]
+    );
+    if (!targetRow) {
+      skipped += 1;
+      continue;
+    }
+
+    const choices = Array.isArray(item.choices) ? item.choices : [];
+    // Normalize to {label, text} entries that match the dashboard renderer.
+    const answerChoicesArr = choices
+      .map((c) => ({
+        label: String(c?.label || '').trim() || null,
+        text: String(c?.text || '').trim() || null,
+      }))
+      .filter((c) => c.label || c.text);
+
+    try {
+      await run(
+        `
+          UPDATE question_attempts
+          SET question_stem = COALESCE(NULLIF(?, ''), question_stem),
+              answer_choices = CASE WHEN ? > 0 THEN ? ELSE answer_choices END,
+              correct_answer = COALESCE(NULLIF(?, ''), correct_answer),
+              my_answer = COALESCE(NULLIF(?, ''), my_answer),
+              question_url = COALESCE(NULLIF(?, ''), question_url)
+          WHERE id = ?
+        `,
+        [
+          item.stem || '',
+          answerChoicesArr.length,
+          answerChoicesArr.length ? JSON.stringify(answerChoicesArr) : null,
+          item.correct_answer || '',
+          item.my_answer || '',
+          item.final_url || item.source_url || '',
+          targetRow.id,
+        ]
+      );
+      updated += 1;
+    } catch (err) {
+      errors.push({ q_id: qId, message: err.message });
+    }
+  }
+
+  return { sessionDbId, matched: enrichedItems.length, updated, skipped, errors };
+}
+
+async function listGmatClubEnrichTargets(sessionDbId) {
+  return all(
+    `
+      SELECT q.id, q.q_id, q.q_code, q.question_url, q.question_stem
+      FROM question_attempts q
+      WHERE q.session_id = ?
+        AND COALESCE(NULLIF(q.q_id, ''), '') <> ''
+        AND COALESCE(NULLIF(q.question_url, ''), '') <> ''
+      ORDER BY q.id ASC
+    `,
+    [sessionDbId]
+  );
+}
+
 module.exports = {
   dbPath,
   run,
@@ -2371,6 +2750,9 @@ module.exports = {
   initDb,
   backfillSparseQuestionAttempts,
   saveScrapeResult,
+  enrichSessionAttempts,
+  enrichGmatClubSessionAttempts,
+  listGmatClubEnrichTargets,
   listRuns,
   listSessions,
   countSessions,
