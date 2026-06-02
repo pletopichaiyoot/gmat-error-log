@@ -23,6 +23,7 @@ const QUESTION_ATTEMPT_INSERT_COLUMNS = [
   'response_details',
   'correct',
   'difficulty',
+  'difficulty_theta',
   'confidence',
   'time_sec',
   'my_answer',
@@ -32,6 +33,7 @@ const QUESTION_ATTEMPT_INSERT_COLUMNS = [
   'content_domain',
   'mistake_type',
   'notes',
+  'passage_text',
 ];
 
 if (!fs.existsSync(dbDir)) {
@@ -136,6 +138,21 @@ async function initDb() {
     )
   `);
 
+  // OPE scaled-score columns: GMAT total (205-805) + 3 section scores (60-90)
+  // and matching percentiles. Idempotent; safe to re-run.
+  for (const col of [
+    'total_score INTEGER',
+    'total_percentile INTEGER',
+    'quant_score INTEGER',
+    'quant_percentile INTEGER',
+    'verbal_score INTEGER',
+    'verbal_percentile INTEGER',
+    'di_score INTEGER',
+    'di_percentile INTEGER',
+  ]) {
+    try { await run(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch (_e) { /* exists */ }
+  }
+
   await run(`
     CREATE TABLE IF NOT EXISTS question_attempts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,6 +202,31 @@ async function initDb() {
   await ensureQuestionAttemptsColumn('notes', 'TEXT');
   await ensureQuestionAttemptsColumn('topic_source', 'TEXT');
   await ensureQuestionAttemptsColumn('content_domain', 'TEXT');
+  await ensureQuestionAttemptsColumn('passage_text', 'TEXT');
+  await ensureQuestionAttemptsColumn('difficulty_theta', 'REAL');
+
+  // One-time backfill: older OPE Phase 3 writes stored the raw IRT theta as a
+  // numeric string in `difficulty` (e.g. "-0.647"), which the UI then rendered
+  // as a number instead of an Easy/Medium/Hard chip. Move those values into
+  // `difficulty_theta` and replace `difficulty` with the bucketed label. The
+  // WHERE clause makes this idempotent — rows already migrated have a
+  // non-null `difficulty_theta` and won't be touched again.
+  await run(`
+    UPDATE question_attempts
+    SET difficulty_theta = CAST(difficulty AS REAL),
+        difficulty = CASE
+          WHEN CAST(difficulty AS REAL) < -0.43 THEN 'Easy'
+          WHEN CAST(difficulty AS REAL) >  0.43 THEN 'Hard'
+          ELSE 'Medium'
+        END
+    WHERE difficulty_theta IS NULL
+      AND (
+        difficulty GLOB '-[0-9]*'
+        OR difficulty GLOB '[0-9]*'
+        OR difficulty GLOB '.[0-9]*'
+        OR difficulty GLOB '-.[0-9]*'
+      )
+  `);
 
   await run('CREATE INDEX IF NOT EXISTS idx_sessions_run_id ON sessions(run_id)');
   await run(
@@ -196,6 +238,25 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_questions_q_id ON question_attempts(q_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_questions_topic ON question_attempts(topic)');
   await run('CREATE INDEX IF NOT EXISTS idx_questions_difficulty ON question_attempts(difficulty)');
+
+  // Empirical IRT difficulty cutoffs. Populated by recomputeIrtCutoffs()
+  // after each enrichment. The OPE bank's b-parameter scale differs by
+  // subject and even by DI subcategory (Quant tops out near 0.4 while DI's
+  // MSR Math items extend past 5), so a single global ±0.43 cutoff is wrong.
+  // Q and V key on subject_code alone (sub_key=''); DI splits by topic so
+  // MSR's wide right tail doesn't contaminate DS/GT/TPA buckets.
+  await run(`DROP TABLE IF EXISTS irt_cutoffs`);
+  await run(`
+    CREATE TABLE irt_cutoffs (
+      subject_code TEXT NOT NULL,
+      sub_key TEXT NOT NULL DEFAULT '',
+      p33 REAL NOT NULL,
+      p67 REAL NOT NULL,
+      n INTEGER NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (subject_code, sub_key)
+    )
+  `);
 
   await run(`
     CREATE TABLE IF NOT EXISTS coach_sessions (
@@ -218,11 +279,302 @@ async function initDb() {
   `);
   await run('CREATE INDEX IF NOT EXISTS idx_coach_messages_session ON coach_messages(session_id)');
 
+  await run(`
+    CREATE TABLE IF NOT EXISTS coach_memories (
+      id TEXT PRIMARY KEY,
+      content TEXT NOT NULL,
+      embedding TEXT NOT NULL,
+      metadata TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_coach_memories_created ON coach_memories(created_at DESC)');
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS lsat_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      test_num INTEGER NOT NULL,
+      section_roman TEXT NOT NULL,
+      section_kind TEXT NOT NULL,
+      question_number INTEGER NOT NULL,
+      user_answer TEXT NOT NULL,
+      correct_answer TEXT,
+      is_correct INTEGER,
+      confidence TEXT,
+      time_ms INTEGER,
+      session_id INTEGER,
+      attempted_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  // Older versions had UNIQUE(test_num, section_roman, question_number) which made
+  // every retake overwrite history. Migrate to a session-scoped unique key so we
+  // keep a row per (question, session). Detect via PRAGMA, copy data, swap tables.
+  try {
+    const idxs = await all("PRAGMA index_list('lsat_attempts')");
+    const hasLegacyUnique = (idxs || []).some(
+      (i) => i.unique === 1 && /^sqlite_autoindex_lsat_attempts_/.test(i.name)
+    );
+    if (hasLegacyUnique) {
+      await run(`CREATE TABLE lsat_attempts_v2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        test_num INTEGER NOT NULL,
+        section_roman TEXT NOT NULL,
+        section_kind TEXT NOT NULL,
+        question_number INTEGER NOT NULL,
+        user_answer TEXT NOT NULL,
+        correct_answer TEXT,
+        is_correct INTEGER,
+        confidence TEXT,
+        time_ms INTEGER,
+        session_id INTEGER,
+        attempted_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`);
+      // Copy preserving every column we know about.
+      await run(`INSERT INTO lsat_attempts_v2
+        (id, test_num, section_roman, section_kind, question_number, user_answer, correct_answer, is_correct, confidence, time_ms, session_id, attempted_at)
+        SELECT id, test_num, section_roman, section_kind, question_number, user_answer, correct_answer, is_correct, confidence, time_ms, session_id, attempted_at
+        FROM lsat_attempts`);
+      await run('DROP TABLE lsat_attempts');
+      await run('ALTER TABLE lsat_attempts_v2 RENAME TO lsat_attempts');
+    }
+  } catch (e) {
+    // If introspection / migration fails on a fresh DB it's fine — the new
+    // CREATE TABLE above already used the new shape.
+  }
+  // ALTERs are no-ops if columns already present.
+  try { await run('ALTER TABLE lsat_attempts ADD COLUMN confidence TEXT'); } catch (e) { /* exists */ }
+  try { await run('ALTER TABLE lsat_attempts ADD COLUMN time_ms INTEGER'); } catch (e) { /* exists */ }
+  try { await run('ALTER TABLE lsat_attempts ADD COLUMN session_id INTEGER'); } catch (e) { /* exists */ }
+  await run('CREATE INDEX IF NOT EXISTS idx_lsat_attempts_test ON lsat_attempts(test_num, section_roman)');
+  await run('CREATE INDEX IF NOT EXISTS idx_lsat_attempts_session ON lsat_attempts(session_id)');
+  // Within one session, each question can only have one attempt row (we UPDATE on retry).
+  // Across sessions, attempts accumulate as history.
+  await run('CREATE UNIQUE INDEX IF NOT EXISTS uq_lsat_attempts_session_q ON lsat_attempts(test_num, section_roman, question_number, session_id)');
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS lsat_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      test_num INTEGER NOT NULL,
+      section_roman TEXT NOT NULL,
+      section_kind TEXT NOT NULL,
+      set_key TEXT NOT NULL,
+      set_label TEXT,
+      first_question INTEGER NOT NULL,
+      last_question INTEGER NOT NULL,
+      mode TEXT,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT
+    )
+  `);
+  try { await run('ALTER TABLE lsat_sessions ADD COLUMN mode TEXT'); } catch (e) { /* exists */ }
+  try { await run('ALTER TABLE lsat_sessions ADD COLUMN question_numbers TEXT'); } catch (e) { /* exists */ }
+  await run('CREATE INDEX IF NOT EXISTS idx_lsat_sessions_test ON lsat_sessions(test_num, section_roman)');
+  await run('CREATE INDEX IF NOT EXISTS idx_lsat_sessions_started ON lsat_sessions(started_at DESC)');
+
+  // ─── Study Plan ──────────────────────────────────────────────────────────
+  // Holds the 4-week final-sprint plan and its sub-task checklist. Each row
+  // is one actionable item ("warm-up", "DI Tables timed set", "review"). One
+  // day can have multiple rows ordered by `position`. `status` is the
+  // checkbox state; user edits live in `title`/`description`/`notes`.
+  await run(`
+    CREATE TABLE IF NOT EXISTS study_plan_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      day_date TEXT NOT NULL,
+      week_number INTEGER NOT NULL,
+      day_label TEXT,
+      day_theme TEXT,
+      position INTEGER NOT NULL DEFAULT 0,
+      title TEXT NOT NULL,
+      description TEXT,
+      est_minutes INTEGER,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','done','skipped')),
+      completed_at TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_study_plan_day ON study_plan_tasks(day_date)');
+  await run('CREATE INDEX IF NOT EXISTS idx_study_plan_week ON study_plan_tasks(week_number)');
+  await run('CREATE INDEX IF NOT EXISTS idx_study_plan_status ON study_plan_tasks(status)');
+
+  // Plan-level metadata (test date, target score, seeded flag).
+  await run(`
+    CREATE TABLE IF NOT EXISTS study_plan_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
+  // Full-length mock exam results. One row per mock attempt. Section scores
+  // are GMAT Focus scale (60-90); total is 205-805. Percentiles are 0-100.
+  // `source_label` is free-form (e.g., "OPE3", "GMAT Club CAT", "OPE4").
+  await run(`
+    CREATE TABLE IF NOT EXISTS mock_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mock_date TEXT NOT NULL,
+      source_label TEXT NOT NULL,
+      total_score INTEGER,
+      total_percentile INTEGER,
+      quant_score INTEGER,
+      quant_percentile INTEGER,
+      di_score INTEGER,
+      di_percentile INTEGER,
+      verbal_score INTEGER,
+      verbal_percentile INTEGER,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_mock_results_date ON mock_results(mock_date)');
+
   await backfillSparseQuestionAttempts();
+}
+
+async function saveLsatAttempt({ testNum, sectionRoman, sectionKind, questionNumber, userAnswer, correctAnswer, confidence, timeMs, sessionId }) {
+  // correctAnswer can be null when the parser couldn't recover the answer key
+  // for that test. In that case is_correct stays null too — the attempt is still
+  // recorded for review/history purposes, just unscored.
+  const corr = correctAnswer ? String(correctAnswer).toUpperCase() : null;
+  const isCorrect = corr == null
+    ? null
+    : (String(userAnswer).toUpperCase() === corr ? 1 : 0);
+  const conf = confidence ? String(confidence).toLowerCase() : null;
+  const tMs = Number.isFinite(Number(timeMs)) ? Math.max(0, Math.round(Number(timeMs))) : null;
+  const sId = Number.isFinite(Number(sessionId)) ? Number(sessionId) : null;
+  // Conflict resolution is per-(question, session): re-submitting within the
+  // same session updates the row; a NEW session creates a fresh history entry.
+  await run(
+    `INSERT INTO lsat_attempts (test_num, section_roman, section_kind, question_number, user_answer, correct_answer, is_correct, confidence, time_ms, session_id, attempted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(test_num, section_roman, question_number, session_id) DO UPDATE SET
+       user_answer = excluded.user_answer,
+       correct_answer = excluded.correct_answer,
+       is_correct = excluded.is_correct,
+       confidence = excluded.confidence,
+       time_ms = excluded.time_ms,
+       attempted_at = datetime('now')`,
+    [testNum, sectionRoman, sectionKind, questionNumber, String(userAnswer).toUpperCase(), corr, isCorrect, conf, tMs, sId]
+  );
+  return { isCorrect };
+}
+
+async function createLsatSession({ testNum, sectionRoman, sectionKind, setKey, setLabel, firstQuestion, lastQuestion, mode }) {
+  const result = await run(
+    `INSERT INTO lsat_sessions (test_num, section_roman, section_kind, set_key, set_label, first_question, last_question, mode)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [testNum, sectionRoman, sectionKind, setKey, setLabel || null, firstQuestion, lastQuestion, mode || null]
+  );
+  return { id: result.lastID };
+}
+
+async function completeLsatSession(id) {
+  await run(`UPDATE lsat_sessions SET completed_at = datetime('now') WHERE id = ?`, [id]);
+}
+
+// lsat_sessions.question_numbers is stored as a JSON array string (or NULL for
+// full-section sessions). Parse it back to an array (or null) for callers.
+function parseLsatSessionRow(row) {
+  if (!row) return row;
+  let questionNumbers = null;
+  if (row.question_numbers) {
+    try { questionNumbers = JSON.parse(row.question_numbers); } catch (e) { questionNumbers = null; }
+  }
+  return { ...row, question_numbers: questionNumbers };
+}
+
+async function listLsatSessions({ testNum, sectionRoman } = {}) {
+  const where = [];
+  const params = [];
+  if (testNum != null) { where.push('test_num = ?'); params.push(testNum); }
+  if (sectionRoman) { where.push('section_roman = ?'); params.push(sectionRoman); }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const rows = await all(`SELECT * FROM lsat_sessions ${whereSql} ORDER BY started_at DESC`, params);
+  return rows.map(parseLsatSessionRow);
+}
+
+async function getLsatSession(id) {
+  return parseLsatSessionRow(await get('SELECT * FROM lsat_sessions WHERE id = ?', [id]));
+}
+
+async function listLsatAttempts({ testNum, sessionId, latestOnly } = {}) {
+  // latestOnly: returns only the most-recent attempt per (test, section, question).
+  // Used for "current view" in the library/picker.
+  if (latestOnly) {
+    const where = [];
+    const params = [];
+    if (testNum != null) { where.push('test_num = ?'); params.push(testNum); }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    return await all(`
+      SELECT a.* FROM lsat_attempts a
+      INNER JOIN (
+        SELECT test_num, section_roman, question_number, MAX(attempted_at) AS latest_at
+        FROM lsat_attempts
+        ${whereSql}
+        GROUP BY test_num, section_roman, question_number
+      ) m
+      ON a.test_num = m.test_num AND a.section_roman = m.section_roman
+        AND a.question_number = m.question_number AND a.attempted_at = m.latest_at
+      ORDER BY a.test_num, a.section_roman, a.question_number
+    `, params);
+  }
+  if (sessionId != null) {
+    return await all('SELECT * FROM lsat_attempts WHERE session_id = ? ORDER BY question_number', [sessionId]);
+  }
+  if (testNum != null) {
+    return await all('SELECT * FROM lsat_attempts WHERE test_num = ? ORDER BY section_roman, question_number, attempted_at DESC', [testNum]);
+  }
+  return await all('SELECT * FROM lsat_attempts ORDER BY attempted_at DESC');
+}
+
+async function listLsatErrors({ testNum, sectionRoman, limit = 200 } = {}) {
+  // Most recent INCORRECT attempts (across sessions). Excludes unscored
+  // attempts (where is_correct is null because the answer key wasn't parsed).
+  const where = ['is_correct = 0'];
+  const params = [];
+  if (testNum != null) { where.push('test_num = ?'); params.push(testNum); }
+  if (sectionRoman) { where.push('section_roman = ?'); params.push(sectionRoman.toUpperCase()); }
+  const whereSql = `WHERE ${where.join(' AND ')}`;
+  return await all(`SELECT * FROM lsat_attempts ${whereSql} ORDER BY attempted_at DESC LIMIT ?`, [...params, limit]);
+}
+
+async function clearLsatAttempts({ testNum, sectionRoman }) {
+  if (testNum == null || !sectionRoman) {
+    throw new Error('testNum and sectionRoman are required');
+  }
+  const before = await get(
+    'SELECT COUNT(*) AS n FROM lsat_attempts WHERE test_num = ? AND section_roman = ?',
+    [testNum, String(sectionRoman).toUpperCase()]
+  );
+  await run(
+    'DELETE FROM lsat_attempts WHERE test_num = ? AND section_roman = ?',
+    [testNum, String(sectionRoman).toUpperCase()]
+  );
+  return { deleted: before?.n || 0 };
+}
+
+async function lsatStats() {
+  const totals = await get('SELECT COUNT(*) AS n, SUM(is_correct) AS c FROM lsat_attempts');
+  const byKind = await all(`SELECT section_kind AS kind, COUNT(*) AS n, SUM(is_correct) AS c FROM lsat_attempts GROUP BY section_kind`);
+  const byTest = await all(`SELECT test_num AS testNum, COUNT(*) AS n, SUM(is_correct) AS c FROM lsat_attempts GROUP BY test_num ORDER BY test_num`);
+  return { totals, byKind, byTest };
 }
 
 function safeInt(value) {
   return Number.isFinite(Number(value)) ? Number(value) : null;
+}
+
+// Range-validating integer: returns the value rounded to int if it falls
+// within [min, max] inclusive, otherwise null. Used at the persistence
+// boundary so the DB never holds an out-of-spec scaled score (e.g.,
+// total > 805 or section < 60).
+function safeIntInRange(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  if (n < min || n > max) return null;
+  return Math.round(n);
 }
 
 function boolToInt(value) {
@@ -606,8 +958,15 @@ function buildAttemptSnapshotIndex(rows = []) {
       answer_choices: normalizeAnswerChoicesForStorage(row?.answer_choices),
       response_format: normalizedTextOrNull(row?.response_format),
       response_details: normalizeResponseDetailsForStorage(row?.response_details),
+      passage_text: normalizedTextOrNull(row?.passage_text),
       mistake_type: normalizedTextOrNull(row?.mistake_type),
       notes: normalizedTextOrNull(row?.notes),
+      // OPE Phase 3 enriches `difficulty` (label) + `difficulty_theta` (raw
+      // theta). Phase 1 rescrapes wipe and reinsert attempts, so we preserve
+      // these fields from the existing row when the scraper doesn't supply
+      // them — same pattern as mistake_type / notes.
+      difficulty: normalizedTextOrNull(row?.difficulty),
+      difficulty_theta: Number.isFinite(Number(row?.difficulty_theta)) ? Number(row.difficulty_theta) : null,
     };
 
     const qid = String(row?.q_id || '').trim();
@@ -698,7 +1057,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     if (existing?.id) {
       const existingAttempts = await all(
         `
-          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, answer_choices, response_format, response_details, mistake_type, notes
+          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta
           FROM question_attempts
           WHERE session_id = ?
         `,
@@ -722,7 +1081,15 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
             accuracy_pct = ?,
             avg_time_sec = ?,
             avg_correct_time_sec = ?,
-            avg_incorrect_time_sec = ?
+            avg_incorrect_time_sec = ?,
+            total_score = COALESCE(?, total_score),
+            total_percentile = COALESCE(?, total_percentile),
+            quant_score = COALESCE(?, quant_score),
+            quant_percentile = COALESCE(?, quant_percentile),
+            verbal_score = COALESCE(?, verbal_score),
+            verbal_percentile = COALESCE(?, verbal_percentile),
+            di_score = COALESCE(?, di_score),
+            di_percentile = COALESCE(?, di_percentile)
           WHERE id = ?
         `,
         [
@@ -738,6 +1105,14 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           safeInt(stats.avg_time_sec),
           safeInt(stats.avg_correct_time_sec),
           safeInt(stats.avg_incorrect_time_sec),
+          safeIntInRange(session.scoreSummary?.total?.score, 205, 805),
+          safeIntInRange(session.scoreSummary?.total?.percentile, 0, 100),
+          safeIntInRange(session.scoreSummary?.quant?.score, 60, 90),
+          safeIntInRange(session.scoreSummary?.quant?.percentile, 0, 100),
+          safeIntInRange(session.scoreSummary?.verbal?.score, 60, 90),
+          safeIntInRange(session.scoreSummary?.verbal?.percentile, 0, 100),
+          safeIntInRange(session.scoreSummary?.di?.score, 60, 90),
+          safeIntInRange(session.scoreSummary?.di?.percentile, 0, 100),
           existing.id,
         ]
       );
@@ -759,8 +1134,16 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
             accuracy_pct,
             avg_time_sec,
             avg_correct_time_sec,
-            avg_incorrect_time_sec
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            avg_incorrect_time_sec,
+            total_score,
+            total_percentile,
+            quant_score,
+            quant_percentile,
+            verbal_score,
+            verbal_percentile,
+            di_score,
+            di_percentile
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         [
           runId,
@@ -776,6 +1159,14 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           safeInt(stats.avg_time_sec),
           safeInt(stats.avg_correct_time_sec),
           safeInt(stats.avg_incorrect_time_sec),
+          safeIntInRange(session.scoreSummary?.total?.score, 205, 805),
+          safeIntInRange(session.scoreSummary?.total?.percentile, 0, 100),
+          safeIntInRange(session.scoreSummary?.quant?.score, 60, 90),
+          safeIntInRange(session.scoreSummary?.quant?.percentile, 0, 100),
+          safeIntInRange(session.scoreSummary?.verbal?.score, 60, 90),
+          safeIntInRange(session.scoreSummary?.verbal?.percentile, 0, 100),
+          safeIntInRange(session.scoreSummary?.di?.score, 60, 90),
+          safeIntInRange(session.scoreSummary?.di?.percentile, 0, 100),
         ]
       );
       sessionId = sessionInsert.lastID;
@@ -822,6 +1213,10 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
         normalizeResponseDetailsForStorage(q.response_details) ||
         preservedSnapshot?.response_details ||
         null;
+      const passageText =
+        normalizedTextOrNull(q.passage_text) ||
+        preservedSnapshot?.passage_text ||
+        null;
       const metadata = deriveQuestionMetadata(
         {
           ...q,
@@ -850,7 +1245,14 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           responseFormat,
           responseDetails,
           boolToInt(Boolean(q.correct)),
-          q.difficulty || null,
+          // Preserve Phase 3 theta enrichment across Phase 1 rescrapes — same
+          // pattern as mistake_type / notes above. Phase 1 doesn't supply
+          // difficulty for OPE, so without this fallback every rescrape would
+          // null out the labels and thetas.
+          q.difficulty || preservedSnapshot?.difficulty || null,
+          Number.isFinite(Number(q.difficulty_theta))
+            ? Number(q.difficulty_theta)
+            : (preservedSnapshot?.difficulty_theta ?? null),
           q.confidence || null,
           safeInt(q.time_sec),
           q.my_answer || null,
@@ -860,6 +1262,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           contentDomain,
           mistakeType,
           notes,
+          passageText,
       ];
       assertValueCount('question_attempts insert', QUESTION_ATTEMPT_INSERT_COLUMNS, attemptValues);
 
@@ -895,11 +1298,48 @@ async function getLatestRunId() {
 function platformWhereClause(platform) {
   // Heuristic match — matches the frontend's getSourcePlatform().
   if (platform === 'gmatclub') return "LOWER(COALESCE(s.source, '')) LIKE '%gmat club%'";
-  if (platform === 'starttest') return "LOWER(COALESCE(s.source, '')) NOT LIKE '%gmat club%'";
+  if (platform === 'ttp') return "LOWER(COALESCE(s.source, '')) LIKE '%target test prep%'";
+  if (platform === 'ope-mock') return "LOWER(COALESCE(s.source, '')) LIKE '%practice exam%'";
+  if (platform === 'starttest') {
+    // Official Guide books: anything that's not gmatclub, ttp, or an OPE mock.
+    return "LOWER(COALESCE(s.source, '')) NOT LIKE '%gmat club%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%target test prep%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%practice exam%'";
+  }
   return null;
 }
 
-async function listSessions(runId, { limit, offset, platform } = {}) {
+// Buckets the `difficulty` text column into Easy/Medium/Hard. OPE Phase 3 stores
+// the raw IRT 3PL b-parameter (theta, e.g. "-0.076"); other sources store text
+// labels which pass through unchanged. Cutoffs at ±0.43 are the exact terciles
+// of the standard N(0,1) ability scale that GMAC's item bank is calibrated on
+// — anchored on 0 so semantics stay stable as new sessions arrive, rather than
+// drifting with the user's seen-sample mean.
+function difficultyBucketExpr(alias = 'q') {
+  const col = `${alias}.difficulty`;
+  return `CASE
+    WHEN COALESCE(NULLIF(${col}, ''), '') = '' THEN 'Unknown'
+    WHEN ${col} GLOB '-[0-9]*' OR ${col} GLOB '[0-9]*' OR ${col} GLOB '.[0-9]*' OR ${col} GLOB '-.[0-9]*' THEN
+      CASE
+        WHEN CAST(${col} AS REAL) < -0.43 THEN 'Easy'
+        WHEN CAST(${col} AS REAL) > 0.43 THEN 'Hard'
+        ELSE 'Medium'
+      END
+    ELSE ${col}
+  END`;
+}
+
+// Normalizes the raw `subject` column to the frontend's 'Q' | 'V' | 'DI' buckets.
+// Mirrors normalizeSubjectCodeValue in client/src/App.jsx — keep in sync.
+function subjectNormalizationExpr(prefix) {
+  const col = `UPPER(TRIM(COALESCE(${prefix}subject, '')))`;
+  return `CASE
+    WHEN ${col} IN ('Q','QUANT','PS') THEN 'Q'
+    WHEN ${col} IN ('V','VERBAL','CR','RC') THEN 'V'
+    WHEN ${col} IN ('DI','DS','MSR','TPA','GI','TA') THEN 'DI'
+    ELSE ${col}
+  END`;
+}
+
+async function listSessions(runId, { limit, offset, platform, subject, startDate, endDate } = {}) {
   const params = [];
   const conditions = [];
   if (runId) {
@@ -908,6 +1348,18 @@ async function listSessions(runId, { limit, offset, platform } = {}) {
   }
   const platformClause = platformWhereClause(platform);
   if (platformClause) conditions.push(platformClause);
+  if (subject) {
+    conditions.push(`${subjectNormalizationExpr('s.')} = ?`);
+    params.push(String(subject).toUpperCase());
+  }
+  if (startDate) {
+    conditions.push('DATE(s.session_date) >= DATE(?)');
+    params.push(startDate);
+  }
+  if (endDate) {
+    conditions.push('DATE(s.session_date) <= DATE(?)');
+    params.push(endDate);
+  }
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const unansweredExpr = unansweredPlaceholderExpr('q');
   const answeredCountExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) THEN 1 ELSE 0 END)`;
@@ -936,6 +1388,14 @@ async function listSessions(runId, { limit, offset, platform } = {}) {
         s.total_q_categories,
         s.correct_count,
         s.error_count,
+        s.total_score,
+        s.total_percentile,
+        s.quant_score,
+        s.quant_percentile,
+        s.verbal_score,
+        s.verbal_percentile,
+        s.di_score,
+        s.di_percentile,
         ${answeredCountExpr} AS attempt_total,
         COALESCE(${answeredCorrectExpr}, 0) AS attempt_correct,
         COALESCE(${answeredWrongExpr}, 0) AS attempt_wrong,
@@ -1050,7 +1510,7 @@ async function listSessions(runId, { limit, offset, platform } = {}) {
   );
 }
 
-async function countSessions(runId, { platform } = {}) {
+async function countSessions(runId, { platform, subject, startDate, endDate } = {}) {
   const params = [];
   const conditions = [];
   if (runId) {
@@ -1060,8 +1520,24 @@ async function countSessions(runId, { platform } = {}) {
   // Mirror listSessions but on the bare table (no `s.` alias here).
   if (platform === 'gmatclub') {
     conditions.push("LOWER(COALESCE(source, '')) LIKE '%gmat club%'");
+  } else if (platform === 'ttp') {
+    conditions.push("LOWER(COALESCE(source, '')) LIKE '%target test prep%'");
+  } else if (platform === 'ope-mock') {
+    conditions.push("LOWER(COALESCE(source, '')) LIKE '%practice exam%'");
   } else if (platform === 'starttest') {
-    conditions.push("LOWER(COALESCE(source, '')) NOT LIKE '%gmat club%'");
+    conditions.push("LOWER(COALESCE(source, '')) NOT LIKE '%gmat club%' AND LOWER(COALESCE(source, '')) NOT LIKE '%target test prep%' AND LOWER(COALESCE(source, '')) NOT LIKE '%practice exam%'");
+  }
+  if (subject) {
+    conditions.push(`${subjectNormalizationExpr('')} = ?`);
+    params.push(String(subject).toUpperCase());
+  }
+  if (startDate) {
+    conditions.push('DATE(session_date) >= DATE(?)');
+    params.push(startDate);
+  }
+  if (endDate) {
+    conditions.push('DATE(session_date) <= DATE(?)');
+    params.push(endDate);
   }
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const row = await get(`SELECT COUNT(*) as total FROM sessions ${whereClause}`, params);
@@ -1356,10 +1832,12 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
         q.cat_id,
         q.question_url,
         q.question_stem,
+        q.passage_text,
         q.answer_choices,
         q.response_format,
         q.response_details,
         q.difficulty,
+        q.difficulty_theta,
         q.confidence,
         ${topicExpr} AS topic,
         q.topic_source,
@@ -1924,7 +2402,7 @@ async function getPatterns(runId) {
   const byDifficulty = await all(
     `
       SELECT
-        COALESCE(NULLIF(q.difficulty, ''), 'Unknown') AS difficulty,
+        ${difficultyBucketExpr('q')} AS difficulty,
         COUNT(*) AS total,
         SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) AS correct,
         SUM(CASE WHEN q.correct = 0 THEN 1 ELSE 0 END) AS wrong,
@@ -1935,7 +2413,7 @@ async function getPatterns(runId) {
         ) AS accuracy_pct
       FROM question_attempts q
       WHERE ${runClause}${answeredWhere}
-      GROUP BY COALESCE(NULLIF(q.difficulty, ''), 'Unknown')
+      GROUP BY ${difficultyBucketExpr('q')}
       ORDER BY total DESC
     `,
     runParams
@@ -2159,6 +2637,14 @@ async function getSessionAnalysis(sessionId) {
         s.total_q_categories,
         s.correct_count,
         s.error_count,
+        s.total_score,
+        s.total_percentile,
+        s.quant_score,
+        s.quant_percentile,
+        s.verbal_score,
+        s.verbal_percentile,
+        s.di_score,
+        s.di_percentile,
         ${answeredCountExpr} AS attempt_total,
         COALESCE(${answeredCorrectExpr}, 0) AS attempt_correct,
         COALESCE(${answeredWrongExpr}, 0) AS attempt_wrong,
@@ -2242,7 +2728,7 @@ async function getSessionAnalysis(sessionId) {
   const byDifficulty = await all(
     `
       SELECT
-        COALESCE(NULLIF(q.difficulty, ''), 'Unknown') AS difficulty,
+        ${difficultyBucketExpr('q')} AS difficulty,
         COUNT(*) AS total,
         SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) AS correct,
         SUM(CASE WHEN q.correct = 0 THEN 1 ELSE 0 END) AS wrong,
@@ -2255,9 +2741,9 @@ async function getSessionAnalysis(sessionId) {
         ROUND(AVG(CASE WHEN q.correct = 0 THEN q.time_sec END), 0) AS avg_incorrect_time_sec
       FROM question_attempts q
       WHERE q.session_id = ? AND NOT (${unansweredExpr})
-      GROUP BY COALESCE(NULLIF(q.difficulty, ''), 'Unknown')
+      GROUP BY ${difficultyBucketExpr('q')}
       ORDER BY
-        CASE COALESCE(NULLIF(q.difficulty, ''), 'Unknown')
+        CASE ${difficultyBucketExpr('q')}
           WHEN 'Hard' THEN 1
           WHEN 'Medium' THEN 2
           WHEN 'Easy' THEN 3
@@ -2310,12 +2796,15 @@ async function getSessionAnalysis(sessionId) {
         q.subject_sub,
         q.subject_sub_raw,
         q.difficulty,
+        q.difficulty_theta,
         ${topicExpr} AS topic,
         q.my_answer,
         q.correct_answer,
+        q.correct,
         q.time_sec,
         q.question_url,
         q.question_stem,
+        q.passage_text,
         q.answer_choices,
         q.response_format,
         q.response_details,
@@ -2326,8 +2815,8 @@ async function getSessionAnalysis(sessionId) {
         s.source
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
-      WHERE q.session_id = ? AND q.correct = 0 AND NOT (${unansweredExpr})
-      ORDER BY COALESCE(q.time_sec, 0) DESC, q.id DESC
+      WHERE q.session_id = ? AND NOT (${unansweredExpr})
+      ORDER BY q.correct ASC, COALESCE(q.time_sec, 0) DESC, q.id DESC
     `,
     [id]
   );
@@ -2523,10 +3012,45 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
     };
     let myAnswer = null;
     if (item.choicesType === 'single' && Array.isArray(item.choices)) {
-      const checked = item.choices.find((c) => c && (c.checked || c.isUserSelected));
-      if (checked) {
-        const labelLetter = (checked.label || '').match(/^\s*([A-E])\s*[\).]?/)?.[1];
-        myAnswer = labelLetter || choiceValueToLetter(checked.value) || String(checked.value);
+      // Priority for single-choice MC user-pick:
+      //   1. pickByRow — `.ITSMCOptionTableOn` is the authoritative class
+      //      ITDReview applies to the user's saved pick row. Always present
+      //      once restoration completes (the scraper now waits for it).
+      //   2. pickByColor — Quant pages additionally render red/green row
+      //      backgrounds. A second independent signal; we keep it as a
+      //      fallback for any Quant-specific timing edge case.
+      //
+      // We deliberately do NOT fall back to `el.checked` or the generic
+      // `isUserSelected` flag. Both can carry the radio's HTML default
+      // (value=1, label A) when the page was read before ITDReview restored
+      // the saved pick — which silently corrupts wrong-answer rows to "A".
+      // If neither pickByRow nor pickByColor fires, we leave myAnswer null;
+      // the inverse fallback below ("got it right ⇒ my=correct") still
+      // recovers correctly-answered items.
+      const pickFromChoice = (c) => {
+        if (!c) return null;
+        // Require an enumerator separator (A) / A.) before treating a leading
+        // letter as the option label. Without this guard, a bare-text choice
+        // like "Expensive assistance programs..." gets misread as letter "E"
+        // and corrupts my_answer (seen on session 61257 q 38180: real pick
+        // was option C, regex extracted "E" from the first word "Expensive").
+        // The positional `value` (1..5 → A..E) is the authoritative signal
+        // for StartTest pages where labels are bare text.
+        const labelLetter = (c.label || '').match(/^\s*([A-E])[\).]/)?.[1];
+        return labelLetter || choiceValueToLetter(c.value) || (c.value != null ? String(c.value) : null);
+      };
+      const byRow = item.choices.find((c) => c && c.pickByRow === true);
+      const byColor = byRow ? null : item.choices.find((c) => c && c.pickByColor === true);
+      const reliable = byRow || byColor;
+      if (reliable) {
+        myAnswer = pickFromChoice(reliable);
+      }
+      // Re-sync per-choice isUserSelected flags so the review modal highlights
+      // the right option. Clear all first, then set the chosen one.
+      if (Array.isArray(answerChoicesArr) && myAnswer) {
+        for (const c of answerChoicesArr) { if (c) c.isUserSelected = false; }
+        const matchIdx = answerChoicesArr.findIndex((c) => c && c.label === myAnswer);
+        if (matchIdx >= 0) answerChoicesArr[matchIdx].isUserSelected = true;
       }
     } else if (item.choicesType === 'matrix' && item.choices?.rows) {
       // Matrix has two layouts that need different my_answer formats:
@@ -2563,12 +3087,12 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
         return /^select\.\.\.?$/i.test(t) ? '' : t;
       });
       myAnswer = parts.some(Boolean) ? parts.join(',') : null;
-    } else if (Array.isArray(item.answerSelection) && item.answerSelection.length > 1 && item.answerSelection[1] != null) {
-      myAnswer = String(item.answerSelection[1]); // last-resort fallback
-    } else if (Array.isArray(item.choices)) {
-      const checked = item.choices.find((c) => c && c.checked);
-      if (checked) myAnswer = String(checked.value);
     }
+    // Note: an earlier version fell back to `window.answerSelection[1]` for
+    // unrecognized item types. That global is `[0,1]` on every ITDReview
+    // frame (it's a per-item min/max selection-count config, NOT the user's
+    // pick), so reading it as the answer leaked a constant "1" → letter "A".
+    // Removed to prevent silent A-leaks on unknown item shapes.
     // Correct answer comes from the hidden <input name="Key1"> form field on
     // the ITDReview page — authoritative for both single-choice (one value)
     // and matrix items (CSV like "2,2,1"). For single-choice MC we convert
@@ -2600,6 +3124,24 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
     if (!correctAnswer && Number(targetRow.correct) === 1 && myAnswer) {
       correctAnswer = myAnswer;
     }
+    // Inverse fallback: when no reliable user-pick signal was found in the
+    // DOM (Verbal review pages frequently lack the red/green highlight) but
+    // Phase 1 says the user got it right, the user's pick is mathematically
+    // the correct answer. Without this, my_answer stays null and the
+    // dashboard can't color-code the review modal.
+    if (
+      item.choicesType === 'single' &&
+      !myAnswer &&
+      correctAnswer &&
+      Number(targetRow.correct) === 1
+    ) {
+      myAnswer = correctAnswer;
+      if (Array.isArray(answerChoicesArr)) {
+        for (const c of answerChoicesArr) { if (c) c.isUserSelected = false; }
+        const matchIdx = answerChoicesArr.findIndex((c) => c && c.label === myAnswer);
+        if (matchIdx >= 0) answerChoicesArr[matchIdx].isUserSelected = true;
+      }
+    }
 
     // Convert ms → seconds; preserve existing time_sec if not available.
     const timeSecPrecise =
@@ -2607,23 +3149,52 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
         ? Math.max(1, Math.round(item.vPreviousTimeSpent / 1000))
         : null;
 
+    // Sanity guard: a row marked WRONG by Phase 1 cannot have my_answer ===
+    // correct_answer. If we see this, my_answer is corrupted (historically:
+    // the bare-label regex extracting "E" from "Expensive..."). Drop the
+    // suspect my_answer rather than persist a contradiction; an operator
+    // re-running Phase 2 after a code fix will refill it. Same guard in
+    // reverse for correct=1 rows where my_answer differs from correct_answer.
+    if (
+      item.choicesType === 'single' &&
+      myAnswer && correctAnswer &&
+      Number(targetRow.correct) === 0 &&
+      myAnswer === correctAnswer
+    ) {
+      errors.push({
+        seq, itemName,
+        message: `inconsistent: correct=0 but my_answer===correct_answer===${myAnswer}; my_answer dropped`,
+      });
+      myAnswer = null;
+      if (Array.isArray(answerChoicesArr)) {
+        for (const c of answerChoicesArr) { if (c) c.isUserSelected = false; }
+      }
+    }
+
     try {
+      // NOTE: do NOT overwrite q_id here. Phase 1 writes the composite
+      // "<sessionExternalId>-seq-<N>" and Phase 2 must leave it untouched so
+      // that a subsequent Phase 1 re-scrape can match the existing row via
+      // the snapshot/annotation indexes (both keyed on q_id). If Phase 2
+      // mutates q_id to ItemName, the next Phase 1 wipes question_stem,
+      // answer_choices, passage_text, mistake_type, notes — silently.
+      // The Phase 2 lookup above already accepts either composite OR
+      // itemName, so leaving q_id alone is sufficient.
       await run(
         `
           UPDATE question_attempts
-          SET q_id = COALESCE(?, q_id),
-              q_code = COALESCE(?, q_code),
+          SET q_code = COALESCE(?, q_code),
               question_stem = COALESCE(?, question_stem),
               answer_choices = ?,
               response_format = COALESCE(?, response_format),
               response_details = ?,
               my_answer = COALESCE(?, my_answer),
               correct_answer = COALESCE(?, correct_answer),
-              time_sec = COALESCE(?, time_sec)
+              time_sec = COALESCE(?, time_sec),
+              passage_text = COALESCE(NULLIF(?, ''), passage_text)
           WHERE id = ?
         `,
         [
-          itemName || null,
           formQuestionId != null ? String(formQuestionId) : (stableKey || null),
           item.stem || null,
           JSON.stringify(answerChoicesArr),
@@ -2632,6 +3203,7 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
           myAnswer,
           correctAnswer,
           timeSecPrecise,
+          item.passage || '',
           targetRow.id,
         ]
       );
@@ -2641,7 +3213,41 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
     }
   }
 
+  await refreshSessionTimingAggregates(sessionDbId);
+
   return { sessionDbId, matched: enrichedItems.length, updated, skipped, errors };
+}
+
+// Phase 2 overwrites per-question time_sec with vPreviousTimeSpent, but
+// s.avg_time_sec was set at Phase-1 time and would otherwise drift away
+// from the live AVG. listSessions/getSessionAnalysis both COALESCE live
+// over stored, so the discrepancy is invisible in the UI for sessions that
+// have any answered question; but other consumers (and the dashboard's
+// pre-aggregated cards) read s.avg_time_sec directly. Keep them in sync.
+async function refreshSessionTimingAggregates(sessionDbId) {
+  const id = Number(sessionDbId);
+  if (!Number.isInteger(id) || id <= 0) return;
+  const unansweredExpr = unansweredPlaceholderExpr('q');
+  await run(
+    `
+      UPDATE sessions
+      SET
+        avg_time_sec = COALESCE((
+          SELECT ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) THEN q.time_sec END), 0)
+          FROM question_attempts q WHERE q.session_id = ?
+        ), avg_time_sec),
+        avg_correct_time_sec = COALESCE((
+          SELECT ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN q.time_sec END), 0)
+          FROM question_attempts q WHERE q.session_id = ?
+        ), avg_correct_time_sec),
+        avg_incorrect_time_sec = COALESCE((
+          SELECT ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN q.time_sec END), 0)
+          FROM question_attempts q WHERE q.session_id = ?
+        ), avg_incorrect_time_sec)
+      WHERE id = ?
+    `,
+    [id, id, id, id]
+  );
 }
 
 // GMAT Club Phase-2 enrichment writer. The runner returns one item per
@@ -2706,7 +3312,8 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
               answer_choices = CASE WHEN ? > 0 THEN ? ELSE answer_choices END,
               correct_answer = COALESCE(NULLIF(?, ''), correct_answer),
               my_answer = COALESCE(NULLIF(?, ''), my_answer),
-              question_url = COALESCE(NULLIF(?, ''), question_url)
+              question_url = COALESCE(NULLIF(?, ''), question_url),
+              passage_text = COALESCE(NULLIF(?, ''), passage_text)
           WHERE id = ?
         `,
         [
@@ -2716,6 +3323,7 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
           item.correct_answer || '',
           item.my_answer || '',
           item.final_url || item.source_url || '',
+          item.passage_text || '',
           targetRow.id,
         ]
       );
@@ -2725,7 +3333,254 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
     }
   }
 
+  await refreshSessionTimingAggregates(sessionDbId);
+
   return { sessionDbId, matched: enrichedItems.length, updated, skipped, errors };
+}
+
+// OPE Phase 3 enrichment writer. Matches rows by q_id = "ope-${itemName}-p${positionInSection}"
+// (the composite Phase 2 wrote). Updates stem, choices, my_answer, correct_answer,
+// difficulty, and replaces time_sec with the precise ms-based vPreviousTimeSpent.
+async function enrichOpeSessionAttempts({ sessionExternalId, source, enrichedItems }) {
+  const sessionRow = await get(
+    `
+      SELECT id
+      FROM sessions
+      WHERE session_external_id = ?
+        AND COALESCE(source, '') = COALESCE(?, '')
+      ORDER BY id DESC
+      LIMIT 1
+    `,
+    [Number(sessionExternalId) || sessionExternalId, source || null]
+  );
+  if (!sessionRow?.id) {
+    return { matched: 0, updated: 0, skipped: 0, errors: [{ message: 'session-not-found', sessionExternalId, source }] };
+  }
+  const sessionDbId = sessionRow.id;
+
+  let updated = 0;
+  let skipped = 0;
+  const errors = [];
+
+  for (const item of (Array.isArray(enrichedItems) ? enrichedItems : [])) {
+    const itemName = String(item?.itemName || '').trim();
+    const position = Number(item?.positionInSection);
+    if (!itemName || !Number.isFinite(position) || position < 1) {
+      errors.push({ message: 'item missing itemName or positionInSection', item });
+      continue;
+    }
+    const qId = `ope-${itemName}-p${position}`;
+    const targetRow = await get(
+      `SELECT id FROM question_attempts WHERE session_id = ? AND q_id = ? LIMIT 1`,
+      [sessionDbId, qId]
+    );
+    if (!targetRow) {
+      skipped += 1;
+      // Capture the mismatch for debugging — write to errors so the API
+      // response surfaces what q_ids we tried but couldn't match.
+      errors.push({
+        skipped: true,
+        composedQid: qId,
+        itemName,
+        positionInSection: position,
+        section: item.section || null,
+      });
+      continue;
+    }
+    const choices = Array.isArray(item.choices) ? item.choices : [];
+    const answerChoicesArr = choices
+      .map((c) => ({
+        label: String(c?.label || '').trim() || null,
+        // Preserve `value` for matrix (e.g. "1:2" = row:col) and dropdown
+        // (e.g. "1:A3" = ddIdx:optionValue) items; downstream backfill
+        // scripts use it to reconstruct the grid / dropdown ordering.
+        value: c?.value != null ? String(c.value).trim() : null,
+        text: String(c?.text || '').trim() || null,
+        isCorrect: !!c?.isCorrect,
+        isUserSelected: !!c?.isUserSelected,
+      }))
+      .filter((c) => c.label || c.text);
+
+    const timeSecPrecise = Number.isFinite(Number(item?.vPreviousTimeSpentMs))
+      ? Math.round(Number(item.vPreviousTimeSpentMs) / 1000)
+      : null;
+    // OPE Phase 3 exposes the IRT 3PL b-parameter as a raw float. Store it on
+    // `difficulty_theta` (for sorting/analytics) and bucket to a text label on
+    // `difficulty` (for the chip-rendering UI). The ±0.43 below is just an
+    // initial guess; recomputeIrtCutoffs() runs at the end of this function
+    // and overwrites every label with per-subject empirical p33/p67 cutoffs.
+    const thetaNum = Number.isFinite(Number(item?.difficulty))
+      ? Number(item.difficulty)
+      : null;
+    const difficultyLabel = thetaNum == null
+      ? null
+      : thetaNum < -0.43 ? 'Easy' : thetaNum > 0.43 ? 'Hard' : 'Medium';
+
+    try {
+      await run(
+        `
+          UPDATE question_attempts
+          SET question_stem = COALESCE(NULLIF(?, ''), question_stem),
+              answer_choices = CASE WHEN ? > 0 THEN ? ELSE answer_choices END,
+              correct_answer = COALESCE(NULLIF(?, ''), correct_answer),
+              my_answer = COALESCE(NULLIF(?, ''), my_answer),
+              difficulty = COALESCE(NULLIF(?, ''), difficulty),
+              difficulty_theta = COALESCE(?, difficulty_theta),
+              time_sec = COALESCE(?, time_sec)
+          WHERE id = ?
+        `,
+        [
+          item.stem || '',
+          answerChoicesArr.length,
+          answerChoicesArr.length ? JSON.stringify(answerChoicesArr) : null,
+          item.correct_answer || '',
+          item.my_answer || '',
+          difficultyLabel || '',
+          thetaNum,
+          timeSecPrecise,
+          targetRow.id,
+        ]
+      );
+      updated += 1;
+    } catch (err) {
+      errors.push({ q_id: qId, message: err.message });
+    }
+  }
+
+  await refreshSessionTimingAggregates(sessionDbId);
+  await recomputeIrtCutoffs();
+
+  return { sessionDbId, matched: enrichedItems.length, updated, skipped, errors };
+}
+
+// Recomputes empirical IRT cutoffs from current theta data and rebuckets
+// every theta-bearing row's `difficulty` label to match. Called after each
+// Phase 3 enrichment so the OPE buckets stay consistent as new attempts
+// arrive.
+//
+// Keying:
+//   Q, V → cutoffs keyed on subject_code alone (sub_key='')
+//   DI   → cutoffs keyed on (subject_code='DI', sub_key=topic) so MSR's
+//          wide right tail doesn't contaminate DS/GT/TPA. (DI topics:
+//          'Data Sufficiency', 'Graphs and Tables', 'Two-part analysis',
+//          'Multi-source reasoning'.)
+//
+// Buckets with fewer than 10 theta-bearing rows are skipped; those rows
+// fall back to the global ±0.43 cutoff (the legacy default) until the
+// sample grows.
+async function recomputeIrtCutoffs() {
+  // Q and V: one cutoff per subject_code.
+  const qvRows = await all(`
+    WITH ranked AS (
+      SELECT subject_code, difficulty_theta,
+             PERCENT_RANK() OVER (PARTITION BY subject_code ORDER BY difficulty_theta) AS pr,
+             COUNT(*) OVER (PARTITION BY subject_code) AS n
+      FROM question_attempts
+      WHERE difficulty_theta IS NOT NULL
+        AND subject_code IN ('Q','V')
+    )
+    SELECT subject_code,
+           '' AS sub_key,
+           MIN(CASE WHEN pr >= 0.3333 THEN difficulty_theta END) AS p33,
+           MIN(CASE WHEN pr >= 0.6667 THEN difficulty_theta END) AS p67,
+           MAX(n) AS n
+    FROM ranked
+    GROUP BY subject_code
+    HAVING MAX(n) >= 10
+  `);
+
+  // DI: one cutoff per (subject_code, topic).
+  const diRows = await all(`
+    WITH ranked AS (
+      SELECT subject_code, COALESCE(topic, '') AS sub_key, difficulty_theta,
+             PERCENT_RANK() OVER (
+               PARTITION BY subject_code, COALESCE(topic, '')
+               ORDER BY difficulty_theta
+             ) AS pr,
+             COUNT(*) OVER (
+               PARTITION BY subject_code, COALESCE(topic, '')
+             ) AS n
+      FROM question_attempts
+      WHERE difficulty_theta IS NOT NULL
+        AND subject_code = 'DI'
+        AND COALESCE(topic, '') <> ''
+    )
+    SELECT subject_code, sub_key,
+           MIN(CASE WHEN pr >= 0.3333 THEN difficulty_theta END) AS p33,
+           MIN(CASE WHEN pr >= 0.6667 THEN difficulty_theta END) AS p67,
+           MAX(n) AS n
+    FROM ranked
+    GROUP BY subject_code, sub_key
+    HAVING MAX(n) >= 10
+  `);
+
+  const rows = [...qvRows, ...diRows];
+  for (const r of rows) {
+    if (r.p33 == null || r.p67 == null) continue;
+    await run(
+      `INSERT INTO irt_cutoffs(subject_code, sub_key, p33, p67, n, updated_at)
+       VALUES (?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(subject_code, sub_key) DO UPDATE SET
+         p33 = excluded.p33,
+         p67 = excluded.p67,
+         n = excluded.n,
+         updated_at = excluded.updated_at`,
+      [r.subject_code, r.sub_key, r.p33, r.p67, r.n]
+    );
+  }
+
+  // Rebucket: match each row to its cutoff entry by (subject_code, key).
+  // For Q/V the cutoff row has sub_key=''; for DI it has sub_key=topic.
+  await run(`
+    UPDATE question_attempts
+    SET difficulty = (
+      SELECT CASE
+        WHEN question_attempts.difficulty_theta < c.p33 THEN 'Easy'
+        WHEN question_attempts.difficulty_theta > c.p67 THEN 'Hard'
+        ELSE 'Medium'
+      END
+      FROM irt_cutoffs c
+      WHERE c.subject_code = question_attempts.subject_code
+        AND c.sub_key = CASE
+          WHEN question_attempts.subject_code = 'DI'
+            THEN COALESCE(question_attempts.topic, '')
+          ELSE ''
+        END
+    )
+    WHERE difficulty_theta IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM irt_cutoffs c
+        WHERE c.subject_code = question_attempts.subject_code
+          AND c.sub_key = CASE
+            WHEN question_attempts.subject_code = 'DI'
+              THEN COALESCE(question_attempts.topic, '')
+            ELSE ''
+          END
+      )
+  `);
+
+  // Fallback ±0.43 for any theta-bearing row that didn't match a cutoff
+  // (small sub-buckets, unknown subject codes, etc.).
+  await run(`
+    UPDATE question_attempts
+    SET difficulty = CASE
+      WHEN difficulty_theta < -0.43 THEN 'Easy'
+      WHEN difficulty_theta >  0.43 THEN 'Hard'
+      ELSE 'Medium'
+    END
+    WHERE difficulty_theta IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM irt_cutoffs c
+        WHERE c.subject_code = question_attempts.subject_code
+          AND c.sub_key = CASE
+            WHEN question_attempts.subject_code = 'DI'
+              THEN COALESCE(question_attempts.topic, '')
+            ELSE ''
+          END
+      )
+  `);
+
+  return rows;
 }
 
 async function listGmatClubEnrichTargets(sessionDbId) {
@@ -2742,6 +3597,757 @@ async function listGmatClubEnrichTargets(sessionDbId) {
   );
 }
 
+// ─── Study Plan helpers ──────────────────────────────────────────────────────
+
+const STUDY_PLAN_TASK_ALLOWED_STATUS = new Set(['pending', 'done', 'skipped']);
+
+function normalizeStudyPlanStatus(value) {
+  const v = String(value || '').toLowerCase();
+  return STUDY_PLAN_TASK_ALLOWED_STATUS.has(v) ? v : 'pending';
+}
+
+async function listStudyPlanTasks() {
+  return await all(
+    `SELECT id, day_date, week_number, day_label, day_theme, position,
+            title, description, est_minutes, status, completed_at, notes,
+            created_at, updated_at
+       FROM study_plan_tasks
+      ORDER BY day_date ASC, position ASC, id ASC`
+  );
+}
+
+async function getStudyPlanTask(id) {
+  return await get('SELECT * FROM study_plan_tasks WHERE id = ?', [id]);
+}
+
+async function createStudyPlanTask(input) {
+  const dayDate = String(input.day_date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dayDate)) {
+    throw new Error('day_date must be YYYY-MM-DD');
+  }
+  const weekNumber = Number.isFinite(Number(input.week_number)) ? Number(input.week_number) : 1;
+  const title = String(input.title || '').trim();
+  if (!title) throw new Error('title is required');
+  const description = input.description == null ? null : String(input.description);
+  const dayLabel = input.day_label == null ? null : String(input.day_label);
+  const dayTheme = input.day_theme == null ? null : String(input.day_theme);
+  const estMinutes = Number.isFinite(Number(input.est_minutes)) ? Number(input.est_minutes) : null;
+  const status = normalizeStudyPlanStatus(input.status);
+  const notes = input.notes == null ? null : String(input.notes);
+  // Default new task to the end of its day's list.
+  let position = Number.isFinite(Number(input.position)) ? Number(input.position) : null;
+  if (position == null) {
+    const row = await get(
+      'SELECT COALESCE(MAX(position), -1) AS maxpos FROM study_plan_tasks WHERE day_date = ?',
+      [dayDate]
+    );
+    position = (row?.maxpos ?? -1) + 1;
+  }
+  const result = await run(
+    `INSERT INTO study_plan_tasks
+       (day_date, week_number, day_label, day_theme, position, title, description,
+        est_minutes, status, completed_at, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [dayDate, weekNumber, dayLabel, dayTheme, position, title, description,
+     estMinutes, status, status === 'done' ? new Date().toISOString() : null, notes]
+  );
+  return await getStudyPlanTask(result.lastID);
+}
+
+async function updateStudyPlanTask(id, patch) {
+  const existing = await getStudyPlanTask(id);
+  if (!existing) return null;
+  const fields = [];
+  const params = [];
+  const set = (col, val) => { fields.push(`${col} = ?`); params.push(val); };
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'title')) {
+    const v = String(patch.title || '').trim();
+    if (!v) throw new Error('title cannot be empty');
+    set('title', v);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'description')) {
+    set('description', patch.description == null ? null : String(patch.description));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'day_date')) {
+    const v = String(patch.day_date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new Error('day_date must be YYYY-MM-DD');
+    set('day_date', v);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'week_number')) {
+    set('week_number', Number(patch.week_number));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'day_label')) {
+    set('day_label', patch.day_label == null ? null : String(patch.day_label));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'day_theme')) {
+    set('day_theme', patch.day_theme == null ? null : String(patch.day_theme));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'position')) {
+    set('position', Number(patch.position));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'est_minutes')) {
+    set('est_minutes', patch.est_minutes == null ? null : Number(patch.est_minutes));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'notes')) {
+    set('notes', patch.notes == null ? null : String(patch.notes));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'status')) {
+    const status = normalizeStudyPlanStatus(patch.status);
+    set('status', status);
+    if (status === 'done' && existing.status !== 'done') {
+      set('completed_at', new Date().toISOString());
+    } else if (status !== 'done') {
+      set('completed_at', null);
+    }
+  }
+  if (!fields.length) return existing;
+  fields.push("updated_at = datetime('now')");
+  params.push(id);
+  await run(`UPDATE study_plan_tasks SET ${fields.join(', ')} WHERE id = ?`, params);
+  return await getStudyPlanTask(id);
+}
+
+async function deleteStudyPlanTask(id) {
+  const result = await run('DELETE FROM study_plan_tasks WHERE id = ?', [id]);
+  return result.changes > 0;
+}
+
+async function getStudyPlanMeta() {
+  const rows = await all('SELECT key, value FROM study_plan_meta');
+  const out = {};
+  for (const r of rows) out[r.key] = r.value;
+  return out;
+}
+
+async function setStudyPlanMeta(key, value) {
+  await run(
+    `INSERT INTO study_plan_meta (key, value, updated_at)
+     VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+    [String(key), value == null ? null : String(value)]
+  );
+}
+
+// Wipe the entire plan (tasks only — meta preserved) so a fresh seed can run.
+// Returns the number of deleted rows.
+async function resetStudyPlanTasks() {
+  const result = await run('DELETE FROM study_plan_tasks');
+  return { deleted: result.changes };
+}
+
+// ─── Mock Results helpers ───────────────────────────────────────────────────
+
+function normalizeMockInput(input) {
+  const date = String(input.mock_date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error('mock_date must be YYYY-MM-DD');
+  }
+  const source = String(input.source_label || '').trim();
+  if (!source) throw new Error('source_label is required');
+  const intOrNull = (v) => {
+    if (v == null || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.round(n) : null;
+  };
+  return {
+    mock_date: date,
+    source_label: source,
+    total_score: intOrNull(input.total_score),
+    total_percentile: intOrNull(input.total_percentile),
+    quant_score: intOrNull(input.quant_score),
+    quant_percentile: intOrNull(input.quant_percentile),
+    di_score: intOrNull(input.di_score),
+    di_percentile: intOrNull(input.di_percentile),
+    verbal_score: intOrNull(input.verbal_score),
+    verbal_percentile: intOrNull(input.verbal_percentile),
+    notes: input.notes == null ? null : String(input.notes),
+  };
+}
+
+async function listMockResults() {
+  return await all(
+    `SELECT id, mock_date, source_label, total_score, total_percentile,
+            quant_score, quant_percentile, di_score, di_percentile,
+            verbal_score, verbal_percentile, notes, created_at, updated_at
+       FROM mock_results
+      ORDER BY mock_date ASC, id ASC`
+  );
+}
+
+async function getMockResult(id) {
+  return await get('SELECT * FROM mock_results WHERE id = ?', [id]);
+}
+
+async function createMockResult(input) {
+  const v = normalizeMockInput(input);
+  const result = await run(
+    `INSERT INTO mock_results
+       (mock_date, source_label, total_score, total_percentile,
+        quant_score, quant_percentile, di_score, di_percentile,
+        verbal_score, verbal_percentile, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [v.mock_date, v.source_label, v.total_score, v.total_percentile,
+     v.quant_score, v.quant_percentile, v.di_score, v.di_percentile,
+     v.verbal_score, v.verbal_percentile, v.notes]
+  );
+  return await getMockResult(result.lastID);
+}
+
+async function updateMockResult(id, patch) {
+  const existing = await getMockResult(id);
+  if (!existing) return null;
+  // Merge patch over existing and re-validate.
+  const merged = { ...existing, ...patch };
+  const v = normalizeMockInput(merged);
+  await run(
+    `UPDATE mock_results
+        SET mock_date = ?, source_label = ?,
+            total_score = ?, total_percentile = ?,
+            quant_score = ?, quant_percentile = ?,
+            di_score = ?, di_percentile = ?,
+            verbal_score = ?, verbal_percentile = ?,
+            notes = ?,
+            updated_at = datetime('now')
+      WHERE id = ?`,
+    [v.mock_date, v.source_label, v.total_score, v.total_percentile,
+     v.quant_score, v.quant_percentile, v.di_score, v.di_percentile,
+     v.verbal_score, v.verbal_percentile, v.notes, id]
+  );
+  return await getMockResult(id);
+}
+
+async function deleteMockResult(id) {
+  const result = await run('DELETE FROM mock_results WHERE id = ?', [id]);
+  return result.changes > 0;
+}
+
+// Returns OPE mock sessions that the scraper has captured score data for, in
+// the same shape as listMockResults() so the UI can merge them with manual
+// entries. Only rows with at least one section/total score column populated
+// are surfaced (regular practice sessions leave these NULL).
+async function listScrapedMockResults() {
+  const rows = await all(
+    `SELECT id, session_external_id, session_date, source,
+            total_score, total_percentile,
+            quant_score, quant_percentile,
+            di_score, di_percentile,
+            verbal_score, verbal_percentile
+       FROM sessions
+      WHERE total_score IS NOT NULL
+         OR quant_score IS NOT NULL
+         OR verbal_score IS NOT NULL
+         OR di_score IS NOT NULL
+      ORDER BY session_date ASC, id ASC`
+  );
+  return rows.map((r) => ({
+    id: `scraped-${r.id}`,
+    session_id: r.id,
+    session_external_id: r.session_external_id,
+    mock_date: r.session_date,
+    source_label: r.source,
+    total_score: r.total_score,
+    total_percentile: r.total_percentile,
+    quant_score: r.quant_score,
+    quant_percentile: r.quant_percentile,
+    di_score: r.di_score,
+    di_percentile: r.di_percentile,
+    verbal_score: r.verbal_score,
+    verbal_percentile: r.verbal_percentile,
+    notes: null,
+    source_type: 'scraped',
+  }));
+}
+
+// Seed Mock #1 baseline (605 from OPE3 on 2026-05-24) if no mock rows exist.
+async function seedMockResultsIfEmpty() {
+  const row = await get('SELECT COUNT(*) AS n FROM mock_results');
+  if (row && Number(row.n) > 0) return { seeded: false };
+  await createMockResult({
+    mock_date: '2026-05-24',
+    source_label: 'OPE3 (used twice)',
+    total_score: 605,
+    total_percentile: 70,
+    quant_score: 86,
+    quant_percentile: 91,
+    di_score: 76,
+    di_percentile: 53,
+    verbal_score: 78,
+    verbal_percentile: 38,
+    notes: 'Diagnostic baseline. Reveals Verbal at 38th %ile as biggest opportunity; Quant strong; DI middle. Plan rebalanced toward Verbal after this mock.',
+  });
+  return { seeded: true };
+}
+
+// Smart sync: apply the latest buildStudyPlanSeed() to existing rows, matching
+// by (day_date, position). Preserves user-modified state:
+//   • If status != 'pending' (done or skipped) → leave row alone
+//   • If notes is non-empty → leave row alone
+// For preserved rows we still update day_theme (label-level change) but not the
+// task-level fields. New seed rows that don't match any existing row are
+// inserted. Existing rows not matched by any seed row are left alone (the user
+// may have added them manually).
+async function syncStudyPlanFromSeed() {
+  const seed = buildStudyPlanSeed();
+  const existing = await all(
+    `SELECT id, day_date, position, status, notes
+       FROM study_plan_tasks`
+  );
+  // Index existing rows by (day_date, position) for O(1) lookup.
+  const key = (d, p) => `${d}|${p}`;
+  const map = new Map();
+  for (const r of existing) map.set(key(r.day_date, r.position), r);
+
+  let updated = 0, preservedThemeOnly = 0, inserted = 0;
+
+  for (const day of seed.days) {
+    let pos = 0;
+    for (const task of day.tasks) {
+      const k = key(day.date, pos);
+      const ex = map.get(k);
+      if (!ex) {
+        // New seed row — insert.
+        await run(
+          `INSERT INTO study_plan_tasks
+             (day_date, week_number, day_label, day_theme, position, title,
+              description, est_minutes, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+          [day.date, day.week, day.label, day.theme, pos, task.title,
+           task.description || null, task.minutes || null]
+        );
+        inserted++;
+      } else {
+        const userModified = ex.status !== 'pending'
+          || (ex.notes != null && String(ex.notes).trim() !== '');
+        if (userModified) {
+          // Only update day_theme (it's denormalized — label change shouldn't be lost).
+          await run(
+            `UPDATE study_plan_tasks
+               SET day_theme = ?, day_label = ?, week_number = ?,
+                   updated_at = datetime('now')
+             WHERE id = ?`,
+            [day.theme, day.label, day.week, ex.id]
+          );
+          preservedThemeOnly++;
+        } else {
+          // Full update — apply seed fully.
+          await run(
+            `UPDATE study_plan_tasks
+               SET day_theme = ?, day_label = ?, week_number = ?,
+                   title = ?, description = ?, est_minutes = ?,
+                   updated_at = datetime('now')
+             WHERE id = ?`,
+            [day.theme, day.label, day.week, task.title,
+             task.description || null, task.minutes || null, ex.id]
+          );
+          updated++;
+        }
+      }
+      pos++;
+    }
+  }
+  return { updated, preservedThemeOnly, inserted };
+}
+
+// One-time seed of the 4-week final-sprint plan drafted 2026-05-23.
+// Returns { seeded: boolean, inserted: number }.
+async function seedStudyPlanIfEmpty() {
+  const row = await get('SELECT COUNT(*) AS n FROM study_plan_tasks');
+  if (row && Number(row.n) > 0) return { seeded: false, inserted: 0 };
+  const plan = buildStudyPlanSeed();
+  let inserted = 0;
+  for (const day of plan.days) {
+    let pos = 0;
+    for (const task of day.tasks) {
+      await run(
+        `INSERT INTO study_plan_tasks
+           (day_date, week_number, day_label, day_theme, position, title, description,
+            est_minutes, status, completed_at, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL)`,
+        [day.date, day.week, day.label, day.theme, pos++, task.title,
+         task.description || null, task.minutes || null]
+      );
+      inserted++;
+    }
+  }
+  // Set initial meta only if absent.
+  const meta = await getStudyPlanMeta();
+  if (!meta.test_date) await setStudyPlanMeta('test_date', '2026-06-20');
+  if (!meta.plan_title) await setStudyPlanMeta('plan_title', 'GMAT Final Sprint — 4 Weeks');
+  if (!meta.daily_target_hours) await setStudyPlanMeta('daily_target_hours', '2.5');
+  return { seeded: true, inserted };
+}
+
+function buildStudyPlanSeed() {
+  // 4-week final-sprint plan, drafted 2026-05-23, revised 2026-05-24 after Mock #1.
+  //
+  // STRATEGIC FRAME (target: 645–685, test day ~2026-06-20):
+  //  Mock #1 (OPE3, 2026-05-24) = 605 total. Section scores:
+  //    Quant 86 (91st %ile) — STRENGTH, near ceiling. Don't chase.
+  //    DI    76 (53rd %ile) — middle. DS-first still right, but reduced hours.
+  //    Verbal 78 (38th %ile) — AT-MEAN. Biggest score lever to 645+.
+  //
+  //  • Verbal (PRIMARY focus after Mock #1): CR Assumption (53%, n=58) and RC
+  //    Main Idea/Purpose (66%, n=107) + easy/medium accuracy push. The 38th-
+  //    %ile Verbal score suggests careless mistakes on easy/medium questions
+  //    (which the adaptive algorithm punishes disproportionately).
+  //    Techniques: Negation Test for CR Assumption, Passage Map for RC.
+  //  • DI (SECONDARY): DS-first — DS is the largest share of DI questions and
+  //    most technique-learnable. MSR/GI/TPA stay on maintenance touches.
+  //  • Quant (MAINTENANCE only — minimal hours): 91st %ile already, marginal
+  //    return on extra work. Combo/perm/prob polished — DO NOT redrill.
+  //  • Mocks: 4 total (research recommends 2/week in weeks 2-3).
+  //    OPE3 (Mock #1, done) + OPE4 (Mock #2) + 2 × GMAT Club CAT (Mocks #3-#4).
+  //    OPE5/OPE6 reserved sealed for potential retake.
+  //  • Process: every session ends with 5-category mistake tagging
+  //    (conceptual / technique / careless / misread / timing).
+  //  • Hard-question discipline: easy/medium accuracy ≥85% is the bottleneck
+  //    for 645-685, not hard-question accuracy. Don't over-invest in hards.
+  //
+  // POST-MOCK-#1 REBALANCE: 4 sessions converted from DI/Quant to Verbal —
+  //    Thu May 28 (DS hard → Verbal easy/medium drill),
+  //    Sat May 30 (CR + Quant maint → CR + RC expansion),
+  //    Wed Jun  3 (DS reinforcement → Verbal section pace),
+  //    Mon Jun  8 (DS speed → Verbal speed). Net: ~7h more Verbal.
+  //
+  // Each day has 1-4 sub-tasks. Standard non-mock days follow:
+  //   warm-up (15 min) → focused set (60-90 min) → review (30-45 min)
+  const WARMUP_DESC = 'Open the error log, scroll the last 5 misses, recall the fix.';
+  const REVIEW_DESC = 'For every miss: tag mistake type (conceptual / technique / careless / misread / timing), write a 1-line "what I should have seen", flag recurring q_codes.';
+
+  const days = [
+    // ─── Week 1 (May 24–30) — Diagnostic + DS Foundation + CR Assumption ───
+    {
+      date: '2026-05-24', week: 1, label: 'Sun', theme: 'Mock #1 — OPE3 (diagnostic baseline)',
+      tasks: [
+        { title: 'Pre-mock setup (snacks, water, quiet space, same time of day as real test)', minutes: 10 },
+        { title: 'Mock #1 — GMAT Official Practice Exam 3, full-length, timed',
+          description: 'OPE3 used once before — slightly inflated signal, but acceptable baseline since OPE1/OPE2 are burned. Take real breaks; no pauses inside sections. Treat this as test day.',
+          minutes: 150 },
+      ],
+    },
+    {
+      date: '2026-05-25', week: 1, label: 'Mon', theme: 'Mock #1 deep review',
+      tasks: [
+        { title: 'Mock #1 (OPE3) review — every miss with 5-category tagging',
+          description: REVIEW_DESC, minutes: 90 },
+        { title: 'Write top 3 patterns from Mock #1 in a notes file',
+          description: 'e.g. "DS-Probability traps", "RC Main Idea over-specific answers", "TPA hard collapse". This list drives the rest of the week.',
+          minutes: 30 },
+      ],
+    },
+    {
+      date: '2026-05-26', week: 1, label: 'Tue', theme: 'DS technique drill (foundation)',
+      tasks: [
+        { title: 'Warm-up (5 last misses)', description: WARMUP_DESC, minutes: 15 },
+        { title: 'DS technique drill — 15 medium DS Qs using AD/BCE elimination',
+          description: 'Rules: (1) Evaluate each statement INDEPENDENTLY first — wipe the slate clean between (1) and (2). (2) AD/BCE: if (1) is sufficient, answer is A or D; if not, it\'s B/C/E. (3) Look at the simpler statement first. (4) Do NOT solve — only determine sufficiency.',
+          minutes: 75 },
+        { title: 'Review + log DS patterns you recognize', description: REVIEW_DESC, minutes: 30 },
+      ],
+    },
+    {
+      date: '2026-05-27', week: 1, label: 'Wed', theme: 'CR Assumption fundamentals',
+      tasks: [
+        { title: 'Warm-up (5 last misses)', description: WARMUP_DESC, minutes: 15 },
+        { title: 'CR Assumption — 12 OG Assumption Qs with Pre-Think + Negation Test',
+          description: 'PROCESS: (1) Read stem first to confirm it\'s an Assumption question. (2) Identify conclusion + evidence. (3) Pre-think the gap (the unstated link). (4) Only then read choices. (5) Negation Test: negate each finalist — if negation destroys argument, that\'s the answer. CR Assumption is your weakest CR topic at 53% (n=58).',
+          minutes: 75 },
+        { title: 'Review + log which step you skipped on every miss',
+          description: 'Was it pre-thinking? Negation Test? Conclusion misread?',
+          minutes: 30 },
+      ],
+    },
+    {
+      date: '2026-05-28', week: 1, label: 'Thu', theme: 'Verbal easy/medium accuracy drill (Mock #1 reveal)',
+      tasks: [
+        { title: 'Warm-up (5 last misses)', description: WARMUP_DESC, minutes: 15 },
+        { title: 'Verbal — 20 mixed CR + RC Qs, easy/medium only, accuracy target ≥85%',
+          description: 'Mock #1 showed Verbal at 38th percentile / score 78 — biggest score lever to 645+. The likely leak: careless mistakes on easy/medium Verbal questions (the adaptive algorithm punishes these disproportionately). Slow down on the easy ones — read stem twice, eliminate methodically. No hard questions in this set.',
+          minutes: 90 },
+        { title: 'Review every miss — was it actual content or a careless slip?',
+          description: 'For each wrong easy/medium Verbal: did you misread? Pick the trap? Forget the technique? Tag with one of the 5 mistake categories. ' + REVIEW_DESC,
+          minutes: 45 },
+      ],
+    },
+    {
+      date: '2026-05-29', week: 1, label: 'Fri', theme: 'RC Main Idea / Purpose deep-dive',
+      tasks: [
+        { title: 'Warm-up (5 last misses)', description: WARMUP_DESC, minutes: 15 },
+        { title: 'RC — 3 passages with explicit Passage Maps + Main Idea questions',
+          description: 'PROCESS: For each passage, write down (a) the Purpose in your own words, (b) 1-sentence summary per paragraph, (c) author\'s stance. ON Main Idea Qs: go to your Purpose note, then eliminate choices that are too specific or only relate to one paragraph. RC Main Idea/Purpose is your biggest RC opportunity at 66% (n=107).',
+          minutes: 75 },
+        { title: 'Review — score the quality of each passage map you wrote',
+          description: 'Was your Purpose right? Did you miss a contrast signal? ' + REVIEW_DESC,
+          minutes: 30 },
+      ],
+    },
+    {
+      date: '2026-05-30', week: 1, label: 'Sat', theme: 'CR Inference + RC Main Idea expansion',
+      tasks: [
+        { title: 'Warm-up (5 last misses)', description: WARMUP_DESC, minutes: 15 },
+        { title: 'CR Inference — 12 hard-tilted CR Inference Qs',
+          description: 'CR Inference at 62% (n=94) is your second CR weak spot. Inference ≠ Strengthen/Weaken — pick the choice that MUST be true based only on stated premises. Watch for "extreme" language in trap choices.',
+          minutes: 50 },
+        { title: 'RC Main Idea push — 2 passages with explicit Purpose extraction',
+          description: 'Mock #1 says Verbal is your biggest gap. RC Main Idea/Purpose at 66% (n=107) is the largest RC opportunity. Quant maintenance dropped from today\'s plan — you\'re at 91st percentile, marginal return on extra Quant work.',
+          minutes: 40 },
+        { title: 'Review both blocks', description: REVIEW_DESC, minutes: 15 },
+      ],
+    },
+
+    // ─── Week 2 (May 31–Jun 6) — DS Depth + Section Pace + Mock #2 ─────────
+    {
+      date: '2026-05-31', week: 2, label: 'Sun', theme: 'DS section-pace + MSR primer',
+      tasks: [
+        { title: 'Warm-up (5 last misses)', description: WARMUP_DESC, minutes: 15 },
+        { title: 'DS section-pace — 10 DS Qs in 20 min (real test pacing)',
+          description: 'DS questions are 35-50% faster than other DI types (your avg 117s vs 185-234s). Banking time on DS lets you spend it on slow MSR/TPA. Target: 12 sec margin per DS.',
+          minutes: 25 },
+        { title: 'MSR primer — 3 MSR Qs to keep skill warm',
+          description: 'MSR is at 46% (n=84). NOT the focus this round, but skill decays fast. Practice: read source labels first, NOT the full content; return to specific source per question. Pace: ~2.5 min/Q.',
+          minutes: 45 },
+        { title: 'Review both blocks', description: REVIEW_DESC, minutes: 45 },
+      ],
+    },
+    {
+      date: '2026-06-01', week: 2, label: 'Mon', theme: 'RC mixed timed (4 passages)',
+      tasks: [
+        { title: 'Warm-up (5 last misses)', description: WARMUP_DESC, minutes: 15 },
+        { title: 'RC — 4 passages timed, focus on Main Idea + Inference question types',
+          description: 'Build a passage map BEFORE looking at any questions. Read for STRUCTURE on first pass, not memorization. Note Purpose of each ¶, location of contrast signals, author stance.',
+          minutes: 75 },
+        { title: 'Review — passage-map quality check + tag misses',
+          description: 'For each missed Q: did your map have the info? Or did you miss a structural cue? ' + REVIEW_DESC,
+          minutes: 30 },
+      ],
+    },
+    {
+      date: '2026-06-02', week: 2, label: 'Tue', theme: 'Verbal mixed deep-dive',
+      tasks: [
+        { title: 'Warm-up (5 last misses)', description: WARMUP_DESC, minutes: 15 },
+        { title: 'CR mixed — 12 Qs (Assumption + Inference focus), untimed first',
+          description: 'Phase 1: untimed. Force pre-thinking + Negation Test on every Q. No shortcuts.',
+          minutes: 50 },
+        { title: 'Same 12 Qs re-do timed (2 min each)',
+          description: 'Phase 2: see how much of the untimed reasoning you can actually deploy under pressure.',
+          minutes: 30 },
+        { title: '2 RC passages on Main Idea/Purpose',
+          description: 'Apply passage map technique. Time-box: 15 min total.',
+          minutes: 30 },
+        { title: 'Review delta between untimed/timed CR + RC',
+          description: REVIEW_DESC, minutes: 25 },
+      ],
+    },
+    {
+      date: '2026-06-03', week: 2, label: 'Wed', theme: 'Verbal section-pace drill',
+      tasks: [
+        { title: 'Warm-up (5 last misses)', description: WARMUP_DESC, minutes: 15 },
+        { title: 'Verbal section-pace — 20 Qs in 38 min (mix of CR Assumption + CR Inference + RC Main Idea)',
+          description: 'Mirrors actual Verbal section pacing (23 Qs / 45 min). The 38th-percentile Verbal mock score says you need pacing + accuracy gains under section timing, not just topic-by-topic work. Force the techniques (Pre-Think, Negation Test, Passage Map) under time pressure.',
+          minutes: 40 },
+        { title: 'Review + section-pace audit',
+          description: 'Which Qs took >2 min? Were they actually hard, or did you over-think a medium? Where did the technique break down? ' + REVIEW_DESC,
+          minutes: 65 },
+      ],
+    },
+    {
+      date: '2026-06-04', week: 2, label: 'Thu', theme: 'DI full sectional (real timing)',
+      tasks: [
+        { title: 'Pre-section setup — silence phone, clear desk, 5-min warmup', minutes: 10 },
+        { title: 'DI sectional — 20 Qs in 45 min (no pauses, no checking)',
+          description: 'This is your first full-section DI under real timing in this plan. The mix exposes whether your DS gains transfer when MSR/GI/TPA interrupt your rhythm. Pacing target: 2:15/Q average.',
+          minutes: 45 },
+        { title: 'Full sectional review — every miss + every guess + every slow Q',
+          description: 'Mark Qs where you spent >3 min — those are pacing leaks, even when correct. ' + REVIEW_DESC,
+          minutes: 75 },
+      ],
+    },
+    {
+      date: '2026-06-05', week: 2, label: 'Fri', theme: 'Error-log replay (recurring misses)',
+      tasks: [
+        { title: 'Pull every error tagged "misread" or "concept-OK-execution-failed" from last 60d', minutes: 15 },
+        { title: 'Redo cold — no peeking, no notes',
+          description: 'Read stem aloud. Mark constraints on paper. Force the discipline. These are your top mistake tags (n=8 + n=6).',
+          minutes: 75 },
+        { title: 'Compare: which misses persisted across attempts?',
+          description: 'Recurring misses tell you which fix patterns aren\'t sticking yet — those need the most attention.',
+          minutes: 30 },
+      ],
+    },
+    {
+      date: '2026-06-06', week: 2, label: 'Sat', theme: 'Mock #2 — OPE4 (fresh, cleanest signal)',
+      tasks: [
+        { title: 'Pre-mock setup — same time of day as real test if possible', minutes: 10 },
+        { title: 'Mock #2 — GMAT Official Practice Exam 4, full-length, timed',
+          description: 'OPE4 is fresh and your cleanest score signal of the plan. Anchor for mid-plan calibration. Strict timing, real breaks, no pauses.',
+          minutes: 150 },
+      ],
+    },
+
+    // ─── Week 3 (Jun 7–13) — Mock-Heavy Calibration (research: 2 mocks/wk) ─
+    {
+      date: '2026-06-07', week: 3, label: 'Sun', theme: 'Mock #2 deep review + calibration',
+      tasks: [
+        { title: 'Mock #2 (OPE4) review — every miss with 5-category tagging',
+          description: REVIEW_DESC, minutes: 105 },
+        { title: 'Calibration check + adjustment (score-based, anchored on Mock #1=605)',
+          description: 'Mock #2 (OPE4) targets: Verbal ≥80 (vs 78 baseline), DI ≥78 (vs 76), Quant ≥86, Total ≥625. Verbal is the primary lever — if Verbal didn\'t climb, double Verbal time in Week 3 (steal from DS sessions). If DI dropped, the DS-first hypothesis needs revisiting.',
+          minutes: 30 },
+      ],
+    },
+    {
+      date: '2026-06-08', week: 3, label: 'Mon', theme: 'Verbal speed drill + 7-day mistake-tag review',
+      tasks: [
+        { title: 'Warm-up (5 last misses)', description: WARMUP_DESC, minutes: 15 },
+        { title: 'Verbal speed drill — 20 Verbal Qs in 38 min',
+          description: 'Target: ≥85% accuracy, ~1:55 per question. This is the 2nd Verbal section-timed drill of the plan — Mock #2 (just reviewed Sun) should reveal whether Verbal climbed from 78. If it did, lean into momentum; if it didn\'t, this is the calibration day.',
+          minutes: 40 },
+        { title: 'Mistake-tag analysis from last 14 days',
+          description: 'Which of the 5 mistake categories (conceptual/technique/careless/misread/timing) is most common across CR + RC misses? That\'s the highest-leverage Verbal fix for Week 3.',
+          minutes: 35 },
+        { title: 'DS pattern log review (short — DS deprioritized after Mock #1)',
+          description: 'Quick check: are DS patterns still stable from Week 1-2 work? If yes, no extra DS time needed before Mock #3.',
+          minutes: 25 },
+      ],
+    },
+    {
+      date: '2026-06-09', week: 3, label: 'Tue', theme: 'Mock #3 — GMAT Club CAT #1',
+      tasks: [
+        { title: 'Pre-mock setup', minutes: 10 },
+        { title: 'Mock #3 — GMAT Club CAT, full-length, timed',
+          description: 'Research recommends 2 mocks/week in last 2-3 weeks for stamina + pacing calibration. GMAT Club CAT signal less reliable than official — focus on pacing patterns and section-by-section rhythm, NOT the raw score. OPE5/OPE6 preserved for retake.',
+          minutes: 150 },
+      ],
+    },
+    {
+      date: '2026-06-10', week: 3, label: 'Wed', theme: 'Mock #3 review + RC Inference push',
+      tasks: [
+        { title: 'Mock #3 review — patterns + pacing only (score is noisy)',
+          description: 'Where did you slow down? Where did you rush? Which DS Qs did you actually solve vs. determine sufficiency? ' + REVIEW_DESC,
+          minutes: 60 },
+        { title: 'RC Inference focused set — 12 RC Inference Qs',
+          description: 'RC Inference at 72% (n=95). Push to 80%+. Same passage-map approach, but Inference questions need you to NOT extrapolate beyond the passage — pick the choice that\'s most directly supported.',
+          minutes: 60 },
+      ],
+    },
+    {
+      date: '2026-06-11', week: 3, label: 'Thu', theme: 'Process-discipline drill',
+      tasks: [
+        { title: 'Pull every error tagged "misread" or "careless" from Mocks 2 & 3', minutes: 15 },
+        { title: 'Redo cold with FORCED process: read stem aloud, mark constraints, name structure',
+          description: 'For DI: name the data structure before reading the prompt (table type, MSR tab roles, GI axes). For CR: state the conclusion in your own words. For RC: write 1-sentence purpose before answering.',
+          minutes: 75 },
+        { title: 'Write a 1-page process cheat sheet to consult during mocks',
+          description: 'Pin this where you can see it during Week 4 mocks.',
+          minutes: 30 },
+      ],
+    },
+    {
+      date: '2026-06-12', week: 3, label: 'Fri', theme: 'Light review + pre-mock sleep prep',
+      tasks: [
+        { title: 'Light review of process cheat sheet + week 3 notes',
+          description: 'No new questions. Cement what you already know.',
+          minutes: 60 },
+        { title: 'Pre-mock prep: in bed by 10pm, no screens after 9:30',
+          description: 'Tomorrow\'s mock is the last full one — needs you fresh.',
+          minutes: 30 },
+      ],
+    },
+    {
+      date: '2026-06-13', week: 3, label: 'Sat', theme: 'Mock #4 — GMAT Club CAT #2',
+      tasks: [
+        { title: 'Pre-mock setup — same time as real test, full conditions', minutes: 10 },
+        { title: 'Mock #4 — GMAT Club CAT, full-length, timed',
+          description: 'Last full mock. Goal: validate that process discipline holds under fatigue. Track which section had the cleanest pacing.',
+          minutes: 150 },
+      ],
+    },
+
+    // ─── Week 4 (Jun 14–20) — Taper + Test (no new content) ────────────────
+    {
+      date: '2026-06-14', week: 4, label: 'Sun', theme: 'Mock #4 deep review + trend check',
+      tasks: [
+        { title: 'Mock #4 review — every miss with tagging',
+          description: 'Final round of mistake-tagging. ' + REVIEW_DESC, minutes: 90 },
+        { title: 'Compare Mocks #1, #2, #4 for score trend (score-based gate)',
+          description: 'Targets: Verbal ≥82 (38th → 60th %ile), DI ≥80, Quant ≥86, Total ≥645. If still below 645, consider rescheduling the test. Whichever section is weakest — that\'s Tue\'s targeted block focus.',
+          minutes: 30 },
+      ],
+    },
+    {
+      date: '2026-06-15', week: 4, label: 'Mon', theme: 'Recurring-miss final pull',
+      tasks: [
+        { title: 'Pull q_codes wrong on 2+ attempts (uses /api/errors + recurring-miss SQL)', minutes: 15 },
+        { title: 'Redo cold — no notes, no peeking',
+          description: 'These are the misses your study process has NOT fixed yet. Last chance to break them.',
+          minutes: 75 },
+        { title: 'Write final fix note per recurring miss',
+          description: 'One sentence each. These go on the test-day reference card (Wed).',
+          minutes: 30 },
+      ],
+    },
+    {
+      date: '2026-06-16', week: 4, label: 'Tue', theme: 'Final targeted block (no full mock — research says no mocks <3 days before test)',
+      tasks: [
+        { title: 'Quant section-timed — 10 Qs / 20 min',
+          description: 'Focus on whatever section had weakest Mock #4 pacing.',
+          minutes: 25 },
+        { title: 'Verbal section-timed — 10 Qs / 20 min',
+          description: 'CR Assumption + RC Main Idea question types specifically.',
+          minutes: 25 },
+        { title: 'DI section-timed — 10 Qs / 20 min',
+          description: 'DS-heavy mix (60% DS, 40% other types) — mirrors actual test distribution.',
+          minutes: 25 },
+        { title: 'Review all three blocks',
+          description: 'Replaces a 4th full mock to preserve OPE5/OPE6 + mental energy. Research: avoid mocks in last 2-3 days. ' + REVIEW_DESC,
+          minutes: 60 },
+      ],
+    },
+    {
+      date: '2026-06-17', week: 4, label: 'Wed', theme: 'Consolidate + final test-day reference card',
+      tasks: [
+        { title: 'Build a 1-page test-day reference card',
+          description: 'Sections: (1) DS process — AD/BCE, independent statements, simpler-first. (2) CR Assumption — pre-think, Negation Test. (3) RC — passage map, Purpose first. (4) Top 5 recurring traps from your error log. (5) Pacing targets per section.',
+          minutes: 60 },
+        { title: 'Final pacing plan — target time per question by section',
+          description: 'Quant 2:00/Q, Verbal 1:55/Q, DI 2:15/Q (with DS = 1:45, others = 2:30).',
+          minutes: 30 },
+        { title: 'Re-read process cheat sheet from Week 3 once', minutes: 30 },
+      ],
+    },
+    {
+      date: '2026-06-18', week: 4, label: 'Thu', theme: 'Light reasoning practice (no timing)',
+      tasks: [
+        { title: 'Light untimed practice — 10 Qs each section, talk reasoning out loud',
+          description: 'Goal: keep neurons warm without fatigue. Stop if you feel stressed — the math is done.',
+          minutes: 90 },
+      ],
+    },
+    {
+      date: '2026-06-19', week: 4, label: 'Fri', theme: 'REST DAY — notes only',
+      tasks: [
+        { title: 'Read test-day reference card once', minutes: 15 },
+        { title: 'No GMAT material the rest of the day',
+          description: 'Hydrate. Light food. In bed by 10pm. Research consistently says preparation in the last 1-2 days does not change your score, but sleep does.',
+          minutes: 15 },
+      ],
+    },
+    {
+      date: '2026-06-20', week: 4, label: 'Sat', theme: 'TEST DAY',
+      tasks: [
+        { title: 'Light warmup — 3 Qs each section before leaving home',
+          description: 'Goal: warm the brain, not learn. Easy/medium only.',
+          minutes: 20 },
+        { title: 'Test day — go execute the process',
+          description: 'Remember: easy/medium accuracy is the bottleneck for 645-685, not hards. Don\'t dwell on a hard Q — accept the loss and move on (the adaptive algorithm hates streaks of wrongs more than it hates scattered wrongs).',
+          minutes: 0 },
+      ],
+    },
+  ];
+  return { days };
+}
+
 module.exports = {
   dbPath,
   run,
@@ -2752,6 +4358,7 @@ module.exports = {
   saveScrapeResult,
   enrichSessionAttempts,
   enrichGmatClubSessionAttempts,
+  enrichOpeSessionAttempts,
   listGmatClubEnrichTargets,
   listRuns,
   listSessions,
@@ -2762,4 +4369,32 @@ module.exports = {
   getSessionAnalysis,
   getLatestRunForSource,
   updateErrorAnnotation,
+  saveLsatAttempt,
+  listLsatAttempts,
+  listLsatErrors,
+  lsatStats,
+  clearLsatAttempts,
+  createLsatSession,
+  completeLsatSession,
+  listLsatSessions,
+  getLsatSession,
+  // Study plan
+  listStudyPlanTasks,
+  getStudyPlanTask,
+  createStudyPlanTask,
+  updateStudyPlanTask,
+  deleteStudyPlanTask,
+  getStudyPlanMeta,
+  setStudyPlanMeta,
+  seedStudyPlanIfEmpty,
+  resetStudyPlanTasks,
+  syncStudyPlanFromSeed,
+  // Mock results
+  listMockResults,
+  listScrapedMockResults,
+  getMockResult,
+  createMockResult,
+  updateMockResult,
+  deleteMockResult,
+  seedMockResultsIfEmpty,
 };
