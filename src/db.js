@@ -461,11 +461,14 @@ async function saveLsatAttempt({ testNum, sectionRoman, sectionKind, questionNum
   return { isCorrect };
 }
 
-async function createLsatSession({ testNum, sectionRoman, sectionKind, setKey, setLabel, firstQuestion, lastQuestion, mode }) {
+async function createLsatSession({ testNum, sectionRoman, sectionKind, setKey, setLabel, firstQuestion, lastQuestion, mode, questionNumbers }) {
+  const qn = Array.isArray(questionNumbers) && questionNumbers.length
+    ? JSON.stringify([...questionNumbers].sort((a, b) => a - b))
+    : null;
   const result = await run(
-    `INSERT INTO lsat_sessions (test_num, section_roman, section_kind, set_key, set_label, first_question, last_question, mode)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [testNum, sectionRoman, sectionKind, setKey, setLabel || null, firstQuestion, lastQuestion, mode || null]
+    `INSERT INTO lsat_sessions (test_num, section_roman, section_kind, set_key, set_label, first_question, last_question, mode, question_numbers)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [testNum, sectionRoman, sectionKind, setKey, setLabel || null, firstQuestion, lastQuestion, mode || null, qn]
   );
   return { id: result.lastID };
 }

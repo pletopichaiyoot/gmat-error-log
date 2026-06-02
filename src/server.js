@@ -10,6 +10,7 @@ const {
   saveScrapeResult,
   enrichSessionAttempts,
   enrichGmatClubSessionAttempts,
+  enrichOpeSessionAttempts,
   listGmatClubEnrichTargets,
   listRuns,
   listSessions,
@@ -19,7 +20,32 @@ const {
   getPatterns,
   getSessionAnalysis,
   updateErrorAnnotation,
+  saveLsatAttempt,
+  listLsatAttempts,
+  listLsatErrors,
+  lsatStats,
+  createLsatSession,
+  completeLsatSession,
+  listLsatSessions,
+  getLsatSession,
+  listStudyPlanTasks,
+  getStudyPlanTask,
+  createStudyPlanTask,
+  updateStudyPlanTask,
+  deleteStudyPlanTask,
+  getStudyPlanMeta,
+  setStudyPlanMeta,
+  seedStudyPlanIfEmpty,
+  resetStudyPlanTasks,
+  syncStudyPlanFromSeed,
+  listMockResults,
+  listScrapedMockResults,
+  createMockResult,
+  updateMockResult,
+  deleteMockResult,
+  seedMockResultsIfEmpty,
 } = require('./db');
+const fsLib = require('fs');
 const { LlmConfigError, generatePerformanceReview, answerCoachQuestion } = require('./llm-coach-agent');
 const { classifyScrapedQuestions } = require('./question-topic-classifier');
 const {
@@ -29,7 +55,12 @@ const {
   runStartTestPhase2FromOpenBrowser,
   runGmatClubPhase2FromOpenBrowser,
   openStartTestProductInOpenBrowser,
+  runTtpScrapeFromOpenBrowser,
+  runOpeListAttemptsFromOpenBrowser,
+  runOpeMockScrapeFromOpenBrowser,
+  runOpePhase3FromOpenBrowser,
 } = require('./scraper-runner');
+const { recoverTakeIdxFromSessionExternalId } = require('./scrapers/ope_mock_scraper');
 const {
   createSession: createCoachSession,
   getSession: getCoachSession,
@@ -145,6 +176,79 @@ const SOURCE_PRESETS = [
     defaultSince: '20250101000000',
     scraperFile: 'gmat_club_scraper.js',
     tabPattern: 'gmatclub\\.com',
+  },
+  {
+    id: 'ttp-quant-error-tracker',
+    label: 'Target Test Prep — Quant Error Tracker',
+    platform: 'ttp',
+    section: 'quant',
+    appUrl: 'https://gmat.targettestprep.com/error_tracker/quant',
+    defaultSince: '20250101000000',
+    tabPattern: 'gmat\\.targettestprep\\.com',
+  },
+  // GMAT Official Practice Exams (OPE1-6). Two-step scrape: GET /api/ope/attempts
+  // returns take list for the chosen OPE; POST /api/scrape with { source, takeIdx }
+  // scrapes one take's Score Report (Phase 2 — section-summary). Phase 3 (per-question
+  // enrichment) is not yet implemented.
+  {
+    id: 'ope-1',
+    label: 'GMAT™ Official Practice Exam 1',
+    platform: 'ope-mock',
+    productId: 510723,
+    productType: 1,
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
+    defaultSince: '20240101000000',
+  },
+  {
+    id: 'ope-2',
+    label: 'GMAT™ Official Practice Exam 2',
+    platform: 'ope-mock',
+    productId: 510724,
+    productType: 1,
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
+    defaultSince: '20240101000000',
+  },
+  {
+    id: 'ope-3',
+    label: 'GMAT™ Official Practice Exam 3',
+    platform: 'ope-mock',
+    productId: 873268,
+    productType: 1,
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
+    defaultSince: '20240101000000',
+  },
+  {
+    id: 'ope-4',
+    label: 'GMAT™ Official Practice Exam 4',
+    platform: 'ope-mock',
+    productId: 873269,
+    productType: 1,
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
+    defaultSince: '20240101000000',
+  },
+  {
+    id: 'ope-5',
+    label: 'GMAT™ Official Practice Exam 5',
+    platform: 'ope-mock',
+    productId: 873270,
+    productType: 1,
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
+    defaultSince: '20240101000000',
+  },
+  {
+    id: 'ope-6',
+    label: 'GMAT™ Official Practice Exam 6',
+    platform: 'ope-mock',
+    productId: 873271,
+    productType: 1,
+    appUrl: STARTTEST_ENTRY_URL,
+    tabPattern: 'starttest\\.com',
+    defaultSince: '20240101000000',
   },
 ];
 
@@ -351,11 +455,16 @@ app.get('/api/sessions', async (req, res) => {
     const page = Math.max(1, Number(req.query.page || 1));
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
     const offset = (page - 1) * pageSize;
-    const platform = ['gmatclub', 'starttest'].includes(req.query.platform) ? req.query.platform : null;
+    const platform = ['gmatclub', 'starttest', 'ttp', 'ope-mock'].includes(req.query.platform) ? req.query.platform : null;
+    const subject = ['Q', 'V', 'DI'].includes(String(req.query.subject || '').toUpperCase())
+      ? String(req.query.subject).toUpperCase()
+      : null;
+    const startDate = /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate || '') ? req.query.startDate : null;
+    const endDate = /^\d{4}-\d{2}-\d{2}$/.test(req.query.endDate || '') ? req.query.endDate : null;
 
     const [rows, total] = await Promise.all([
-      listSessions(runId, { limit: pageSize, offset, platform }),
-      countSessions(runId, { platform }),
+      listSessions(runId, { limit: pageSize, offset, platform, subject, startDate, endDate }),
+      countSessions(runId, { platform, subject, startDate, endDate }),
     ]);
 
     res.json({
@@ -405,7 +514,7 @@ app.get('/api/errors', async (req, res) => {
       confidence: req.query.confidence || '',
       search: req.query.search || '',
       mistakeTag: req.query.mistakeTag || '',
-      platform: ['gmatclub', 'starttest'].includes(req.query.platform) ? req.query.platform : null,
+      platform: ['gmatclub', 'starttest', 'ttp', 'ope-mock'].includes(req.query.platform) ? req.query.platform : null,
       sortKey: req.query.sortKey || 'session_date',
       sortOrder: req.query.sortOrder === 'asc' ? 'asc' : 'desc',
     };
@@ -846,6 +955,38 @@ app.post('/api/sessions/:sessionId/enrich', async (req, res) => {
         source: sessionRow.source,
         enrichedItems: phase2.result?.items || [],
       });
+    } else if (preset.platform === 'ope-mock') {
+      // OPE Phase 3: per-question enrichment via REVIEW-ALL frame walk.
+      // takeIdx is recovered from the session_external_id hash by trying
+      // 1..N — takeIdx isn't persisted on the session row, but the hash is
+      // small (53-bit) and the input space is tiny (≤10 takes per product),
+      // so inversion is cheap and reliable. The runner now uses this takeIdx
+      // to deterministically open / verify the right Score Report popup
+      // (previously it accepted any open ITDStart popup, which could enrich
+      // the wrong take into this session).
+      const recoveredTakeIdx = recoverTakeIdxFromSessionExternalId(
+        sessionRow.session_external_id,
+        preset.productId,
+      );
+      const takeIdx = Number(req.body?.takeIdx) || recoveredTakeIdx;
+      if (!Number.isInteger(takeIdx) || takeIdx < 1) {
+        res.status(400).json({
+          ok: false,
+          error: `Could not recover takeIdx from session_external_id ${sessionRow.session_external_id} for productId ${preset.productId}. Re-run Phase 2 scrape for this take, or pass takeIdx explicitly in the request body.`,
+        });
+        return;
+      }
+      phase2 = await runOpePhase3FromOpenBrowser({
+        cdpUrl: validatedCdpUrl,
+        sourceId: preset.id,
+        takeIdx,
+        expectedTotal: Number(sessionRow.total_q_api) || 64,
+      });
+      dbResult = await enrichOpeSessionAttempts({
+        sessionExternalId: sessionRow.session_external_id,
+        source: sessionRow.source,
+        enrichedItems: phase2.result?.items || [],
+      });
     } else {
       res.status(400).json({
         ok: false,
@@ -933,6 +1074,48 @@ app.post('/api/open-product', async (req, res) => {
   }
 });
 
+// GET /api/ope/attempts?source=ope-1 — list available takes for an OPE so the
+// UI can render a picker. Returns { takes: [{takeIdx, completedAt, status,
+// hasReport, ...}] }. Requires Chrome on port 9222 with a starttest tab open.
+app.get('/api/ope/attempts', async (req, res) => {
+  try {
+    const validatedCdpUrl = getValidatedCdpUrl(req.query?.cdpUrl);
+    const preset = resolveSourcePreset(req.query?.source);
+    if (!preset) {
+      res.status(400).json({ ok: false, error: 'Unknown source. Pass ?source=ope-1 (or ope-2..6).' });
+      return;
+    }
+    if (preset.platform !== 'ope-mock') {
+      res.status(400).json({
+        ok: false,
+        error: `Source "${preset.label}" is not an OPE. /api/ope/attempts only handles ope-mock platform sources.`,
+      });
+      return;
+    }
+    const result = await runOpeListAttemptsFromOpenBrowser({
+      sourceId: preset.id,
+      cdpUrl: validatedCdpUrl,
+    });
+    res.json(withOptionalDebug({
+      ok: true,
+      source: preset.label,
+      productId: result.productId,
+      takes: result.takes,
+      tabUrl: result.tabUrl,
+    }, {
+      debug: result.debug || null,
+    }));
+  } catch (error) {
+    res.status(Number(error.statusCode || 500)).json(withOptionalDebug({
+      ok: false,
+      error: error.message,
+      hint: 'Confirm Chrome is running with --remote-debugging-port=9222 and a starttest.com tab is open + logged in.',
+    }, {
+      details: clipText(error.stack || error.message || String(error), 4000),
+    }));
+  }
+});
+
 app.post('/api/scrape', async (req, res) => {
   try {
     const { source, cdpUrl, scrapeWindow, customSince } = req.body || {};
@@ -953,13 +1136,40 @@ app.post('/api/scrape', async (req, res) => {
     });
 
     // Route to the StartTest 2 scraper for starttest sources (the seven GMAT
-    // Official Practice books post-2026-04-22 migration). Fall back to the
-    // legacy injected-script flow for the remaining gmatclub source.
+    // Official Practice books post-2026-04-22 migration), the TTP scraper for
+    // Target Test Prep, or fall back to the legacy injected-script flow for
+    // the remaining gmatclub source.
     let data, tabUrl, debug;
     if (preset.platform === 'starttest') {
       const result = await runStartTestScrapeFromOpenBrowser({
         sourceId: preset.id,
         since: sinceValue,
+        cdpUrl: validatedCdpUrl,
+      });
+      data = result.data;
+      tabUrl = result.tabUrl;
+      debug = result.debug;
+    } else if (preset.platform === 'ttp') {
+      const result = await runTtpScrapeFromOpenBrowser({
+        sourceId: preset.id,
+        cdpUrl: validatedCdpUrl,
+      });
+      data = result.data;
+      tabUrl = result.tabUrl;
+      debug = result.debug;
+    } else if (preset.platform === 'ope-mock') {
+      // OPE scrape requires a takeIdx — caller picks one from /api/ope/attempts.
+      const takeIdx = Number(req.body?.takeIdx);
+      if (!Number.isInteger(takeIdx) || takeIdx < 1) {
+        res.status(400).json({
+          ok: false,
+          error: 'takeIdx (positive integer) required for OPE scrapes. Call GET /api/ope/attempts?source=<ope-N> first to enumerate available takes.',
+        });
+        return;
+      }
+      const result = await runOpeMockScrapeFromOpenBrowser({
+        sourceId: preset.id,
+        takeIdx,
         cdpUrl: validatedCdpUrl,
       });
       data = result.data;
@@ -1041,6 +1251,411 @@ app.post('/api/scrape', async (req, res) => {
       details: clipText(error.stack || error.message || String(error), 4000),
       debug: error.scrapeDebug || null,
     }));
+  }
+});
+
+// ---------- LSAT practice endpoints ----------
+let lsatDataCache = null;
+function loadLsatData() {
+  if (lsatDataCache) return lsatDataCache;
+  const p = path.join(__dirname, '..', 'data', 'lsat-questions.json');
+  if (!fsLib.existsSync(p)) {
+    lsatDataCache = { tests: [] };
+    return lsatDataCache;
+  }
+  lsatDataCache = JSON.parse(fsLib.readFileSync(p, 'utf-8'));
+  return lsatDataCache;
+}
+
+// Flat library view: every section across every test, joined with attempt progress.
+// Returned shape:
+//   { sections: [{ testNum, sectionRoman, kind, questionCount, passageCount,
+//                  attempted, correct, totalTimeMs, lastAttemptedAt }] }
+app.get('/api/lsat/library', async (req, res) => {
+  try {
+    const data = loadLsatData();
+    // Use latest-only attempts so each (test, section, question) contributes once,
+    // representing the user's most-recent answer. Earlier history is preserved
+    // in the DB and shown in error log / session review views.
+    const attempts = await listLsatAttempts({ latestOnly: true });
+    // Total session count per (test, section) — separate query, fast.
+    const sessions = await listLsatSessions();
+    const sessionCount = new Map();
+    for (const s of sessions) {
+      const key = `${s.test_num}:${s.section_roman}`;
+      sessionCount.set(key, (sessionCount.get(key) || 0) + 1);
+    }
+    const progress = new Map();
+    for (const a of attempts) {
+      const key = `${a.test_num}:${a.section_roman}`;
+      if (!progress.has(key)) {
+        progress.set(key, { attempted: 0, correct: 0, totalTimeMs: 0, lastAttemptedAt: null });
+      }
+      const p = progress.get(key);
+      p.attempted += 1;
+      if (a.is_correct) p.correct += 1;
+      if (a.time_ms) p.totalTimeMs += a.time_ms;
+      if (!p.lastAttemptedAt || (a.attempted_at && a.attempted_at > p.lastAttemptedAt)) {
+        p.lastAttemptedAt = a.attempted_at;
+      }
+    }
+    const sections = [];
+    for (const t of data.tests) {
+      for (const s of t.sections) {
+        if (s.kind !== 'RC' && s.kind !== 'LR') continue;
+        const key = `${t.num}:${s.roman}`;
+        const p = progress.get(key) || { attempted: 0, correct: 0, totalTimeMs: 0, lastAttemptedAt: null };
+        sections.push({
+          testNum: t.num,
+          sectionRoman: s.roman,
+          kind: s.kind,
+          questionCount: s.questions.length,
+          passageCount: (s.passages || []).length || (s.passage ? 1 : 0),
+          attempted: p.attempted,
+          correct: p.correct,
+          totalTimeMs: p.totalTimeMs,
+          lastAttemptedAt: p.lastAttemptedAt,
+          sessionCount: sessionCount.get(key) || 0,
+        });
+      }
+    }
+    res.json({ sections });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/lsat/tests', (req, res) => {
+  try {
+    const data = loadLsatData();
+    const summary = data.tests.map(t => ({
+      num: t.num,
+      sections: t.sections.map(s => ({
+        roman: s.roman,
+        kind: s.kind,
+        questionCount: s.questions.length,
+        hasPassage: !!s.passage,
+      })),
+    }));
+    res.json({ tests: summary });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/lsat/tests/:testNum/sections/:sectionRoman', (req, res) => {
+  try {
+    const data = loadLsatData();
+    const t = data.tests.find(x => String(x.num) === String(req.params.testNum));
+    if (!t) return res.status(404).json({ error: 'Test not found' });
+    const s = t.sections.find(x => x.roman === req.params.sectionRoman.toUpperCase());
+    if (!s) return res.status(404).json({ error: 'Section not found' });
+
+    // Annotate each question with its passage index (RC only). For LR/AR there is
+    // typically a single shared "passage" (or none), so leave it 0/undefined.
+    const passages = (s.passages && s.passages.length) ? s.passages : (s.passage ? [{ firstQuestion: 1, text: s.passage }] : []);
+    const questionsWithPassage = s.questions.map(q => {
+      let passageIdx = -1;
+      for (let i = passages.length - 1; i >= 0; i--) {
+        if (passages[i].firstQuestion <= q.number) { passageIdx = i; break; }
+      }
+      return { ...q, passageIdx };
+    });
+    res.json({
+      testNum: t.num,
+      section: { ...s, passages, questions: questionsWithPassage },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/lsat/attempts', async (req, res) => {
+  try {
+    const { testNum, sectionRoman, sectionKind, questionNumber, userAnswer, confidence, timeMs, sessionId } = req.body || {};
+    if (!testNum || !sectionRoman || !questionNumber || !userAnswer) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    const data = loadLsatData();
+    const t = data.tests.find(x => x.num === Number(testNum));
+    if (!t) return res.status(404).json({ error: 'Test not found' });
+    const s = t.sections.find(x => x.roman === String(sectionRoman).toUpperCase());
+    if (!s) return res.status(404).json({ error: 'Section not found' });
+    const q = s.questions.find(x => x.number === Number(questionNumber));
+    if (!q) return res.status(404).json({ error: 'Question not found' });
+    const result = await saveLsatAttempt({
+      testNum: Number(testNum),
+      sectionRoman: String(sectionRoman).toUpperCase(),
+      sectionKind: s.kind,
+      questionNumber: Number(questionNumber),
+      userAnswer: String(userAnswer).toUpperCase(),
+      correctAnswer: q.correct,
+      confidence: confidence || null,
+      timeMs: timeMs != null ? Number(timeMs) : null,
+      sessionId: sessionId != null ? Number(sessionId) : null,
+    });
+    res.json({ ...result, correctAnswer: q.correct });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Create a new practice session for a question set.
+app.post('/api/lsat/sessions', async (req, res) => {
+  try {
+    const { testNum, sectionRoman, setKey, setLabel, firstQuestion, lastQuestion, mode, questionNumbers } = req.body || {};
+    if (!testNum || !sectionRoman || !setKey || !firstQuestion || !lastQuestion) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    const data = loadLsatData();
+    const t = data.tests.find(x => x.num === Number(testNum));
+    if (!t) return res.status(404).json({ error: 'Test not found' });
+    const s = t.sections.find(x => x.roman === String(sectionRoman).toUpperCase());
+    if (!s) return res.status(404).json({ error: 'Section not found' });
+    const result = await createLsatSession({
+      testNum: Number(testNum),
+      sectionRoman: String(sectionRoman).toUpperCase(),
+      sectionKind: s.kind,
+      setKey: String(setKey),
+      setLabel: setLabel || null,
+      firstQuestion: Number(firstQuestion),
+      lastQuestion: Number(lastQuestion),
+      mode: mode || 'exam',
+      questionNumbers: Array.isArray(questionNumbers)
+        ? questionNumbers.map(Number).filter((n) => Number.isInteger(n))
+        : null,
+    });
+    res.json({ id: result.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/lsat/sessions/:id/complete', async (req, res) => {
+  try {
+    const result = await completeLsatSession(Number(req.params.id));
+    res.json({ ok: true, answeredCount: result?.answeredCount ?? null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/lsat/sessions', async (req, res) => {
+  try {
+    const testNum = req.query.testNum != null ? Number(req.query.testNum) : null;
+    const sectionRoman = req.query.sectionRoman ? String(req.query.sectionRoman).toUpperCase() : null;
+    const rows = await listLsatSessions({ testNum, sectionRoman });
+    res.json({ sessions: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/lsat/sessions/:id', async (req, res) => {
+  try {
+    const session = await getLsatSession(Number(req.params.id));
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    res.json({ session });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/lsat/attempts', async (req, res) => {
+  try {
+    const testNum = req.query.testNum != null ? Number(req.query.testNum) : null;
+    const sessionId = req.query.sessionId != null ? Number(req.query.sessionId) : null;
+    const latestOnly = req.query.latestOnly === 'true' || req.query.latestOnly === '1';
+    const rows = await listLsatAttempts({ testNum, sessionId, latestOnly });
+    res.json({ attempts: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// LSAT error log: most recent incorrect attempts across all sessions.
+app.get('/api/lsat/errors', async (req, res) => {
+  try {
+    const testNum = req.query.testNum != null ? Number(req.query.testNum) : null;
+    const sectionRoman = req.query.sectionRoman ? String(req.query.sectionRoman).toUpperCase() : null;
+    const limit = req.query.limit != null ? Math.min(500, Number(req.query.limit)) : 200;
+    const rows = await listLsatErrors({ testNum, sectionRoman, limit });
+    // Hydrate each row with the question stem + choices for inline review.
+    const data = loadLsatData();
+    const enriched = rows.map(r => {
+      const t = data.tests.find(x => x.num === r.test_num);
+      const s = t?.sections.find(x => x.roman === r.section_roman);
+      const q = s?.questions.find(x => x.number === r.question_number);
+      return {
+        ...r,
+        question: q ? { stem: q.stem, choices: q.choices } : null,
+      };
+    });
+    res.json({ errors: enriched });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/lsat/stats', async (req, res) => {
+  try {
+    const stats = await lsatStats();
+    res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Study Plan API ────────────────────────────────────────────────────────
+// The plan is a 28-day final-sprint checklist drafted 2026-05-23. Each task is
+// a sub-item under a specific day (date). Status is one of pending/done/skipped.
+// `GET /api/study-plan` returns everything the UI needs in one round trip.
+
+app.get('/api/study-plan', async (req, res) => {
+  try {
+    await seedStudyPlanIfEmpty();
+    const [tasks, meta] = await Promise.all([listStudyPlanTasks(), getStudyPlanMeta()]);
+    res.json({ tasks, meta });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/study-plan/tasks', async (req, res) => {
+  try {
+    const task = await createStudyPlanTask(req.body || {});
+    res.status(201).json({ task });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.patch('/api/study-plan/tasks/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid task id.' });
+    }
+    const task = await updateStudyPlanTask(id, req.body || {});
+    if (!task) return res.status(404).json({ error: 'Task not found.' });
+    res.json({ task });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/study-plan/tasks/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid task id.' });
+    }
+    const ok = await deleteStudyPlanTask(id);
+    if (!ok) return res.status(404).json({ error: 'Task not found.' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Smart sync: apply the latest buildStudyPlanSeed() to existing tasks.
+// Rows with status != 'pending' OR non-empty notes are preserved (only their
+// day_theme/label is updated). This is the right way to apply seed changes
+// when the user has already made progress.
+app.post('/api/study-plan/sync', async (req, res) => {
+  try {
+    const result = await syncStudyPlanFromSeed();
+    const [tasks, meta] = await Promise.all([listStudyPlanTasks(), getStudyPlanMeta()]);
+    res.json({ ...result, tasks, meta });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Wipe all plan tasks and immediately re-seed from buildStudyPlanSeed().
+// Used when the seed payload changes and the user wants a fresh checklist.
+// Preserves study_plan_meta (test date, plan title) unless explicitly cleared.
+app.post('/api/study-plan/reset', async (req, res) => {
+  try {
+    const { deleted } = await resetStudyPlanTasks();
+    const seedResult = await seedStudyPlanIfEmpty();
+    const [tasks, meta] = await Promise.all([listStudyPlanTasks(), getStudyPlanMeta()]);
+    res.json({ deleted, ...seedResult, tasks, meta });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/study-plan/meta', async (req, res) => {
+  try {
+    const patch = req.body || {};
+    const keys = Object.keys(patch);
+    if (!keys.length) return res.status(400).json({ error: 'No meta fields provided.' });
+    for (const k of keys) {
+      await setStudyPlanMeta(k, patch[k]);
+    }
+    const meta = await getStudyPlanMeta();
+    res.json({ meta });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ─── Mock Results API ──────────────────────────────────────────────────────
+// Tracks full-length mock exam scores (OPE + GMAT Club CAT). Seeded once with
+// Mock #1 baseline. UI surfaces this in the Study Plan view for trend tracking.
+
+app.get('/api/mocks', async (req, res) => {
+  try {
+    // Note: seedMockResultsIfEmpty intentionally NOT called here. It used to
+    // run on every read to bootstrap the OPE3 baseline, but that re-created
+    // any row the user explicitly deleted. The scraped mocks list now covers
+    // the same baseline, so the manual table is purely opt-in.
+    const [manual, scraped] = await Promise.all([
+      listMockResults(),
+      listScrapedMockResults(),
+    ]);
+    const mocks = manual.map((m) => ({ ...m, source_type: 'manual' }));
+    res.json({ mocks, mocks_scraped: scraped });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/mocks', async (req, res) => {
+  try {
+    const mock = await createMockResult(req.body || {});
+    res.status(201).json({ mock });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.patch('/api/mocks/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid mock id.' });
+    }
+    const mock = await updateMockResult(id, req.body || {});
+    if (!mock) return res.status(404).json({ error: 'Mock not found.' });
+    res.json({ mock });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/mocks/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid mock id.' });
+    }
+    const ok = await deleteMockResult(id);
+    if (!ok) return res.status(404).json({ error: 'Mock not found.' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
