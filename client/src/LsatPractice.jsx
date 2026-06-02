@@ -316,7 +316,9 @@ function LsatSessionsView({ onPickSection, onExit, onTabChange }) {
               const correct = sAttempts.filter(a => a.is_correct).length;
               const totalTimeMs = sAttempts.reduce((acc, a) => acc + (a.time_ms || 0), 0);
               const accuracy = done > 0 ? Math.round((correct / done) * 100) : null;
-              const total = s.last_question - s.first_question + 1;
+              const total = Array.isArray(s.question_numbers) && s.question_numbers.length
+                ? s.question_numbers.length
+                : (s.last_question - s.first_question + 1);
               return (
                 <li key={s.id} className="lsat-sess-row">
                   <button type="button" className="lsat-sess-btn" onClick={() => onPickSection(s.test_num, s.section_roman, s.question_numbers || null)}>
