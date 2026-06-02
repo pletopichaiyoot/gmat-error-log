@@ -45,14 +45,22 @@ function formatRelative(iso) {
 // A "set" of practice = the entire section. RC sections still contain multiple
 // passages; the SessionView swaps the displayed passage based on the current
 // question's passageIdx.
-function buildSetForSection(section) {
+function buildSetForSection(section, questionNumbers) {
   if (!section || !section.questions?.length) return null;
+  let questions = section.questions;
+  const isSubset = Array.isArray(questionNumbers) && questionNumbers.length > 0;
+  if (isSubset) {
+    const want = new Set(questionNumbers);
+    questions = section.questions.filter((q) => want.has(q.number));
+    if (!questions.length) return null;
+  }
   return {
-    key: `${section.roman}:all`,
+    key: isSubset ? `${section.roman}:sub:${[...questionNumbers].sort((a, b) => a - b).join(',')}` : `${section.roman}:all`,
     label: `${section.kind} · Section ${section.roman}`,
-    firstQuestion: section.questions[0].number,
-    lastQuestion: section.questions[section.questions.length - 1].number,
-    questions: section.questions,
+    firstQuestion: questions[0].number,
+    lastQuestion: questions[questions.length - 1].number,
+    questions,
+    questionNumbers: isSubset ? questions.map((q) => q.number) : null,
   };
 }
 
@@ -447,7 +455,7 @@ function LsatErrorLogView({ onExit, onTabChange }) {
 }
 
 // ============== CONFIRMATION (mode selector) ==============
-function ConfirmationScreen({ testNum, sectionRoman, onStart, onCancel }) {
+function ConfirmationScreen({ testNum, sectionRoman, subset, onStart, onCancel }) {
   const [section, setSection] = useState(null);
   const [mode, setMode] = useState('exam');
   const [loading, setLoading] = useState(true);
@@ -468,6 +476,8 @@ function ConfirmationScreen({ testNum, sectionRoman, onStart, onCancel }) {
   }, [testNum, sectionRoman]);
 
   const totalQ = section?.questions.length || 0;
+  const isSubset = Array.isArray(subset) && subset.length > 0;
+  const displayCount = isSubset ? subset.length : totalQ;
   const passages = section?.passages?.length || 0;
   const priorCount = priorSessions.length;
 
@@ -493,8 +503,9 @@ function ConfirmationScreen({ testNum, sectionRoman, onStart, onCancel }) {
               <div>
                 <h2 className="lsat-confirm-title">{KIND_FULL[section.kind] || section.kind}</h2>
                 <div className="lsat-confirm-meta">
-                  PrepTest {testNum} · Section {section.roman} · {totalQ} questions
-                  {passages ? ` · ${passages} passages` : ''}
+                  PrepTest {testNum} · Section {section.roman} · {displayCount} questions
+                  {passages && !isSubset ? ` · ${passages} passages` : ''}
+                  {isSubset ? ' · review subset' : ''}
                 </div>
               </div>
             </div>
@@ -533,11 +544,11 @@ function ConfirmationScreen({ testNum, sectionRoman, onStart, onCancel }) {
             <div className="lsat-confirm-summary">
               <div className="lsat-confirm-summary-row">
                 <span>Time budget</span>
-                <strong>{formatBudgetMs(sectionBudgetMs(totalQ))}</strong>
+                <strong>{formatBudgetMs(sectionBudgetMs(displayCount))}</strong>
               </div>
               <div className="lsat-confirm-summary-row">
                 <span>Questions</span>
-                <strong>{totalQ}</strong>
+                <strong>{displayCount}</strong>
               </div>
               <div className="lsat-confirm-summary-row">
                 <span>Target per question</span>
