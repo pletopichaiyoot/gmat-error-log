@@ -471,7 +471,19 @@ async function createLsatSession({ testNum, sectionRoman, sectionKind, setKey, s
 }
 
 async function completeLsatSession(id) {
-  await run(`UPDATE lsat_sessions SET completed_at = datetime('now') WHERE id = ?`, [id]);
+  // A session's answered questions are its attempts. Freeze them as the session's
+  // subset so History can replay exactly what was answered. This overwrites any
+  // creation-time question_numbers with the actually-answered set.
+  const rows = await all(
+    'SELECT DISTINCT question_number FROM lsat_attempts WHERE session_id = ? ORDER BY question_number',
+    [id]
+  );
+  const numbers = rows.map((r) => r.question_number);
+  await run(
+    `UPDATE lsat_sessions SET completed_at = datetime('now'), question_numbers = ? WHERE id = ?`,
+    [JSON.stringify(numbers), id]
+  );
+  return { answeredCount: numbers.length };
 }
 
 // lsat_sessions.question_numbers is stored as a JSON array string (or NULL for
