@@ -458,9 +458,16 @@ function buildQuestionRecord({ qhRow, itemMeta, taxonomyHit, sessionSource }) {
   const subjectCodeByItem = subjectFromItemName(itemMeta?.ItemName);
   const subjectCode = subjectCodeByPath || subjectCodeByItem;
   const categoryCode = mapCategoryCode(subjectCode, parts[1]);
-  // "subcategory" in existing data is a short string; use tier-3 code; fall back to leaf label
-  const subcategoryCode = parts[2] || null;
-  const topic = labels[labels.length - 1] || qhRow.contentArea || null;
+  // Prefer the leaf LABEL for subcategory, since `parts[2]` is just a path
+  // segment that may be a structural bucket code with no human meaning. For
+  // example, OG Verbal RC's taxonomy is `Verbal.RC.Open.{EVA,INF,MAI,SUI}`
+  // where the depth-3 row is literally rendered as "(Blank)" and "Open" is
+  // only a path token. Writing parts[2]="Open" leaks that bucket into the
+  // dashboard's subcategory column. The leaf label ("Evaluation", "Inference",
+  // "Main Idea", "Supporting Idea") is what users actually read.
+  const leafLabel = labels[labels.length - 1] || qhRow.contentArea || null;
+  const subcategoryCode = leafLabel || parts[2] || null;
+  const topic = leafLabel;
   // Prefer the human label for content_domain (e.g., "Data Insights" rather than "Data").
   const contentDomain = labels[0] || parts[0] || null;
   return {
@@ -788,6 +795,40 @@ async function waitForDropdownsRestored(frame, { timeoutMs = 6000, pollMs = 300 
   return false; // budget elapsed; caller should proceed with whatever is there
 }
 
+// On Verbal review pages (and probably others), ITDReview applies the
+// `.ITSMCOptionTableOn` (user's pick) class asynchronously after the radios
+// have rendered. Reading too eagerly catches the choice DOM with no user-pick
+// signal — and worse, may catch the radios at their HTML default state where
+// the first radio (value=1, label A) is `checked`, leaking "A" as the picked
+// answer.
+//
+// We MUST wait for `.ITSMCOptionTableOn` specifically. `.correctOption` can
+// land a frame earlier (it's keyed off Key1 only, not the user's saved pick),
+// so accepting that as a readiness signal lets the scraper read the user-pick
+// portion of the DOM before it's been restored — which is exactly the bug
+// that produced wrong "my_answer=A" rows on Verbal items the user got right.
+//
+// On timeout proceed anyway (the question may genuinely be unanswered).
+async function waitForReviewHighlights(frame, { timeoutMs = 4000, pollMs = 200 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const ok = await frame.evaluate(() => {
+        // Both classes mark the user's pick row. `.ITSMCOptionTableOn` is
+        // applied whether the pick was right or wrong; `.incorrectOption`
+        // is the same row when wrong. Either tells us restoration is done.
+        return !!(
+          document.querySelector('.ITSMCOptionTableOn') ||
+          document.querySelector('.incorrectOption')
+        );
+      });
+      if (ok) return true;
+    } catch (_e) { /* frame may detach; retry */ }
+    await sleep(pollMs);
+  }
+  return false;
+}
+
 // Wait for the ITDReview frame to be present AND its globals to indicate the
 // expected itemname is loaded AND the choices DOM has rendered. Returns the
 // Frame handle. The choice DOM rendering can lag the globals by 100s of ms, so
@@ -971,12 +1012,23 @@ async function readReviewFrame(frame) {
       const radios = Array.from(document.querySelectorAll('input[type="radio"][name^="I"]'));
       const i1Radios = radios.filter((r) => r.name === 'I1');
       const colorFromStyle = (styleStr) => {
+        // Inline-style color reader. We MUST require an actual `background:` /
+        // `background-color:` declaration and inspect only its value. The prior
+        // version made the prefix optional and matched 2-char hex substrings
+        // (#e7, #d4, 0[0-9a-f]a) anywhere in the style string — that produces
+        // false-positive red/green hits on any neighboring rule like
+        // `border: 1px solid #d4d4d4`, which then leaked into pickByColor and
+        // corrupted my_answer. (Seen on session 60181 q 37905, where the user
+        // picked D but the regex flagged the E row as "green" via an unrelated
+        // inline style.)
         if (!styleStr) return null;
-        const s = String(styleStr);
-        if (/(?:background(?:-color)?\s*:\s*)?yellow/i.test(s)) return 'yellow';
-        if (/(?:background(?:-color)?\s*:\s*)?(?:#?ff[a-f0-9]{4}|#?ffeb|gold)/i.test(s)) return 'yellow';
-        if (/(?:background(?:-color)?\s*:\s*)?(?:red|#?ff0000|#?e7|#?d4)/i.test(s)) return 'red';
-        if (/(?:background(?:-color)?\s*:\s*)?(?:green|#?00ff00|#?0[0-9a-f]a|#?2[0-9a-f]b)/i.test(s)) return 'green';
+        const m = String(styleStr).match(/background(?:-color)?\s*:\s*([^;]+)/i);
+        if (!m) return null;
+        const v = m[1].trim().toLowerCase();
+        if (/\b(?:yellow|gold)\b/.test(v)) return 'yellow';
+        if (/#ff[a-f0-9]{4}\b|#ffeb\b/.test(v)) return 'yellow';
+        if (/\bred\b|#ff0000\b|#e7[0-9a-f]{0,4}\b/.test(v)) return 'red';
+        if (/\bgreen\b|#00ff00\b|#0[0-9a-f]a[0-9a-f]{0,3}\b|#2[0-9a-f]b[0-9a-f]{0,3}\b/.test(v)) return 'green';
         return null;
       };
       // Match an rgb() to one of yellow/red/green by dominant channel.
@@ -993,11 +1045,20 @@ async function readReviewFrame(frame) {
       };
       if (i1Radios.length >= 2) {
         choicesType = 'single';
+        // ITDReview applies these semantic classes to each option's row
+        // container. We treat them as the authoritative source of truth:
+        //   - ITSMCOptionTableOn → user's pick (regardless of correctness)
+        //   - correctOption     → correct answer
+        //   - incorrectOption   → user's pick AND it was wrong
+        // (Quant pages additionally render colored backgrounds; Verbal pages
+        // do not, which is why the previous color-only heuristic failed for
+        // Verbal items and the scraper always landed on choice A.)
         const userSelectedRow = document.querySelector('.ITSMCOptionTableOn');
+        const correctRow = document.querySelector('.correctOption');
         choices = i1Radios.map((el) => {
           const labelText = (el.labels?.[0]?.innerText || el.parentElement?.innerText || '').trim();
           // Walk up the DOM looking at backgrounds. Stop at the first colored
-          // ancestor or after a few levels.
+          // ancestor or after a few levels. Quant pages still rely on this.
           let color = null;
           let container = el.closest('tr, li, .ITSMCOption, .ITSMCOptionTable, [class*="MCOption"], [class*="OptionRow"]') || el.parentElement;
           for (let node = container, depth = 0; node && depth < 4 && !color; node = node.parentElement, depth += 1) {
@@ -1007,14 +1068,32 @@ async function readReviewFrame(frame) {
               if (cs) color = rgbToColor(cs.backgroundColor);
             }
           }
-          const inUserSelectedRow = !!(userSelectedRow && container && (container === userSelectedRow || userSelectedRow.contains(container) || container.contains(userSelectedRow)));
+          const inUserSelectedRow = !!(
+            userSelectedRow
+            && container
+            && userSelectedRow.contains(container)
+          );
+          const inCorrectRow = !!(
+            correctRow
+            && container
+            && correctRow.contains(container)
+          );
+          const pickByColor = color === 'red' || color === 'green';
+          // Confidence ranking for user-pick: class > color > row-only > attr.
+          // Note `pickByRow` and `inUserSelectedRow` are the same signal here;
+          // we keep both names for compatibility with the writer.
           return {
             value: el.value,
             label: labelText,
             color,                                                  // yellow|red|green|null
-            checked: el.checked || color === 'red' || color === 'green' || inUserSelectedRow,
-            isCorrect: color === 'yellow' || color === 'green',
-            isUserSelected: el.checked || color === 'red' || color === 'green' || inUserSelectedRow,
+            checked: el.checked || pickByColor || inUserSelectedRow,
+            isCorrect: color === 'yellow' || color === 'green' || inCorrectRow,
+            isUserSelected: pickByColor || inUserSelectedRow || el.checked,
+            pickByColor,
+            pickByRow: inUserSelectedRow,
+            pickByAttr: !!el.checked,
+            // The DB writer prefers `pickByRow` for Verbal items; pickByColor
+            // remains the strongest signal for Quant where backgrounds render.
           };
         });
       } else if (radios.length) {
@@ -1349,6 +1428,16 @@ async function runPhase2({ page, options = {} }) {
         return selects.length > 0 && !document.querySelector('table.ITSMatrixTable');
       }).catch(() => false);
       if (isDropdown) await waitForDropdownsRestored(frame);
+      // Single-choice items: wait briefly for review highlight classes
+      // (ITSMCOptionTableOn / correctOption) — ITDReview applies these
+      // after the radios mount. Skipping this step caused the
+      // "Verbal always picks A" bug because the user-pick signal was
+      // missing when the scraper read the DOM.
+      const isSingleChoiceMc = !isDropdown && await frame.evaluate(() => {
+        const i1 = document.querySelectorAll('input[type="radio"][name="I1"]');
+        return i1.length >= 2 && !document.querySelector('table.ITSMatrixTable');
+      }).catch(() => false);
+      if (isSingleChoiceMc) await waitForReviewHighlights(frame);
     } catch (e) {
       errors.push({ seq, itemName: expectedName, message: e.message });
       if (e instanceof ScrapeAnomalyError) {

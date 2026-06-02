@@ -363,6 +363,10 @@ async function runScrapeFromOpenBrowser(options = {}) {
       (row) => row.type === 'warning' || /⚠️|skipped/i.test(String(row.text || ''))
     ).length;
 
+    if (/gmatclub\.com/i.test(gmatPage.url())) {
+      await navigateGmatClubHomeSafe(gmatPage);
+    }
+
     return {
       data,
       tabUrl: gmatPage.url(),
@@ -503,11 +507,40 @@ const {
   _internals: startTestInternals,
 } = require('./scrapers/starttest_scraper');
 
+const {
+  SECTION_PRESETS: TTP_SECTION_PRESETS,
+  ScrapeAnomalyError: TtpAnomalyError,
+  runScrape: runTtpScrape,
+} = require('./scrapers/ttp_scraper');
+
 const STARTTEST_TAB_RE = /starttest\.com/i;
+const TTP_TAB_RE = /gmat\.targettestprep\.com/i;
+const GMATCLUB_HOME_URL = 'https://gmatclub.com/forum/analytics.php#error_log';
 
 function findStartTestPage(browser) {
   const pages = browser.contexts().flatMap((ctx) => ctx.pages());
   return pages.find((p) => STARTTEST_TAB_RE.test(p.url())) || null;
+}
+
+// Best-effort post-run navigation back to the platform's "home" so the user's
+// tab is left in a clean state. Swallows errors — a failed nav must not
+// override a successful scrape return value.
+async function navigateStartTestHomeSafe(page) {
+  if (!page) return;
+  try {
+    await startTestInternals.navigateHome(page);
+  } catch (_error) {
+    // Intentional: nav-home is a UX nicety, not a contract.
+  }
+}
+
+async function navigateGmatClubHomeSafe(page) {
+  if (!page) return;
+  try {
+    await page.goto(GMATCLUB_HOME_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  } catch (_error) {
+    // Intentional: nav-home is a UX nicety, not a contract.
+  }
 }
 
 async function runStartTestScrapeFromOpenBrowser(options = {}) {
@@ -583,6 +616,8 @@ async function runStartTestScrapeFromOpenBrowser(options = {}) {
       extractedAt: data?.extracted_at || null,
       warnings: Array.isArray(data?.warnings) ? data.warnings.length : 0,
     };
+
+    await navigateStartTestHomeSafe(startTestPage);
 
     return {
       data,
@@ -780,6 +815,8 @@ async function runStartTestPhase2FromOpenBrowser(options = {}) {
       },
     });
 
+    await navigateStartTestHomeSafe(startTestPage);
+
     return {
       result,
       tabUrl: startTestPage.url(),
@@ -896,15 +933,40 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
     let aborted = false;
     let abortReason = null;
 
-    for (let i = 0; i < targets.length; i++) {
-      const target = targets[i];
-      const url = String(target?.url || '').trim();
-      const qId = target?.q_id || null;
-      if (!url || !/^https?:\/\/(?:www\.)?gmatclub\.com\//i.test(url)) {
-        errors.push({ q_id: qId, url, reason: 'invalid-url' });
+    // Group targets by URL so that an RC topic (whose page lists 5-6 questions
+    // sharing the same topic id) is visited once instead of once per question.
+    // Within each group, sort by the numeric attempt id ascending — that lines
+    // up with the user's chronological attempt order on GMAT Club, which in
+    // turn lines up with question position 1..N for users who answered the
+    // RC set in document order (the common case).
+    const numericAttemptId = (qId) => {
+      const m = String(qId || '').match(/(\d+)$/);
+      return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+    };
+    const groupedByUrl = new Map();
+    for (const t of targets) {
+      const url = String(t?.url || '').trim();
+      if (!url) {
+        errors.push({ q_id: t?.q_id || null, url: '', reason: 'invalid-url' });
         continue;
       }
-      pushLog(progressEvents, { at: new Date().toISOString(), kind: 'navigate', i, total: targets.length, url });
+      if (!groupedByUrl.has(url)) groupedByUrl.set(url, []);
+      groupedByUrl.get(url).push(t);
+    }
+    for (const arr of groupedByUrl.values()) {
+      arr.sort((a, b) => numericAttemptId(a.q_id) - numericAttemptId(b.q_id));
+    }
+    const urls = Array.from(groupedByUrl.keys());
+
+    for (let i = 0; i < urls.length; i += 1) {
+      const url = urls[i];
+      const group = groupedByUrl.get(url);
+      const groupQIds = group.map((t) => t.q_id || null);
+      if (!/^https?:\/\/(?:www\.)?gmatclub\.com\//i.test(url)) {
+        for (const t of group) errors.push({ q_id: t.q_id || null, url, reason: 'invalid-url' });
+        continue;
+      }
+      pushLog(progressEvents, { at: new Date().toISOString(), kind: 'navigate', i, total: urls.length, url, groupSize: group.length });
 
       try {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -919,33 +981,80 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
           return window.gmatClubEnrichCurrentPage();
         });
         if (!result?.ok) {
-          errors.push({ q_id: qId, url, reason: result?.reason || 'unknown', finalUrl: result?.url || page.url() });
+          for (const t of group) {
+            errors.push({ q_id: t.q_id || null, url, reason: result?.reason || 'unknown', finalUrl: result?.url || page.url() });
+          }
           continue;
         }
-        items.push({
-          q_id: qId,
-          q_code: target?.q_code || null,
-          source_url: url,
-          final_url: result.url || page.url(),
-          title: result.title || '',
-          stem: result.stem || '',
-          choices: Array.isArray(result.choices) ? result.choices : [],
-          correct_answer: result.correct_answer || null,
-          my_answer: result.my_answer || null,
-          answer_distribution: Array.isArray(result.answer_distribution) ? result.answer_distribution : [],
-        });
+
+        const finalUrl = result.url || page.url();
+        const layout = result.layout || 'single';
+
+        if (layout === 'rc' && Array.isArray(result.questions) && result.questions.length) {
+          const passage = result.passage || '';
+          const qs = result.questions;
+          // Pair attempt rows (sorted oldest→newest) to questions 1..N. If
+          // the row count exceeds the question count, extra rows still get
+          // the passage but no per-question stem/choices (better than nothing).
+          for (let j = 0; j < group.length; j += 1) {
+            const t = group[j];
+            const q = qs[j] || null;
+            items.push({
+              q_id: t.q_id || null,
+              q_code: t.q_code || null,
+              source_url: url,
+              final_url: finalUrl,
+              title: result.title || '',
+              passage_text: passage,
+              rc_position: q ? q.position : null,
+              rc_question_count: qs.length,
+              rc_attempt_count: group.length,
+              stem: q?.stem || '',
+              choices: q && Array.isArray(q.choices) ? q.choices : [],
+              correct_answer: q?.correct_answer || null,
+              my_answer: q?.my_answer || null,
+              answer_distribution: q && Array.isArray(q.answer_distribution) ? q.answer_distribution : [],
+            });
+          }
+          pushLog(progressEvents, { at: new Date().toISOString(), kind: 'rc-paired', url, attempts: group.length, questionsOnPage: qs.length });
+        } else {
+          // Single-question (CR / standalone PS / etc.). Emit one item per
+          // attempt row in the group — multiple attempts at the same CR
+          // question all share the same content but each needs its own DB
+          // update.
+          for (const t of group) {
+            items.push({
+              q_id: t.q_id || null,
+              q_code: t.q_code || null,
+              source_url: url,
+              final_url: finalUrl,
+              title: result.title || '',
+              passage_text: '',
+              rc_position: null,
+              rc_question_count: null,
+              rc_attempt_count: group.length,
+              stem: result.stem || '',
+              choices: Array.isArray(result.choices) ? result.choices : [],
+              correct_answer: result.correct_answer || null,
+              my_answer: result.my_answer || null,
+              answer_distribution: Array.isArray(result.answer_distribution) ? result.answer_distribution : [],
+            });
+          }
+        }
 
         // Human-like jitter between visits to avoid hammering GMAT Club.
-        if (i < targets.length - 1) {
+        if (i < urls.length - 1) {
           const delay = Math.round(minDelayMs + Math.random() * (maxDelayMs - minDelayMs));
           await page.waitForTimeout(delay);
         }
       } catch (err) {
-        errors.push({
-          q_id: qId,
-          url,
-          reason: clipText(err?.message || String(err), 200),
-        });
+        for (const t of group) {
+          errors.push({
+            q_id: t.q_id || null,
+            url,
+            reason: clipText(err?.message || String(err), 200),
+          });
+        }
         if (errors.length >= Math.max(5, Math.ceil(targets.length / 4))) {
           aborted = true;
           abortReason = 'too-many-errors';
@@ -953,6 +1062,8 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
         }
       }
     }
+
+    await navigateGmatClubHomeSafe(page);
 
     return {
       result: { items, errors, qhTotal: targets.length, aborted, abortReason },
@@ -991,6 +1102,480 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
   }
 }
 
+// ─── Target Test Prep runner ────────────────────────────────────────────────
+// Single-pass scrape: visits the section index, then walks each mistake
+// category's `?page=N` URLs. The TTP error tracker is fully cumulative (no
+// since-date concept on the page), so the `since` parameter is currently
+// unused — the user filters the resulting rows in the dashboard.
+//
+// Same no-close discipline as the other CDP-attached runners.
+
+function findTtpPage(browser) {
+  const pages = browser.contexts().flatMap((ctx) => ctx.pages());
+  return pages.find((p) => TTP_TAB_RE.test(p.url())) || null;
+}
+
+async function runTtpScrapeFromOpenBrowser(options = {}) {
+  const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
+  const sourceId = String(options.sourceId || '').trim();
+  const preset = TTP_SECTION_PRESETS[sourceId];
+  if (!preset) {
+    const err = new Error(`Unknown TTP sourceId "${sourceId}".`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const startedAt = new Date().toISOString();
+  const consoleLogs = [];
+  const pageErrors = [];
+  const progressEvents = [];
+  const pushLog = (target, entry, limit = 400) => {
+    target.push(entry);
+    if (target.length > limit) target.shift();
+  };
+
+  let browser = null;
+  let connectedCdpUrl = requestedCdpUrl;
+  let attemptedCdpUrls = [requestedCdpUrl];
+  let cdpFallbackUsed = false;
+  let ttpPage = null;
+  let onConsole = null;
+  let onPageError = null;
+  try {
+    const cdpConnection = await connectBrowserOverCdp(requestedCdpUrl);
+    browser = cdpConnection.browser;
+    connectedCdpUrl = cdpConnection.connectedUrl;
+    attemptedCdpUrls = cdpConnection.attemptedUrls;
+    cdpFallbackUsed = cdpConnection.fallbackUsed;
+
+    ttpPage = findTtpPage(browser);
+    if (!ttpPage) {
+      throw new Error(
+        `No gmat.targettestprep.com tab found. Open https://gmat.targettestprep.com/error_tracker/${preset.section} and sign in, then keep that tab open.`
+      );
+    }
+    ttpPage.setDefaultTimeout(0);
+    await ttpPage.bringToFront();
+    await ttpPage.waitForLoadState('domcontentloaded');
+
+    onConsole = (msg) => pushLog(consoleLogs, {
+      at: new Date().toISOString(),
+      type: msg.type(),
+      text: clipText(msg.text(), 1200),
+    });
+    onPageError = (error) => pushLog(pageErrors, {
+      at: new Date().toISOString(),
+      text: clipText(error?.stack || error?.message || String(error), 2000),
+    }, 50);
+    ttpPage.on('console', onConsole);
+    ttpPage.on('pageerror', onPageError);
+
+    const data = await runTtpScrape({
+      page: ttpPage,
+      options: {
+        sourceId,
+        minDelayMs: Number(options.minDelayMs) || 1500,
+        maxDelayMs: Number(options.maxDelayMs) || 3000,
+        maxErrors: Number(options.maxErrors) || 0,
+        onProgress: (evt) => pushLog(progressEvents, { at: new Date().toISOString(), ...evt }, 800),
+      },
+    });
+
+    const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+    const diagnostics = {
+      sessions: sessions.length,
+      questions: sessions.reduce((sum, s) => sum + (s.stats?.total_q_api || 0), 0),
+      errors: sessions.reduce((sum, s) => sum + (s.stats?.errors || 0), 0),
+      extractedAt: data?.extracted_at || null,
+      warnings: Array.isArray(data?.warnings) ? data.warnings.length : 0,
+    };
+
+    return {
+      data,
+      tabUrl: ttpPage.url(),
+      debug: {
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        cdpUrl: connectedCdpUrl,
+        requestedCdpUrl,
+        attemptedCdpUrls,
+        cdpFallbackUsed,
+        sourceId,
+        productLabel: preset.label,
+        section: preset.section,
+        diagnostics,
+        progressEvents,
+        consoleLogs,
+        pageErrors,
+      },
+    };
+  } catch (error) {
+    if (Array.isArray(error?.cdpAttemptedUrls) && error.cdpAttemptedUrls.length) {
+      attemptedCdpUrls = error.cdpAttemptedUrls;
+    }
+    error.scrapeDebug = {
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      cdpUrl: connectedCdpUrl,
+      requestedCdpUrl,
+      attemptedCdpUrls,
+      cdpFallbackUsed,
+      sourceId,
+      tabUrl: ttpPage?.url?.() || null,
+      progressEvents,
+      consoleLogs,
+      pageErrors,
+      anomaly: error instanceof TtpAnomalyError
+        ? { name: error.name, url: error.url, snippet: error.snippet }
+        : null,
+    };
+    throw error;
+  } finally {
+    if (ttpPage && onConsole) ttpPage.off('console', onConsole);
+    if (ttpPage && onPageError) ttpPage.off('pageerror', onPageError);
+    // No browser.close() — preserve the user's logged-in TTP session.
+  }
+}
+
+// ─── OPE Mock scraper runners ──────────────────────────────────────────────
+// Two-step UX: (1) list takes for the chosen OPE so the user picks one,
+// (2) scrape that take's Score Report. The user must have the OPE landing
+// page open in their CDP-attached Chrome (or any starttest.com tab — we
+// navigate to the landing if needed). The Score Report popup is opened by
+// the runner via a single launchitdwindow click that mints a fresh SVC.
+
+const opeScraper = require('./scrapers/ope_mock_scraper.js');
+
+async function runOpeListAttemptsFromOpenBrowser(options = {}) {
+  const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
+  const sourceId = String(options.sourceId || '').trim();
+  const preset = opeScraper.SOURCE_PRODUCTS[sourceId];
+  if (!preset) {
+    const err = new Error(`Unknown OPE sourceId "${sourceId}".`);
+    err.statusCode = 400;
+    throw err;
+  }
+  const startedAt = new Date().toISOString();
+  let browser = null;
+  try {
+    const cdp = await connectBrowserOverCdp(requestedCdpUrl);
+    browser = cdp.browser;
+    const landing = findStartTestPage(browser);
+    if (!landing) {
+      throw new Error(
+        'No starttest.com tab found. Sign in via mba.com and open the GMAT practice area first.',
+      );
+    }
+    await landing.bringToFront();
+    const takes = await opeScraper.listOpeAttemptsForProduct(landing, {
+      productId: preset.productId,
+      type: preset.type,
+    });
+    return {
+      sourceId,
+      sourceLabel: preset.label,
+      productId: preset.productId,
+      takes,
+      tabUrl: landing.url(),
+      debug: {
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        cdpUrl: cdp.connectedUrl,
+      },
+    };
+  } finally {
+    void browser;
+  }
+}
+
+async function runOpeMockScrapeFromOpenBrowser(options = {}) {
+  const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
+  const sourceId = String(options.sourceId || '').trim();
+  const takeIdx = Number(options.takeIdx);
+  const preset = opeScraper.SOURCE_PRODUCTS[sourceId];
+  if (!preset) {
+    const err = new Error(`Unknown OPE sourceId "${sourceId}".`);
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!Number.isInteger(takeIdx) || takeIdx < 1) {
+    const err = new Error(`takeIdx must be a positive integer (got ${options.takeIdx}).`);
+    err.statusCode = 400;
+    throw err;
+  }
+  const startedAt = new Date().toISOString();
+  let browser = null;
+  let popup = null;
+  let popupOpenedByUs = false;
+  let landing = null;
+  const verificationAttempts = [];
+  const closedStalePopups = [];
+  try {
+    const cdp = await connectBrowserOverCdp(requestedCdpUrl);
+    browser = cdp.browser;
+
+    // Locate landing tab (must NOT be the ITDStart popup — both match the
+    // starttest.com regex). We need the landing for both the completed-date
+    // lookup and for verifying any already-open popup against the requested
+    // takeIdx.
+    const allPages = browser.contexts().flatMap((c) => c.pages());
+    landing = allPages.find(
+      (p) => STARTTEST_TAB_RE.test(p.url()) && !/ITDStart\.aspx/i.test(p.url()),
+    ) || null;
+    if (!landing) {
+      throw new Error(
+        'No starttest.com tab found. Sign in via mba.com first and open the OPE area.',
+      );
+    }
+    await landing.bringToFront();
+
+    // Read the take list BEFORE opening any popup. The `View Score Report`
+    // click refreshes the landing (data_testtable.urlrefresh) and rotates its
+    // `code` token, so reads after that point can fail against a stale token.
+    await opeScraper.navigateToOpeLanding(landing, {
+      productId: preset.productId,
+      type: preset.type,
+    });
+    const takes = await opeScraper.listOpeAttemptsForProduct(landing, {
+      productId: preset.productId,
+      type: preset.type,
+    });
+    const completedDateISO = takes.find((t) => t.takeIdx === takeIdx)?.completedAt || null;
+
+    // Verify any existing ITDStart popup against the requested takeIdx. The
+    // old code reused *any* open popup, which silently scraped take-1's data
+    // into take-2's session row when the user left an old popup around.
+    const existingPopups = allPages.filter((p) => /ITDStart\.aspx/i.test(p.url()));
+    for (const candidate of existingPopups) {
+      const info = await opeScraper.verifyPopupMatchesTakeIdx(candidate, landing, {
+        productId: preset.productId,
+        type: preset.type,
+        takeIdx,
+      }).catch((e) => ({ matches: false, reason: `verify-threw: ${e.message}` }));
+      verificationAttempts.push({
+        popupUrl: candidate.url(),
+        matches: !!info.matches,
+        reason: info.reason || null,
+        landingDateText: info.landingDateText || null,
+        takeGuid: info.identity?.takeGuid || null,
+      });
+      if (info.matches) {
+        popup = candidate;
+        break;
+      }
+    }
+
+    if (!popup) {
+      // No popup matches the requested takeIdx — close stale ones so we don't
+      // leave the user with multiple Score Report tabs, then open fresh from
+      // the landing page deterministically.
+      for (const stale of existingPopups) {
+        const staleUrl = stale.url();
+        try {
+          await stale.close({ runBeforeUnload: false });
+          closedStalePopups.push(staleUrl);
+        } catch (e) {
+          closedStalePopups.push(`${staleUrl} (close-failed: ${e.message})`);
+        }
+      }
+      popup = await opeScraper.openTakeScoreReportPopup(landing, { takeIdx, timeoutMs: 30000 });
+      popupOpenedByUs = true;
+    }
+    await popup.bringToFront();
+    const result = await opeScraper.scrapeScoreReportPopup(popup, { sourceId, takeIdx });
+    const shaped = opeScraper.shapeForSaveScrapeResult(result, { completedDateISO });
+    return {
+      data: shaped,
+      raw: result,
+      tabUrl: popup.url(),
+      debug: {
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        cdpUrl: cdp.connectedUrl,
+        sourceId,
+        productLabel: preset.label,
+        takeIdx,
+        takeGuid: result.takeGuid,
+        popupOpenedByUs,
+        verificationAttempts,
+        closedStalePopups,
+      },
+    };
+  } catch (error) {
+    error.scrapeDebug = {
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      sourceId,
+      takeIdx,
+      tabUrl: popup?.url?.() || landing?.url?.() || null,
+      popupOpenedByUs,
+      verificationAttempts,
+      closedStalePopups,
+      anomaly: error instanceof opeScraper.ScrapeAnomalyError
+        ? { name: error.name, url: error.url, snippet: error.snippet }
+        : null,
+    };
+    throw error;
+  } finally {
+    void browser;
+  }
+}
+
+// OPE Phase 3 enrichment runner. Drives enrichment from the OPE landing page
+// deterministically — `navigateToOpeLanding` + `openTakeScoreReportPopup` for
+// the requested takeIdx. If the user already has a popup open we verify it
+// matches the requested take (via Score Card Test Date ↔ landing row date)
+// and reuse it; otherwise stale ITDStart popups are closed before we open a
+// fresh one. The popup's takeGuid is captured at verification time and passed
+// as `expectedTakeGuid` so `scrapeAttemptPhase3` can reject if the popup
+// rotates underneath us before the 64-item walk completes.
+async function runOpePhase3FromOpenBrowser(options = {}) {
+  const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
+  const sourceId = String(options.sourceId || '').trim();
+  const takeIdx = Number(options.takeIdx);
+  const expectedTotal = Number(options.expectedTotal) || 64;
+  const preset = opeScraper.SOURCE_PRODUCTS[sourceId];
+  if (!preset) {
+    const err = new Error(`Unknown OPE sourceId "${sourceId}".`);
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!Number.isInteger(takeIdx) || takeIdx < 1) {
+    const err = new Error(`takeIdx must be a positive integer (got ${options.takeIdx}).`);
+    err.statusCode = 400;
+    throw err;
+  }
+  const startedAt = new Date().toISOString();
+  const progressEvents = [];
+  let browser = null;
+  let popup = null;
+  let popupOpenedByUs = false;
+  let popupTakeGuid = null;
+  const verificationAttempts = [];
+  const closedStalePopups = [];
+  try {
+    const cdp = await connectBrowserOverCdp(requestedCdpUrl);
+    browser = cdp.browser;
+
+    // The landing must be a non-popup starttest.com tab — ITDStart.aspx URLs
+    // also match the starttest.com regex, so be explicit here.
+    const allPages = browser.contexts().flatMap((c) => c.pages());
+    const landing = allPages.find(
+      (p) => STARTTEST_TAB_RE.test(p.url()) && !/ITDStart\.aspx/i.test(p.url()),
+    ) || null;
+    if (!landing) {
+      throw new Error('No starttest.com tab found. Sign in and open the OPE area first.');
+    }
+    await landing.bringToFront();
+
+    // Identify any already-open ITDStart popups. We either reuse one that
+    // matches the requested take, or close all of them before opening a
+    // fresh popup deterministically.
+    const existingPopups = allPages.filter((p) => /ITDStart\.aspx/i.test(p.url()));
+
+    for (const candidate of existingPopups) {
+      const info = await opeScraper.verifyPopupMatchesTakeIdx(candidate, landing, {
+        productId: preset.productId,
+        type: preset.type,
+        takeIdx,
+      }).catch((e) => ({ matches: false, reason: `verify-threw: ${e.message}` }));
+      verificationAttempts.push({
+        popupUrl: candidate.url(),
+        matches: !!info.matches,
+        reason: info.reason || null,
+        landingDateText: info.landingDateText || null,
+        takeGuid: info.identity?.takeGuid || null,
+      });
+      if (info.matches) {
+        popup = candidate;
+        popupTakeGuid = info.identity?.takeGuid || null;
+        break;
+      }
+    }
+
+    if (!popup) {
+      // No popup matches the requested takeIdx — close all stale ITDStart
+      // popups so the launchitdwindow click below doesn't get confused, and
+      // so we don't leave the user with multiple Score Report tabs lying
+      // around. (Safe: these popups are transient child tabs of the landing,
+      // not the user's main starttest.com session tab.)
+      for (const stale of existingPopups) {
+        const staleUrl = stale.url();
+        try {
+          await stale.close({ runBeforeUnload: false });
+          closedStalePopups.push(staleUrl);
+        } catch (e) {
+          closedStalePopups.push(`${staleUrl} (close-failed: ${e.message})`);
+        }
+      }
+      await opeScraper.navigateToOpeLanding(landing, {
+        productId: preset.productId,
+        type: preset.type,
+      });
+      popup = await opeScraper.openTakeScoreReportPopup(landing, { takeIdx, timeoutMs: 30000 });
+      popupOpenedByUs = true;
+      // Capture the freshly-minted popup's takeGuid for the in-scraper guard.
+      const identity = await opeScraper.readScoreCardTakeIdentity(popup).catch(() => null);
+      popupTakeGuid = identity?.takeGuid || null;
+    }
+    await popup.bringToFront();
+    const result = await opeScraper.scrapeAttemptPhase3(popup, {
+      sourceId,
+      takeIdx,
+      expectedTotal,
+      expectedTakeGuid: popupTakeGuid,
+      minDelayMs: Number(options.minDelayMs) || 1500,
+      maxDelayMs: Number(options.maxDelayMs) || 3000,
+      onProgress: (evt) => {
+        progressEvents.push({ at: new Date().toISOString(), ...evt });
+        if (progressEvents.length > 200) progressEvents.shift();
+      },
+    });
+    return {
+      result,
+      tabUrl: popup.url(),
+      debug: {
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        cdpUrl: cdp.connectedUrl,
+        sourceId,
+        takeIdx,
+        productLabel: preset.label,
+        popupOpenedByUs,
+        popupTakeGuid,
+        verificationAttempts,
+        closedStalePopups,
+        diagnostics: {
+          enriched: result.items.length,
+          errors: result.errors.length,
+          aborted: result.aborted,
+          abortReason: result.abortReason,
+        },
+        progressEvents,
+      },
+    };
+  } catch (error) {
+    error.scrapeDebug = {
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      sourceId,
+      takeIdx,
+      tabUrl: popup?.url?.() || null,
+      popupOpenedByUs,
+      popupTakeGuid,
+      verificationAttempts,
+      closedStalePopups,
+      progressEvents,
+      anomaly: error instanceof opeScraper.ScrapeAnomalyError
+        ? { name: error.name, url: error.url, snippet: error.snippet }
+        : null,
+    };
+    throw error;
+  } finally {
+    void browser;
+  }
+}
+
 module.exports = {
   openUrlInOpenBrowser,
   runScrapeFromOpenBrowser,
@@ -998,5 +1583,11 @@ module.exports = {
   runStartTestPhase2FromOpenBrowser,
   runGmatClubPhase2FromOpenBrowser,
   openStartTestProductInOpenBrowser,
+  runTtpScrapeFromOpenBrowser,
+  runOpeListAttemptsFromOpenBrowser,
+  runOpeMockScrapeFromOpenBrowser,
+  runOpePhase3FromOpenBrowser,
   STARTTEST_SOURCE_PRODUCTS,
+  TTP_SECTION_PRESETS,
+  OPE_SOURCE_PRODUCTS: opeScraper.SOURCE_PRODUCTS,
 };

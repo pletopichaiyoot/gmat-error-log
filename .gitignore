@@ -27,3 +27,7 @@ yarn-error.log*
 *.bak
 .cache/
 coverage/
+
+# Agent / testing scratch dir — see CLAUDE.md "Temp file convention"
+/tmp/*
+!/tmp/.gitkeep

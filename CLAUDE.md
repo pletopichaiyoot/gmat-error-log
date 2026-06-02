@@ -2,9 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Temp file convention
+
+**All scratch / test artifacts MUST go in `/tmp/` at the repo root** — never the repo root itself, never `data/`, never alongside source. This includes: screenshots from browser/Playwright/MCP runs, DOM probes, ad-hoc `.md` notes, snapshot dumps, scratch `.sql` / `.json` payloads, throwaway scripts.
+
+- The `/tmp/` directory is gitignored (only `tmp/.gitkeep` is tracked).
+- Before finishing a task, **clean up everything you created in `/tmp/`** that isn't being explicitly handed off (`HANDOFF_*.md` etc.). At a minimum, `rm -rf tmp/*` (preserving `.gitkeep`) at task end.
+- If a probe artifact is worth keeping beyond the task (e.g., DOM contract for a scraper rewrite), promote it to a memory file under `~/.claude/projects/.../memory/` or document it inline in CLAUDE.md — don't leave it as a loose file.
+- Do not paste screenshots/PNGs into the repo root again. The repo got polluted with 40+ stray PNGs throughout 2026 — that should not recur.
+
 ## Project Overview
 
-Local GMAT analytics app: scrapes GMAT Official Practice and GMAT Club sessions via Chrome CDP, stores in SQLite, provides dashboards + LLM-powered coaching. Single user, macOS-focused.
+Local GMAT analytics app: scrapes GMAT Official Practice, GMAT Club, and Target Test Prep sessions via Chrome CDP, stores in SQLite, provides dashboards + LLM-powered coaching. Single user, macOS-focused.
 
 ## Commands
 
@@ -16,8 +25,24 @@ Local GMAT analytics app: scrapes GMAT Official Practice and GMAT Club sessions 
 | Web only (port 5173) | `npm run dev:web` |
 | Build frontend | `npm run build:web` |
 | Production start | `npm run build:web && npm start` |
+| Lint (report) | `npm run lint` |
+| Lint (auto-fix) | `npm run lint:fix` |
 
-No test suite is configured. No linter is configured.
+No test suite is configured.
+
+### Linter
+
+ESLint 9 (flat config at [eslint.config.mjs](eslint.config.mjs)). Config is intentionally permissive — only `js.configs.recommended` plus `react-hooks/rules-of-hooks` are errors; `no-unused-vars`, `no-empty`, `react-hooks/exhaustive-deps`, and `no-console` are warnings. Current baseline: **0 errors, ~127 warnings** in legacy files; new code should not add errors.
+
+Gotchas worth knowing before changing the config:
+
+- **No brace globs.** The repo overrides `brace-expansion@5`, which breaks the minimatch bundled inside `@eslint/config-array`. Use `'*.js'` + `'*.jsx'` as two patterns, never `'*.{js,jsx}'`.
+- **Three classes of files need special globals:**
+  1. **Page-injected scrapers** (`gmat_club_scraper.js`, `gmat_club_question_scraper.js`, `gmat_scraper.js`, `public/**`) run entirely in the browser via `evaluate()` — `sourceType: 'script'` + browser globals.
+  2. **Playwright host files** (`starttest_scraper.js`, `ttp_scraper.js`, `scraper-runner.js`, every probe under `scripts/`) are Node-side but embed `page.evaluate(() => …)` callbacks that touch `document`/`window` — they get **both** node and browser globals, plus the StartTest page globals (`jsondata_reviewtable`, `vItemInformation`, `processAction`).
+  3. **Root config files** (`tailwind.config.js`, `postcss.config.js`) are CJS; explicit override needed since the `src/**` pattern doesn't catch them.
+- **Frontend uses ESM** (`sourceType: 'module'` + `jsx: true`); backend uses CJS (`sourceType: 'commonjs'`). Mixing requires a per-glob override.
+- **`scripts/parse-lsat-pdf.js` is in `ignores`** — it embeds a vendored PDF parser with non-standard syntax that ESLint can't grok. Add new probe scripts under `scripts/` and they'll be linted automatically.
 
 ## Architecture
 
@@ -30,9 +55,10 @@ No test suite is configured. No linter is configured.
 - **`scrapers/starttest_scraper.js`** — **Active scraper for the 7 GMAT Official Practice sources**. Node-side module (not page-injected); navigates via Playwright and parses classic HTML. Two-phase design: Phase 1 lists sessions + question metadata via `GetQuestionHistoryPage` (one URL per session — fast, low scrape footprint, default for `/api/scrape`); Phase 2 walks each item's `ITDReview` frame to extract stems/choices/answers/correct keys (per-session opt-in via `/api/sessions/:sessionId/enrich` to avoid bot-pattern bans).
 - **`scrapers/gmat_club_scraper.js`** — Page-injected scraper for the GMAT Club Error Log analytics table. Verified column map (cells 0-8: checkbox, Question, Result svg, Attempts, Category, Difficulty band, Time, Date, Mistakes/Notes). Uses `data-row="phpbb_topics_timer_history-{N}"` from the Mistakes-cell button as the stable per-attempt id (`q_id = "gc-att-{N}"`) and `data-analytics-question-id` as the per-question id (`q_code = "gc-q-{N}"`). Pagination is scoped to the `<div class="px-6">` ancestor that contains "Showing N-N of M" so it doesn't collide with row-level Attempts buttons. Bumps page size to 100 via the entries-per-page `<select>`. Sessions are synthesized one-per-day (`session_id = hash("${source}|${dateKey}")`).
 - **`scrapers/gmat_club_question_scraper.js`** — Browser-injected GMAT Club Phase 2 enrichment. The Node-side runner navigates the same gmatclub.com tab to each topic URL one at a time; this module exposes `window.gmatClubEnrichCurrentPage()` which extracts: stem (first `.item.text`), choices (parsed from `<br>`-separated lines or `<ol>`), correct answer letter (from `.correctAnswerBlock` → `.statisticWrapExisting.correctAnswer`), user's pick (`.statisticWrapExisting.selectedAnswer`), and full A-E vote distribution. Falls back to `.spoiler` text for OA on pages without the stats widget.
+- **`scrapers/ttp_scraper.js`** — Node-side scraper for Target Test Prep's Error Tracker (`gmat.targettestprep.com/error_tracker/{quant|verbal|di}`). Single-pass (no Phase 1/2 split): visits the section index to enumerate mistake categories from `.failure-reason` rows (skipping `disabled` / zero-count "positive" categories like "I guessed correctly"), then walks each `/error_tracker/{section}/{categoryId}?page=N` URL with 1.5–3s jitter between page hits. Per-question extraction reads `data-exercise-id` (problem id), `attempt_id` from the remove-question form (the stable per-attempt id, format `ttp-att-{N}`), chapter heading, `data-attempt-status`, time, full stem (joined from `.notetaking-preselection` spans), choices (with `data-correct` + `.user-choice` flags), and the solution block. Sessions are synthesized one-per-mistake-category with `session_external_id = hashSessionExternalId("${section}|${categoryId}")` (53-bit hash). Each `question_attempt` carries `mistake_type` = the TTP category text, which the DB upsert lets overwrite the preserved value (TTP is authoritative).
 - **`scrapers/gmat_scraper.js`** — **Legacy** 8K+ line Nuxt SPA scraper. No source preset references it anymore (post 2026-04-22 migration to StartTest 2). Kept for reference and old-data compatibility; do not use for new sources.
 - **`llm-coach-agent.js`** — LangGraph state machine for AI performance review and Q&A chat. Uses LangChain + OpenAI (or Z AI as alternative provider).
-- **`question-topic-classifier.js`** — Hybrid classifier. Three skip paths bypass the LLM: (1) `topic_source='starttest-report'` rows hit a deterministic StartTest-path → canonical map (`STARTTEST_PATH_TO_CANONICAL` for tier-3 codes like `Q.PS.ARI`, then `STARTTEST_LEAF_TO_CANONICAL` for leaf labels); (2) `topic_source='gmatclub-canonical'` rows are pre-mapped by the GMAT Club scraper itself (see Key Patterns); (3) `topic_source='llm'` rows whose `topic` is already in `ALL_TOPIC_LABELS` are preserved (idempotency). After question-level classification, a session-level pass backfills `session.subject` from the dominant `subject_code` across questions when the scraper left it null (sets `'Mixed'` if no subject reaches 50% share). Subject-specific canonical label sets (Quant: 10, Verbal: 12, DI: 11).
+- **`question-topic-classifier.js`** — Hybrid classifier. Four skip paths bypass the LLM: (1) `topic_source='starttest-report'` rows hit a deterministic StartTest-path → canonical map (`STARTTEST_PATH_TO_CANONICAL` for tier-3 codes like `Q.PS.ARI`, then `STARTTEST_LEAF_TO_CANONICAL` for leaf labels); (2) `topic_source='gmatclub-canonical'` rows are pre-mapped by the GMAT Club scraper itself (see Key Patterns); (3) `topic_source='ttp-chapter'` rows carry TTP's per-problem chapter label and are preserved as-is (TTP-authoritative, no LLM needed); (4) `topic_source='llm'` rows whose `topic` is already in `ALL_TOPIC_LABELS` are preserved (idempotency). After question-level classification, a session-level pass backfills `session.subject` from the dominant `subject_code` across questions when the scraper left it null (sets `'Mixed'` if no subject reaches 50% share). Subject-specific canonical label sets (Quant: 10, Verbal: 12, DI: 11).
 - **`question-metadata.js`** — Enriches question records with derived fields (subject family, category code normalization). `inferCategoryCodeFromTopic` maps the canonical PS labels (e.g., "Counting & Probability", "Number Properties") to `'PS'` so GMAT Club rows without an explicit `category_code` still get one. `'Unclear Topic'` maps to `'DS'`.
 
 ### Frontend (`client/src/`)
@@ -65,6 +91,15 @@ Source → `OrderProductID` map (used by both phases for navigation):
 
 Full DOM contracts, command URL forms, and ITDReview globals reference live in the `memory/project_starttest_platform.md` memory and DOM samples in `/tmp/gmat-dom-probe/` (not committed).
 
+## Single-pass Target Test Prep scrape flow
+
+The TTP source uses a single-pass scrape (no Phase 1 / Phase 2 split) because every detail — `attempt_id`, `problem_id`, stem, choices — lives behind a per-question `?page=N` URL; there's no list endpoint that returns more than one question's worth of data:
+
+- `/api/scrape` dispatches to `runTtpScrapeFromOpenBrowser`, which expects the user's logged-in `gmat.targettestprep.com` tab in the CDP browser. The runner navigates that tab to `/error_tracker/{section}` first.
+- `ttp_scraper.js` enumerates mistake categories (`.failure-reason` rows), filters out zero-count categories whose View-Questions button is `.disabled`, and walks each category's `?page=1..N` URLs with 1.5–3s human-like jitter.
+- Per-question extraction: `data-exercise-id` → `q_code = "ttp-q-{id}"`; `attempt_id` from the remove-question form → `q_id = "ttp-att-{id}"`; choices keep TTP's per-option `data-correct` + `.user-choice` flags; chapter heading becomes `topic` with `topic_source='ttp-chapter'`; TTP's mistake category text fills `mistake_type`.
+- Sessions are synthesized one-per-mistake-category. `session_external_id` is a stable 53-bit hash of `${section}|${categoryId}`, so re-scrapes upsert rather than duplicate.
+
 ## Two-phase GMAT Club scrape flow
 
 The GMAT Club source mirrors StartTest's two-phase split:
@@ -81,9 +116,14 @@ The GMAT Club source mirrors StartTest's two-phase split:
 - **Scraper safety**: Never call `browser.close()` in the StartTest or GMAT Club paths — the browser is the user's logged-in Chrome, and closing it kills their session. Cleanup is best-effort (console/pageerror listeners removed in `finally`). StartTest Phase 2 navigates with `processAction('Next')` rather than `seq=N+1` URLs because rotating `code` tokens are single-use; GMAT Club Phase 2 navigates by URL with jitter.
 - **Subcategory display**: StartTest writes short abbreviation codes ("VEO", "ARI", "COR") to `subcategory` and the readable name to `topic`. The dashboard's `pickReadableSubcategory` (in `client/src/App.jsx`) prefers `topic` whenever `subcategory` looks abbreviation-shaped (≤5 chars, all-caps).
 - **GMAT Club category → code direct mapping**: The GMAT Club scraper hard-codes a `GMATCLUB_CATEGORY_TO_CODE` map plus a keyword-fallback regex list, so each row's raw category text (e.g., "Probability", "Statistics and Sets Problems", "Strengthen") gets converted to a `subject_sub_raw` value (`PS`/`CR`/`RC`/`DI`/...) at scrape time. Mapped rows are tagged `topic_source='gmatclub-canonical'` so the LLM classifier skips them entirely; only the rare unmapped category (e.g., "Science") falls through to the LLM. Typically 95–96% of GMAT Club rows bypass the LLM.
-- **Source-platform identification**: The frontend's `getSourcePlatform(label)` heuristic is `if (/gmat\s*club/i.test(label)) return 'gmatclub'; else return 'starttest'`. Backend SQL uses the same shape: `LOWER(source) LIKE '%gmat club%'`. This is the only string the badge component, the platform query param, and the SQL filter all rely on.
+- **Source-platform identification**: The frontend's `getSourcePlatform(label)` heuristic is `if (/gmat\s*club/i.test(label)) return 'gmatclub'; if (/target\s*test\s*prep/i.test(label)) return 'ttp'; else return 'starttest'`. Backend SQL uses the same shape via `platformWhereClause`: `'%gmat club%'` for gmatclub, `'%target test prep%'` for ttp, NOT LIKE either for starttest. This label-substring check is the only string the badge component, the platform query param, and the SQL filter all rely on.
+- **TTP mistake_type is authoritative**: The TTP scraper writes a non-empty `mistake_type` on every question, which the DB upsert prefers over the preserved value. This is the only source where the scraper overwrites user annotations — all other sources fall through to preserve whatever the user wrote in the dashboard. The reason: TTP itself prompts the user to tag each error from a fixed taxonomy, so re-scraping pulls the most-recent taxonomy answer.
 - **LLM provider switching**: Controlled by `LLM_PROVIDER` env var (`openai` | `zai`). Coach and classifier share provider/key/base but can use different models. Classifier is skipped entirely for `topic_source !== 'llm'` rows AND for `topic_source==='llm'` rows whose topic is already in `ALL_TOPIC_LABELS` (idempotency on re-scrapes).
 - **No tests**: The project has no automated test suite.
+
+## Querying the error log & analyzing performance
+
+For schema, conventions (unanswered-row filter, subject normalization, topic canonicalization), ad-hoc SQL recipes, and REST API parameter reference, see [ANALYSIS.md](ANALYSIS.md). Reach for it whenever the user asks "what did I get wrong", "where am I weakest", "show me my accuracy on X", or anything that involves running a query against `data/gmat-error-log.db` or hitting `/api/sessions`, `/api/errors`, `/api/patterns`, or `/api/sessions/:id/analysis`.
 
 ## REST endpoints (selected)
 

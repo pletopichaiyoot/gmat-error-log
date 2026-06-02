@@ -618,9 +618,24 @@ async function classifyScrapedQuestions(data, options = {}) {
 
   // Backfill session.subject for sources that don't carry a subject signal
   // (e.g., GMAT Club, where the analytics table has no forum/subject column).
-  // Pick the dominant subject_code across the session's questions.
+  // Dominance rule: if one subject family (Quant, Verbal, DI) accounts for at
+  // least 80% of classified questions, label the session with that subject;
+  // otherwise label it "Mixed". The 80% cutoff treats stray outliers (e.g. a
+  // DS question that the LLM topic-tagged with a CR-shaped label) as noise
+  // rather than promoting the session to Mixed.
+  const SESSION_SUBJECT_DOMINANCE = 0.8;
+  const SHORT_TO_CANONICAL = { Q: 'Quant', V: 'Verbal', DI: 'DI' };
   for (const session of sessions) {
-    if (String(session?.subject || '').trim()) continue;
+    // Normalize short single-letter codes the StartTest scraper writes
+    // ("Q"/"V"/"DI") to the canonical labels the dashboard's subject-family
+    // SQL recognizes ("Quant"/"Verbal"/"DI"). Without this, new StartTest
+    // sessions render as "Other" in the subject column.
+    const existing = String(session?.subject || '').trim();
+    if (existing) {
+      const upper = existing.toUpperCase();
+      if (SHORT_TO_CANONICAL[upper]) session.subject = SHORT_TO_CANONICAL[upper];
+      continue;
+    }
     const counts = { Q: 0, V: 0, DI: 0 };
     const questions = Array.isArray(session?.questions) ? session.questions : [];
     for (const question of questions) {
@@ -630,17 +645,14 @@ async function classifyScrapedQuestions(data, options = {}) {
     }
     const total = counts.Q + counts.V + counts.DI;
     if (!total) continue;
-    const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
-    const [code, n] = dominant;
-    // Use the dominant only if it accounts for at least half of classified
-    // questions; otherwise leave the session as Mixed.
-    if (n / total < 0.5) {
+    const [topCode, topN] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    if (topN / total < SESSION_SUBJECT_DOMINANCE) {
       session.subject = 'Mixed';
       continue;
     }
-    if (code === 'Q') session.subject = 'Quant';
-    else if (code === 'V') session.subject = 'Verbal';
-    else if (code === 'DI') session.subject = 'DI';
+    if (topCode === 'Q') session.subject = 'Quant';
+    else if (topCode === 'V') session.subject = 'Verbal';
+    else if (topCode === 'DI') session.subject = 'DI';
   }
 
   return {
