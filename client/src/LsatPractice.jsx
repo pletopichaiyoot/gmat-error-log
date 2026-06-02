@@ -1040,15 +1040,17 @@ function SessionView({
 function SessionSummary({ set, attempts, sectionRoman, onBackToPicker, onRetake }) {
   const stats = useMemo(() => {
     let correct = 0, totalTime = 0;
-    const rows = set.questions.map((q) => {
-      const a = attempts[`${sectionRoman}:${q.number}`];
-      if (a?.is_correct) correct++;
-      if (a?.time_ms) totalTime += a.time_ms;
-      return { q, attempt: a };
-    });
-    return { rows, correct, total: set.questions.length, totalTime };
+    // Only questions actually answered count toward this session.
+    const rows = set.questions
+      .map((q) => ({ q, attempt: attempts[`${sectionRoman}:${q.number}`] }))
+      .filter((r) => r.attempt);
+    for (const { attempt } of rows) {
+      if (attempt.is_correct) correct++;
+      if (attempt.time_ms) totalTime += attempt.time_ms;
+    }
+    return { rows, correct, total: rows.length, totalTime };
   }, [set, attempts, sectionRoman]);
-  const accuracy = Math.round((stats.correct / stats.total) * 100);
+  const accuracy = stats.total ? Math.round((stats.correct / stats.total) * 100) : 0;
   const avgTime = stats.totalTime ? stats.totalTime / Math.max(1, stats.total) : 0;
 
   return (
@@ -1094,7 +1096,7 @@ function SessionSummary({ set, attempts, sectionRoman, onBackToPicker, onRetake 
           <button type="button" className="lsat-st-link-btn" onClick={onBackToPicker}>← Back to sets</button>
           <span className="lsat-st-spacer" />
           <button type="button" className="lsat-st-submit" onClick={onRetake}>
-            Retake this set
+            {stats.total === set.questions.length ? 'Retake this set' : `Retake these ${stats.total}`}
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <polyline points="9 18 15 12 9 6"/>
             </svg>
