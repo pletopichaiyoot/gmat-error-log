@@ -1124,6 +1124,12 @@ th.sortable:hover {
   border: 1px solid rgba(168, 85, 247, 0.36);
 }
 
+.source-chip.source-lsat {
+  background: rgba(225, 29, 72, 0.12);
+  color: #9f1239;
+  border: 1px solid rgba(225, 29, 72, 0.34);
+}
+
 .response-summary-cell {
   display: block;
   min-width: 0;

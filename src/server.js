@@ -46,6 +46,12 @@ const {
   seedMockResultsIfEmpty,
 } = require('./db');
 const fsLib = require('fs');
+const {
+  listLsatDashboardSessions,
+  listLsatDashboardErrors,
+  getLsatDashboardAnalysis,
+  isLsatDashboardId,
+} = require('./lsat-dashboard');
 const { LlmConfigError, generatePerformanceReview, answerCoachQuestion } = require('./llm-coach-agent');
 const { classifyScrapedQuestions } = require('./question-topic-classifier');
 const {
@@ -455,20 +461,40 @@ app.get('/api/sessions', async (req, res) => {
     const page = Math.max(1, Number(req.query.page || 1));
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
     const offset = (page - 1) * pageSize;
-    const platform = ['gmatclub', 'starttest', 'ttp', 'ope-mock'].includes(req.query.platform) ? req.query.platform : null;
-    const subject = ['Q', 'V', 'DI'].includes(String(req.query.subject || '').toUpperCase())
+    const platform = ['gmatclub', 'starttest', 'ttp', 'ope-mock', 'lsat'].includes(req.query.platform) ? req.query.platform : null;
+    const subject = ['Q', 'V', 'DI', 'RC', 'CR'].includes(String(req.query.subject || '').toUpperCase())
       ? String(req.query.subject).toUpperCase()
       : null;
     const startDate = /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate || '') ? req.query.startDate : null;
     const endDate = /^\d{4}-\d{2}-\d{2}$/.test(req.query.endDate || '') ? req.query.endDate : null;
 
-    const [rows, total] = await Promise.all([
-      listSessions(runId, { limit: pageSize, offset, platform, subject, startDate, endDate }),
-      countSessions(runId, { platform, subject, startDate, endDate }),
-    ]);
+    // LSAT practice lives in separate tables and is merged in here as the "lsat"
+    // source. GMAT subjects are Q/V/DI; LSAT subjects are RC/CR — so a Q/V/DI
+    // subject filter excludes LSAT, and an RC/CR filter excludes GMAT.
+    const includeGmat = platform !== 'lsat' && !['RC', 'CR'].includes(subject);
+    const includeLsat = (platform === null || platform === 'lsat') && !['Q', 'V', 'DI'].includes(subject);
+
+    const gmatRows = includeGmat
+      ? await listSessions(runId, {
+          limit: 1000000,
+          offset: 0,
+          platform: platform === 'lsat' ? null : platform,
+          subject: ['Q', 'V', 'DI'].includes(subject) ? subject : null,
+          startDate,
+          endDate,
+        })
+      : [];
+    const lsatRows = includeLsat
+      ? await listLsatDashboardSessions({ subject: ['RC', 'CR'].includes(subject) ? subject : null, startDate, endDate })
+      : [];
+
+    const merged = [...gmatRows, ...lsatRows].sort(
+      (a, b) => new Date(b.session_date || 0) - new Date(a.session_date || 0)
+    );
+    const total = merged.length;
 
     res.json({
-      sessions: rows,
+      sessions: merged.slice(offset, offset + pageSize),
       total,
       page,
       pageSize,
@@ -481,7 +507,20 @@ app.get('/api/sessions', async (req, res) => {
 
 app.get('/api/sessions/:sessionId/analysis', async (req, res) => {
   try {
-    const sessionId = Number(req.params.sessionId);
+    const rawId = String(req.params.sessionId || '');
+
+    // LSAT practice sessions carry a namespaced "lsat-<n>" id.
+    if (isLsatDashboardId(rawId)) {
+      const lsatAnalysis = await getLsatDashboardAnalysis(rawId);
+      if (!lsatAnalysis) {
+        res.status(404).json({ error: 'Session not found.' });
+        return;
+      }
+      res.json({ analysis: lsatAnalysis });
+      return;
+    }
+
+    const sessionId = Number(rawId);
     if (!Number.isInteger(sessionId) || sessionId <= 0) {
       res.status(400).json({ error: 'Invalid session id.' });
       return;
@@ -506,26 +545,54 @@ app.get('/api/errors', async (req, res) => {
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
     const offset = (page - 1) * pageSize;
 
+    const platform = ['gmatclub', 'starttest', 'ttp', 'ope-mock', 'lsat'].includes(req.query.platform) ? req.query.platform : null;
+    const subjectRaw = String(req.query.subject || '').toUpperCase();
+    const sortKey = req.query.sortKey || 'session_date';
+    const sortOrder = req.query.sortOrder === 'asc' ? 'asc' : 'desc';
+    const search = req.query.search || '';
+
     const filterOptions = {
       runId,
       subject: req.query.subject || '',
       difficulty: req.query.difficulty || '',
       topic: req.query.topic || '',
       confidence: req.query.confidence || '',
-      search: req.query.search || '',
+      search,
       mistakeTag: req.query.mistakeTag || '',
-      platform: ['gmatclub', 'starttest', 'ttp', 'ope-mock'].includes(req.query.platform) ? req.query.platform : null,
-      sortKey: req.query.sortKey || 'session_date',
-      sortOrder: req.query.sortOrder === 'asc' ? 'asc' : 'desc',
+      platform: platform === 'lsat' ? null : platform,
+      sortKey,
+      sortOrder,
     };
 
-    const [rows, total] = await Promise.all([
-      listErrors({ ...filterOptions, limit: pageSize, offset }),
-      countErrors(filterOptions),
-    ]);
+    // GMAT subjects are Q/V/DI; LSAT subjects are RC/CR. A Q/V/DI subject filter
+    // excludes LSAT errors; an RC/CR filter excludes GMAT errors.
+    const includeGmat = platform !== 'lsat' && !['RC', 'CR'].includes(subjectRaw);
+    const includeLsat = (platform === null || platform === 'lsat') && !['Q', 'V', 'DI'].includes(subjectRaw);
+
+    const gmatRows = includeGmat
+      ? await listErrors({ ...filterOptions, limit: 1000000, offset: 0 })
+      : [];
+    const lsatRows = includeLsat
+      ? await listLsatDashboardErrors({ subject: ['RC', 'CR'].includes(subjectRaw) ? subjectRaw : null, search })
+      : [];
+
+    const dir = sortOrder === 'asc' ? 1 : -1;
+    const merged = [...gmatRows, ...lsatRows].sort((a, b) => {
+      const av = a[sortKey];
+      const bv = b[sortKey];
+      const an = Number(av);
+      const bn = Number(bv);
+      const numeric =
+        av != null && bv != null &&
+        String(av).trim() !== '' && String(bv).trim() !== '' &&
+        !Number.isNaN(an) && !Number.isNaN(bn);
+      const c = numeric ? an - bn : String(av ?? '').localeCompare(String(bv ?? ''));
+      return c * dir;
+    });
+    const total = merged.length;
 
     res.json({
-      errors: rows,
+      errors: merged.slice(offset, offset + pageSize),
       total,
       page,
       pageSize,

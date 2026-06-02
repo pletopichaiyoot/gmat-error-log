@@ -1,66 +1,125 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { Card } from './components/ui/card';
+import { Fragment, Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from './components/ui/button';
 import { Badge } from './components/ui/badge';
 import { Input } from './components/ui/input';
 import { Textarea } from './components/ui/textarea';
 import { Select } from './components/ui/select';
+// Heavy route-level views — lazy-loaded so they don't bloat the initial bundle.
+// The dashboard (default route) loads without them; they fetch on demand when
+// the user navigates to #lsat or #study-plan.
+const LsatPractice = lazy(() => import('./LsatPractice'));
+const StudyPlan = lazy(() => import('./StudyPlan'));
+
+function RouteFallback() {
+  return (
+    <main className="page-shell">
+      <div style={{ padding: '24px', color: '#6b7280' }}>Loading…</div>
+    </main>
+  );
+}
 
 const DEFAULT_CDP_URL = 'http://localhost:9222';
 
+// Lean 12-tag taxonomy (v3, 2026-05-26). Designed for fast tagging during
+// review: 3 orthogonal dimensions, multi-select-friendly. Each tag points to
+// a distinct remediation.
+//
+// Why v3: v2 had 22 tags but 14 of them fired <=2 times in 30 days, and
+// tagging compliance was only ~11%. Most micro RC-trap tags and the
+// DI-specific tags never got picked because the question's `subcategory`
+// column already captures sub-type; tags should add cognitive/trap/process
+// signal on top.
+//
+// Migration (v2 -> v3) — handled by scripts/migrate-tags-v3.js:
+//   Misread (Passage/Question/Condition)               -> Misread
+//   CR: Missed Negation/Qualifier                       -> Misread
+//   Chart/Table Misread                                 -> Misread
+//   Multi-Source: Missed Cross-Link                     -> Misread
+//   Wrong Setup (Variable/Equation/Structure)           -> Wrong Setup
+//   Composite/Multi-Select: Wrong Slot                  -> Wrong Setup
+//   Two-Part: Pairing/Order Error                       -> Wrong Setup
+//   Invalid Assumption                                  -> Logic Slip
+//   Logic Breakdown (Wrong Inference or Relationship)   -> Logic Slip
+//   RC Trap: Wrong Paragraph                            -> Logic Slip
+//   CR: Confused Author Tone                            -> Logic Slip
+//   CR: Scope Shift (Premise vs Conclusion)             -> Trap: Scope/Strength
+//   RC Trap: Too Extreme                                -> Trap: Scope/Strength
+//   RC Trap: Out of Scope                               -> Trap: Scope/Strength
+//   RC Trap: Half-Right                                 -> Trap: Half-Right
+//   RC Trap: Opposite Direction                         -> Trap: Reversed
+//   Incomplete Casework                                 -> Calc/Casework Slip
+//   Calculation Slip (...)                              -> Calc/Casework Slip
+//   Chose Too Early                                     -> Time Trap
+//   Overinvested Time (>2x median)                      -> Time Trap
+//   Re-read Loop (Got Stuck Re-reading)                 -> No Plan / Stuck
+//   Could Not Start / No Plan                           -> No Plan / Stuck
+//   Pre-phrase Mismatch (Skipped Pre-phrasing)          -> dropped (not a workflow Pleto uses)
+// Restored: "Concept Gap" (was retired in v2 but real entries still ask for it).
+// "Trap: Plausible-but-Unstated" is new in v3 — the world-knowledge-leak trap.
+//
+// Old/legacy rows that didn't get migrated still render in the chips list
+// (free-text); they just won't appear pre-selected in the picker.
 const MISTAKE_TYPES = {
-  'Core Reasoning / Process': [
-    'Misread Condition',
-    'Wrong Variable Setup',
-    'Failed to Translate',
-    'Missed Constraint',
-    'Invalid Assumption',
-    'Incomplete Casework',
-    'Wrong Order/Pairing',
-    'Calculation Error',
-    'Unit/Scale Error',
-    'Sign/Direction Error',
-    'Conceptual Gap',
-    'Logic Breakdown',
-    'Careless / Sloppy Error',
+  'Cognitive Cause': [
+    'Misread',
+    'Modifier/Connective Miss',
+    'Concept Gap',
+    'Wrong Setup',
+    'Logic Slip',
+    'Calc/Casework Slip',
   ],
-  'Data Handling / DI-Specific': [
-    'Data Extraction Error',
-    'Chart/Table Misread',
-    'Two-Part: Order Reversal',
-    'Two-Part: Pairing Logic Error',
-    'Composite: Wrong Slot',
-    'Multi-Select: Partial Answer',
-    'Table Analysis: Filter Miss',
-    'Table Analysis: Final Step Slip',
-    'Graphics: Axis/Label Misread',
-    'Graphics: Trend Misread',
-    'MSR: Missed Cross-Source Link',
+  'Trap Type': [
+    'Trap: Scope/Strength',
+    'Trap: Half-Right',
+    'Trap: Reversed',
+    'Trap: Plausible-but-Unstated',
   ],
-  'Verbal / Reading': [
-    'Misread Passage',
-    'Misread Question',
-    'Missed Negation/Qualifier',
-    'Out of Scope Inference',
-    'Scope Shift',
-    'Missed Author Tone',
-    'Wrong Logical Relationship',
-    'Confused Answer Choices',
-  ],
-  'Test Strategy / Process': [
-    'Eliminated Correct Choice',
-    'Chose Too Early',
-    'Could Not Start / No Plan',
-    'Overinvested Time',
-    'Rushed Guess',
-    'Switched from Correct Path',
-    'Stuck in Algebra',
-    'Re-read Too Much',
-    'Unfamiliar Format',
+  'Process / Fix-it': [
+    'No Plan / Stuck',
+    'Time Trap',
   ],
 };
 
+// When-to-use hints shown on hover (native title attribute).
+const TAG_DESCRIPTIONS = {
+  // Cognitive Cause
+  'Misread':
+    'Missed or misinterpreted a content word, condition, chart value, or part of the stem ("each", "ensure", "at least", a number). Fix: slow down on key words and restate the question in your own words before solving.',
+  'Modifier/Connective Miss':
+    'Missed a small qualifier or connective word that carries the logical relationship — "instead", "directly/indirectly", "whereas", "only", "but", "however", "rather than", negations, scope-limiters. Fix: treat these as logical operators, not filler — circle them on first read of a passage or answer choice.',
+  'Concept Gap':
+    "Didn't actually know the rule, formula, or concept being tested. Different from Wrong Setup — this is a knowledge hole, not an execution miss. Fix: revisit the concept and add to flashcards.",
+  'Wrong Setup':
+    'Knew the concept, but framed the problem incorrectly — wrong variable, wrong equation, missing matrix/table, bad translation from words to math. Fix: practice the canonical setup for that problem type before computing.',
+  'Logic Slip':
+    'Reasoning chain broke: wrong inference, missed implication, premise/conclusion confusion, paragraph-role miss, scope error in your own logic. Fix: write the chain step-by-step instead of jumping.',
+  'Calc/Casework Slip':
+    'Computation, sign, unit, or casework error — including only testing favorable cases or making a careless arithmetic mistake. Fix: enumerate cases systematically; double-check signs and units.',
+  // Trap Type — what the wrong answer was doing
+  'Trap: Scope/Strength':
+    'The wrong answer added an unstated qualifier or pushed strength too far — "constant", "always", "only", "primarily". Common on RC Inference and CR Scope shifts. Fix: reject any choice that adds an unstated quality the passage never claims.',
+  'Trap: Half-Right':
+    'The wrong answer was partially correct but one element was off — right idea, wrong scope/agent/object/timeframe. Fix: verify every clause of the answer choice, not just the first half.',
+  'Trap: Reversed':
+    'Wrong direction, polarity, or causation — answer flipped cause/effect, increased vs. decreased, supports vs. weakens. Fix: explicitly note the direction of the relationship before reading choices.',
+  'Trap: Plausible-but-Unstated':
+    "The wrong answer sounded right from real-world intuition or general knowledge but wasn't supported by the passage/stem. Fix: ask 'where does the text say this?' for every candidate answer.",
+  // Process / Fix-it
+  'No Plan / Stuck':
+    "Couldn't start, no setup move (no matrix, no passage map, no equation), or got stuck mid-problem. Also: messy scratchwork that confused you. Fix: build the standard setup for that problem type before solving.",
+  'Time Trap':
+    'Any timing failure mode: chose too early, overinvested time (>2× median), rushed-guess, or ran out of time. Fix: enforce a per-question budget; bail and mark for review at the budget limit.',
+};
+
 const ALL_MISTAKE_TAGS = Object.values(MISTAKE_TYPES).flat();
+
+const MISTAKE_CATEGORY_ORDER = Object.keys(MISTAKE_TYPES);
+
+const SUBJECT_TAG_PRIORITY = {
+  Q: ['Cognitive Cause', 'Process / Fix-it', 'Trap Type'],
+  V: ['Trap Type', 'Cognitive Cause', 'Process / Fix-it'],
+  DI: ['Cognitive Cause', 'Trap Type', 'Process / Fix-it'],
+};
 
 function parseMistakeTags(value) {
   if (!value) return [];
@@ -79,6 +138,16 @@ function formatDate(value) {
   const dt = new Date(value);
   if (Number.isNaN(dt.getTime())) return value;
   return dt.toLocaleDateString();
+}
+
+function formatIsoDate(value) {
+  if (!value) return '-';
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return String(value);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const d = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 function formatMaybe(value) {
@@ -468,13 +537,14 @@ function normalizeDiSubcategoryDisplay(value, categoryCode, contentDomain) {
   return text;
 }
 
-// StartTest stores subcategory as a short abbreviation ("VEO", "ARI", "COR")
-// while the human-readable name lives in `topic`. Prefer `topic` whenever
-// `subcategory` looks abbreviation-shaped (all-caps, ≤5 letters, no spaces).
+// StartTest stores subcategory as a short abbreviation ("VEO", "ARI", "COR",
+// also underscored ones like "R_P", "P_S") while the human-readable name
+// lives in `topic`. Prefer `topic` whenever `subcategory` looks
+// abbreviation-shaped (all-caps, ≤5 chars, only letters/digits/underscores).
 function pickReadableSubcategory(row) {
   const sub = String(row?.subcategory || '').trim();
   const topic = String(row?.topic || '').trim();
-  const looksAbbrev = sub.length > 0 && sub.length <= 5 && /^[A-Z0-9]+$/.test(sub);
+  const looksAbbrev = sub.length > 0 && sub.length <= 5 && /^[A-Z0-9_]+$/.test(sub);
   if (looksAbbrev && topic) return topic;
   return sub || topic || '';
 }
@@ -545,9 +615,33 @@ function getCompactResponseDisplay(row) {
 
 function SubjectCell({ row }) {
   const subjectCode = normalizedSubjectCode(row);
+  const subjectDisplay = normalizeSubjectFamilyDisplay(subjectCode);
+  const source = String(row?.source || '');
+  // LSAT rows carry their own subject (RC / CR) which the GMAT subject normalizer
+  // would collapse into "Verbal" — show it verbatim instead.
+  if (/lsat/i.test(source)) {
+    return (
+      <div className="section-cell">
+        <span className="section-chip" title={source}>{row?.subject || '—'}</span>
+      </div>
+    );
+  }
+  const isOpe = /official\s*practice\s*exam/i.test(source);
+  // OPE sessions span all 3 sections, so the row-level subject is "Mixed"/"Other".
+  // Replace that with the exam set name parsed out of the source label — much
+  // more useful than a meaningless "OTHER" chip.
+  if (isOpe && (!subjectCode || subjectDisplay === 'Other' || subjectDisplay === 'Mixed')) {
+    const match = source.match(/practice\s*exam\s*(\d+)/i);
+    const label = match ? `OPE #${match[1]}` : 'Practice Exam';
+    return (
+      <div className="section-cell">
+        <span className="section-chip section-chip--ope" title={source}>{label}</span>
+      </div>
+    );
+  }
   return (
     <div className="section-cell">
-      <span className="section-chip">{normalizeSubjectFamilyDisplay(subjectCode)}</span>
+      <span className="section-chip">{subjectDisplay}</span>
     </div>
   );
 }
@@ -555,17 +649,47 @@ function SubjectCell({ row }) {
 function getSourcePlatform(sourceLabel) {
   const raw = String(sourceLabel || '').trim();
   if (!raw) return null;
+  if (/lsat/i.test(raw)) return 'lsat';
   if (/gmat\s*club/i.test(raw)) return 'gmatclub';
+  if (/target\s*test\s*prep/i.test(raw)) return 'ttp';
+  if (/official\s*practice\s*exam/i.test(raw)) return 'ope-mock';
   return 'starttest';
 }
 
 function SourceBadge({ source }) {
   const platform = getSourcePlatform(source);
   if (!platform) return <span className="muted">-</span>;
-  const label = platform === 'gmatclub' ? 'GMAT Club' : 'Official Guide';
+  const label =
+    platform === 'lsat' ? 'LSAT' :
+    platform === 'gmatclub' ? 'GMAT Club' :
+    platform === 'ttp' ? 'Target Test Prep' :
+    platform === 'ope-mock' ? 'Practice Exam' :
+    'Official Guide';
   return (
     <span className={`source-chip source-${platform}`} title={source || ''}>
       {label}
+    </span>
+  );
+}
+
+// OPE scaled-score chip: "535 · Q78 V80 DI72". Renders nothing if no
+// total_score is set (Phase 2 score-summary scrape hasn't run for this row).
+function ScoreChip({ row }) {
+  if (!row || row.total_score == null) return null;
+  const parts = [];
+  if (row.quant_score != null) parts.push(`Q${row.quant_score}`);
+  if (row.verbal_score != null) parts.push(`V${row.verbal_score}`);
+  if (row.di_score != null) parts.push(`DI${row.di_score}`);
+  const title = [
+    row.total_percentile != null ? `Total ${row.total_score} (${row.total_percentile}th %ile)` : `Total ${row.total_score}`,
+    row.quant_score != null ? `Quant ${row.quant_score}${row.quant_percentile != null ? ` (${row.quant_percentile}th)` : ''}` : null,
+    row.verbal_score != null ? `Verbal ${row.verbal_score}${row.verbal_percentile != null ? ` (${row.verbal_percentile}th)` : ''}` : null,
+    row.di_score != null ? `DI ${row.di_score}${row.di_percentile != null ? ` (${row.di_percentile}th)` : ''}` : null,
+  ].filter(Boolean).join(' · ');
+  return (
+    <span className="score-chip" title={title}>
+      <strong>{row.total_score}</strong>
+      {parts.length > 0 && <span className="score-chip-sub"> · {parts.join(' ')}</span>}
     </span>
   );
 }
@@ -581,9 +705,9 @@ function ResponseCell({ row }) {
 function mapSubjectFamily(subject) {
   const raw = String(subject || '').trim();
   const upper = raw.toUpperCase();
-  if (['CR', 'RC', 'VERBAL'].includes(upper)) return 'Verbal';
-  if (['PS', 'QUANT'].includes(upper)) return 'Quant';
-  if (['DS', 'DI', 'TA', 'GI', 'MSR', 'TPA'].includes(upper)) return 'DI';
+  if (['V', 'CR', 'RC', 'VERBAL'].includes(upper)) return 'Verbal';
+  if (['Q', 'PS', 'QUANT'].includes(upper)) return 'Quant';
+  if (['DI', 'DS', 'TA', 'GI', 'MSR', 'TPA', 'DATA INSIGHTS'].includes(upper)) return 'DI';
   return 'Other';
 }
 
@@ -642,7 +766,24 @@ function buildCoachGreeting(scopeLabel) {
   };
 }
 
+function modeFromHash(hash) {
+  if (hash === '#lsat') return 'lsat';
+  if (hash === '#study-plan' || hash === '#plan') return 'study-plan';
+  return 'gmat';
+}
+
 function App() {
+  const [appMode, setAppMode] = useState(() => {
+    if (typeof window === 'undefined') return 'gmat';
+    return modeFromHash(window.location.hash);
+  });
+  useEffect(() => {
+    function onHashChange() {
+      setAppMode(modeFromHash(window.location.hash));
+    }
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
   const [status, setStatus] = useState({ message: 'Loading...', isError: false });
   const [sources, setSources] = useState([]);
   const [selectedSource, setSelectedSource] = useState('');
@@ -667,6 +808,19 @@ function App() {
   const [isScraping, setIsScraping] = useState(false);
   const [isEnriching, setIsEnriching] = useState(false);
   const [lastEnrichResult, setLastEnrichResult] = useState(null);
+  // OPE (mock exam) take-picker state. Populated when the selected source is
+  // an ope-mock platform; cleared otherwise.
+  const [opeTakes, setOpeTakes] = useState([]);
+  const [selectedTakeIdx, setSelectedTakeIdx] = useState('');
+  const [isLoadingOpeTakes, setIsLoadingOpeTakes] = useState(false);
+  const [opeTakesError, setOpeTakesError] = useState('');
+  // Wipe any previously-loaded OPE takes whenever the selected source changes
+  // so stale rows from another OPE don't leak into the new pick.
+  useEffect(() => {
+    setOpeTakes([]);
+    setSelectedTakeIdx('');
+    setOpeTakesError('');
+  }, [selectedSource]);
   const [syncDebug, setSyncDebug] = useState(null);
   const [patternDrilldown, setPatternDrilldown] = useState({
     open: false,
@@ -698,12 +852,15 @@ function App() {
   const [sessionSubjectFilter, setSessionSubjectFilter] = useState('');
   const [sessionPlatformFilter, setSessionPlatformFilter] = useState('');
   const [sessionSort, setSessionSort] = useState({ key: 'session_date', order: 'desc' });
-  const [sessionAnalysisSort, setSessionAnalysisSort] = useState({ key: 'time_sec', order: 'desc' });
+  const [sessionAnalysisSort, setSessionAnalysisSort] = useState({ key: 'correct', order: 'asc' });
   const [errorSort, setErrorSort] = useState({ key: 'session_date', order: 'desc' });
   const [categoryBreakdownSort, setCategoryBreakdownSort] = useState({ key: 'subject_family', order: 'asc' });
   const [subcategoryBreakdownSort, setSubcategoryBreakdownSort] = useState({ key: 'total_questions', order: 'desc' });
   const [sessionDateRange, setSessionDateRange] = useState({ start: '', end: '' });
   const [expandedCategoryKey, setExpandedCategoryKey] = useState('');
+  const [expandedErrorId, setExpandedErrorId] = useState(null);
+  const [errorFiltersOpen, setErrorFiltersOpen] = useState(false);
+  const [tagSearch, setTagSearch] = useState('');
   const [aiReview, setAiReview] = useState('');
   const [isGeneratingAiReview, setIsGeneratingAiReview] = useState(false);
   const [aiFocus, setAiFocus] = useState('');
@@ -859,12 +1016,21 @@ function App() {
     ]);
   }
 
-  async function loadSessions(page, runId = selectedRunId, platform = sessionPlatformFilter) {
+  async function loadSessions(
+    page,
+    runId = selectedRunId,
+    platform = sessionPlatformFilter,
+    subject = sessionSubjectFilter,
+    dateRange = sessionDateRange,
+  ) {
     const params = new URLSearchParams();
     if (runId) params.set('runId', runId);
     params.set('page', page);
     params.set('pageSize', sessionPagination.pageSize);
     if (platform) params.set('platform', platform);
+    if (subject) params.set('subject', subject);
+    if (dateRange?.start) params.set('startDate', dateRange.start);
+    if (dateRange?.end) params.set('endDate', dateRange.end);
     const data = await fetchJson(`/api/sessions?${params.toString()}`);
     setSessions(data.sessions || []);
     setSessionPagination({
@@ -971,11 +1137,12 @@ function App() {
     return () => clearTimeout(id);
   }, [filters.subject, filters.difficulty, filters.confidence, filters.search, filters.mistakeTag, filters.topic, filters.platform]);
 
-  // Reload sessions list when the source-platform filter changes
+  // Reload sessions list when any server-side filter changes — resets to page 1
+  // so pagination totals stay in sync with what's rendered.
   useEffect(() => {
-    loadSessions(1, selectedRunId, sessionPlatformFilter).catch(() => {});
+    loadSessions(1, selectedRunId, sessionPlatformFilter, sessionSubjectFilter, sessionDateRange).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionPlatformFilter]);
+  }, [sessionPlatformFilter, sessionSubjectFilter, sessionDateRange.start, sessionDateRange.end]);
 
   async function handleOpenChrome() {
     if (!selectedSource) return;
@@ -1091,6 +1258,10 @@ function App() {
       if (sessionAnalysis.data?.session?.id === sessionId) {
         await handleOpenSessionAnalysis(sessionAnalysis.data.session);
       }
+      // Phase 2 rewrites per-question time_sec from vPreviousTimeSpent, so the
+      // session-list aggregates can shift. Refresh the table so its avg_time
+      // matches the modal's freshly fetched value.
+      loadSessions(sessionPagination.page, selectedRunId, sessionPlatformFilter).catch(() => {});
     } catch (error) {
       setStatus({ message: formatRequestError(error), isError: true });
       setLastEnrichResult({
@@ -1105,8 +1276,38 @@ function App() {
     }
   }
 
+  // OPE-only: list the user's completed takes for the selected OPE so they can
+  // pick which take to scrape. Backend reads the Take # table on the OPE
+  // landing page via CDP.
+  async function loadOpeTakes() {
+    if (!selectedSource) return;
+    setIsLoadingOpeTakes(true);
+    setOpeTakesError('');
+    setOpeTakes([]);
+    setSelectedTakeIdx('');
+    try {
+      const result = await fetchJson(
+        `/api/ope/attempts?source=${encodeURIComponent(selectedSource)}&cdpUrl=${encodeURIComponent(DEFAULT_CDP_URL)}`,
+      );
+      const completed = (result.takes || []).filter((t) => t.status === 'completed' && t.hasReport);
+      setOpeTakes(completed);
+      // Auto-select the most recently completed take (last in the list per StartTest's row order).
+      if (completed.length) setSelectedTakeIdx(String(completed[completed.length - 1].takeIdx));
+    } catch (error) {
+      setOpeTakesError(error?.message || 'Failed to load takes.');
+    } finally {
+      setIsLoadingOpeTakes(false);
+    }
+  }
+
   async function handleScrape() {
     if (!selectedSource) return;
+    const currentPreset = sources.find((s) => s.id === selectedSource);
+    const isOpe = currentPreset?.platform === 'ope-mock';
+    if (isOpe && !selectedTakeIdx) {
+      setStatus({ message: 'Pick a take to scrape (Load Takes → choose one).', isError: true });
+      return;
+    }
     setIsScraping(true);
     setStatus({ message: 'Scrape running. Keep GMAT tab open until complete...', isError: false });
     try {
@@ -1118,6 +1319,7 @@ function App() {
           cdpUrl: DEFAULT_CDP_URL,
           scrapeWindow,
           customSince: scrapeWindow === 'custom' ? customSince : '',
+          ...(isOpe ? { takeIdx: Number(selectedTakeIdx) } : {}),
         }),
       });
       setSelectedRunId('');
@@ -1457,6 +1659,7 @@ function App() {
   const wrongCategoryRows = useMemo(() => {
     const counts = new Map();
     for (const row of sessionAnalysis.data?.slowWrongQuestions || []) {
+      if (Number(row?.correct) === 1) continue;
       const category = normalizedCategoryCode(row);
       counts.set(category, (counts.get(category) || 0) + 1);
     }
@@ -1469,6 +1672,136 @@ function App() {
     () => wrongCategoryRows.reduce((sum, row) => sum + Number(row?.mistakes || 0), 0),
     [wrongCategoryRows]
   );
+
+  const isOpeSession = useMemo(() => {
+    const src = String(sessionAnalysis.data?.session?.source || '');
+    return /official\s*practice\s*exam/i.test(src);
+  }, [sessionAnalysis.data?.session?.source]);
+
+  // Pacing thresholds for OPE pacing diagnostic.
+  // GMAT pacing rule of thumb: ~2:00/Q on Quant+Verbal, ~2:30/Q on DI.
+  // <60s wrong = "rushed"; >180s wrong = "stuck"; >180s correct = "burned".
+  const opeAnalysis = useMemo(() => {
+    if (!isOpeSession) return null;
+    const session = sessionAnalysis.data?.session;
+    const allQ = sessionAnalysis.data?.slowWrongQuestions || [];
+    const examMatch = String(session?.source || '').match(/practice\s*exam\s*(\d+)/i);
+    const examNumber = examMatch ? Number(examMatch[1]) : null;
+
+    const sectionDefs = [
+      { code: 'Q', name: 'Quant', scoreField: 'quant_score' },
+      { code: 'V', name: 'Verbal', scoreField: 'verbal_score' },
+      { code: 'DI', name: 'Data Insights', scoreField: 'di_score' },
+    ];
+    const sections = sectionDefs
+      .map(({ code, name, scoreField }) => {
+        const rows = allQ.filter((r) => r.subject_code === code);
+        const total = rows.length;
+        const correct = rows.filter((r) => Number(r.correct) === 1).length;
+        const wrong = total - correct;
+        const totalTime = rows.reduce((acc, r) => acc + (Number(r.time_sec) || 0), 0);
+        const avgTime = total ? totalTime / total : 0;
+        const accuracy = total ? (100 * correct) / total : null;
+        const rawScore = Number(session?.[scoreField]);
+        const score = Number.isFinite(rawScore) && rawScore >= 60 && rawScore <= 90 ? rawScore : null;
+        const rushedWrong = rows.filter((r) => Number(r.correct) === 0 && Number(r.time_sec) > 0 && Number(r.time_sec) < 60).length;
+        const stuckWrong = rows.filter((r) => Number(r.correct) === 0 && Number(r.time_sec) > 180).length;
+        const burnedCorrect = rows.filter((r) => Number(r.correct) === 1 && Number(r.time_sec) > 180).length;
+        return { code, name, total, correct, wrong, totalTime, avgTime, accuracy, score, rushedWrong, stuckWrong, burnedCorrect };
+      })
+      .filter((s) => s.total > 0);
+
+    const suggestions = [];
+    // Weakest section is keyed off the scaled score (60-90) when available,
+    // falling back to accuracy when scores haven't been scraped yet. Thresholds:
+    // < 75 is a real weakness (high priority); < 78 needs work (med priority).
+    const scored = sections.filter((s) => s.score != null);
+    if (scored.length) {
+      const weakest = [...scored].sort((a, b) => a.score - b.score)[0];
+      if (weakest.score < 78) {
+        const weakestRows = allQ.filter((r) => r.subject_code === weakest.code && Number(r.correct) === 0);
+        const topicCounts = new Map();
+        for (const r of weakestRows) {
+          const t = String(r.topic || '').trim() || 'Unknown';
+          topicCounts.set(t, (topicCounts.get(t) || 0) + 1);
+        }
+        const worstTopic = Array.from(topicCounts.entries()).sort((a, b) => b[1] - a[1])[0];
+        const isWeakness = weakest.score < 75;
+        suggestions.push({
+          priority: isWeakness ? 'high' : 'med',
+          title: isWeakness
+            ? `${weakest.name} is your weakest section`
+            : `${weakest.name} needs work`,
+          body: worstTopic
+            ? `Scaled score ${weakest.score}. ${worstTopic[0]} drove ${worstTopic[1]} mistake${worstTopic[1] === 1 ? '' : 's'} — drill that subcategory next.`
+            : `Scaled score ${weakest.score}. Review every miss in this section before your next mock.`,
+        });
+      }
+    } else {
+      const ranked = sections.filter((s) => s.accuracy != null).sort((a, b) => a.accuracy - b.accuracy);
+      const weakest = ranked[0];
+      if (weakest && weakest.accuracy < 75) {
+        const weakestRows = allQ.filter((r) => r.subject_code === weakest.code && Number(r.correct) === 0);
+        const topicCounts = new Map();
+        for (const r of weakestRows) {
+          const t = String(r.topic || '').trim() || 'Unknown';
+          topicCounts.set(t, (topicCounts.get(t) || 0) + 1);
+        }
+        const worstTopic = Array.from(topicCounts.entries()).sort((a, b) => b[1] - a[1])[0];
+        suggestions.push({
+          priority: 'high',
+          title: `${weakest.name} is your weakest section`,
+          body: worstTopic
+            ? `Accuracy ${weakest.accuracy.toFixed(1)}%. ${worstTopic[0]} drove ${worstTopic[1]} mistake${worstTopic[1] === 1 ? '' : 's'} — drill that subcategory next.`
+            : `Accuracy ${weakest.accuracy.toFixed(1)}%. Review every miss in this section before your next mock.`,
+        });
+      }
+    }
+
+    const totalRushed = sections.reduce((acc, s) => acc + s.rushedWrong, 0);
+    const totalStuck = sections.reduce((acc, s) => acc + s.stuckWrong, 0);
+    if (totalRushed >= 3) {
+      suggestions.push({
+        priority: 'med',
+        title: 'Rushed-and-wrong pattern',
+        body: `${totalRushed} answered in under 60s came back wrong. Slow the first 30s and re-read the prompt before committing.`,
+      });
+    }
+    if (totalStuck >= 3) {
+      suggestions.push({
+        priority: 'med',
+        title: 'Stuck-and-wrong pattern',
+        body: `${totalStuck} ran over 3:00 and still missed. Practice cut-loss decisions around the 2:30 mark.`,
+      });
+    }
+
+    const mistakeCounts = new Map();
+    for (const r of allQ) {
+      if (Number(r.correct) === 1) continue;
+      const tags = String(r.mistake_type || '').split(',').map((t) => t.trim()).filter(Boolean);
+      for (const t of tags) mistakeCounts.set(t, (mistakeCounts.get(t) || 0) + 1);
+    }
+    const topMistake = Array.from(mistakeCounts.entries()).sort((a, b) => b[1] - a[1])[0];
+    if (topMistake && topMistake[1] >= 2) {
+      suggestions.push({
+        priority: 'low',
+        title: `Recurring mistake: ${topMistake[0]}`,
+        body: `Tagged ${topMistake[1]} times across this exam. Pattern-train before the next practice block.`,
+      });
+    }
+
+    const completion = Number(session?.attempt_total || 0) / Number(session?.total_q_api || session?.attempt_total || 1);
+    if (completion < 0.95 && Number(session?.total_q_api || 0) > 0) {
+      const unanswered = Number(session?.total_q_api || 0) - Number(session?.attempt_total || 0);
+      suggestions.push({
+        priority: 'high',
+        title: 'Section ran out of time',
+        body: `${unanswered} question${unanswered === 1 ? '' : 's'} unanswered. Build a timing plan that reserves a guess for the last 90 seconds.`,
+      });
+    }
+
+    return { examNumber, sections, suggestions };
+  }, [isOpeSession, sessionAnalysis.data]);
 
   const sortedSessionAnalysisWrongQuestions = useMemo(() => {
     const rows = [...(sessionAnalysis.data?.slowWrongQuestions || [])];
@@ -1487,6 +1820,9 @@ function App() {
       if (key === 'difficulty') {
         valA = difficultyRank[String(valA || 'unknown').toLowerCase()] || 0;
         valB = difficultyRank[String(valB || 'unknown').toLowerCase()] || 0;
+      } else if (key === 'correct') {
+        valA = Number(valA) === 1 ? 1 : 0;
+        valB = Number(valB) === 1 ? 1 : 0;
       } else if (key === 'time_sec') {
         valA = Number.isFinite(Number(valA)) ? Number(valA) : -1;
         valB = Number.isFinite(Number(valB)) ? Number(valB) : -1;
@@ -1512,6 +1848,40 @@ function App() {
     return rows;
   }, [sessionAnalysis.data?.slowWrongQuestions, sessionAnalysisSort]);
 
+  const questionReviewNav = useMemo(() => {
+    const empty = { index: -1, total: 0, prev: null, next: null };
+    if (!questionReview.open || !questionReview.row) return empty;
+    const list = sortedSessionAnalysisWrongQuestions || [];
+    if (!list.length) return empty;
+    const currentId = questionReview.row.id;
+    const index = list.findIndex((r) => r?.id === currentId);
+    if (index < 0) return empty;
+    return {
+      index,
+      total: list.length,
+      prev: index > 0 ? list[index - 1] : null,
+      next: index < list.length - 1 ? list[index + 1] : null,
+    };
+  }, [questionReview.open, questionReview.row, sortedSessionAnalysisWrongQuestions]);
+
+  useEffect(() => {
+    if (!questionReview.open || annotation.open) return undefined;
+    function handleArrows(event) {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      const tag = String(event.target?.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || event.target?.isContentEditable) return;
+      if (event.key === 'ArrowRight' && questionReviewNav.next) {
+        event.preventDefault();
+        handleOpenQuestionReview(questionReviewNav.next);
+      } else if (event.key === 'ArrowLeft' && questionReviewNav.prev) {
+        event.preventDefault();
+        handleOpenQuestionReview(questionReviewNav.prev);
+      }
+    }
+    document.addEventListener('keydown', handleArrows);
+    return () => document.removeEventListener('keydown', handleArrows);
+  }, [questionReview.open, annotation.open, questionReviewNav]);
+
   const processedSessions = useMemo(() => {
     let list = sessions.map((session) => ({
       ...session,
@@ -1523,20 +1893,8 @@ function App() {
       completion_rate_pct: getSessionCompletionRate(session),
     }));
 
-    // Filter by subject
-    if (sessionSubjectFilter) {
-      list = list.filter((s) => normalizeSubjectCodeValue(s.subject) === sessionSubjectFilter);
-    }
-
-    // Filter by date range
-    if (sessionDateRange.start) {
-      const start = new Date(sessionDateRange.start).getTime();
-      list = list.filter((s) => new Date(s.session_date).getTime() >= start);
-    }
-    if (sessionDateRange.end) {
-      const end = new Date(sessionDateRange.end).getTime();
-      list = list.filter((s) => new Date(s.session_date).getTime() <= end);
-    }
+    // Subject + date filters are applied server-side via /api/sessions params,
+    // so the slice we get back is already filtered. Only local sort below.
 
     // Sort
     const { key, order } = sessionSort;
@@ -1558,7 +1916,7 @@ function App() {
     });
 
     return list;
-  }, [sessions, sessionSubjectFilter, sessionDateRange, sessionSort]);
+  }, [sessions, sessionSort]);
 
   function handleSessionSort(key) {
     setSessionSort((prev) => ({
@@ -1723,6 +2081,7 @@ function App() {
 
   function handleOpenAnnotation(row) {
     if (!row?.id) return;
+    setTagSearch('');
     setAnnotation({
       open: true,
       saving: false,
@@ -1734,6 +2093,7 @@ function App() {
   }
 
   function handleCloseAnnotation() {
+    setTagSearch('');
     setAnnotation({
       open: false,
       saving: false,
@@ -1803,6 +2163,14 @@ function App() {
               : row
           ),
         },
+      };
+    });
+
+    setQuestionReview((prev) => {
+      if (!prev?.row || prev.row.id !== updated.id) return prev;
+      return {
+        ...prev,
+        row: { ...prev.row, mistake_type: updated.mistake_type || '', notes: updated.notes || '' },
       };
     });
   }
@@ -1981,6 +2349,21 @@ function App() {
     }
   }
 
+  if (appMode === 'lsat') {
+    return (
+      <Suspense fallback={<RouteFallback />}>
+        <LsatPractice onExit={() => { window.location.hash = ''; }} />
+      </Suspense>
+    );
+  }
+  if (appMode === 'study-plan') {
+    return (
+      <Suspense fallback={<RouteFallback />}>
+        <StudyPlan onExit={() => { window.location.hash = ''; }} />
+      </Suspense>
+    );
+  }
+
   return (
     <main className="page-shell">
       <header className="top-bar">
@@ -1993,6 +2376,12 @@ function App() {
         <div className="top-bar-actions">
           <Button size="sm" type="button" onClick={() => setSyncCenterOpen(true)}>
             Sync Practice
+          </Button>
+          <Button variant="outline" size="sm" type="button" onClick={() => { window.location.hash = '#study-plan'; }}>
+            Study Plan
+          </Button>
+          <Button variant="outline" size="sm" type="button" onClick={() => { window.location.hash = '#lsat'; }}>
+            LSAT Practice
           </Button>
           <Button variant="outline" size="sm" asChild>
             <a
@@ -2019,16 +2408,22 @@ function App() {
         type="button"
         className={`coach-fab ${coachOpen ? 'coach-fab--open' : ''}`}
         onClick={() => setCoachOpen((v) => !v)}
-        aria-label={coachOpen ? 'Close AI Coach' : 'Open AI Coach'}
+        aria-label={coachOpen ? 'Close Tutor' : 'Open Tutor'}
       >
-        {coachOpen ? '\u2715' : '\uD83E\uDD16'}
+        {coachOpen ? (
+          '\u2715'
+        ) : (
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+          </svg>
+        )}
       </button>
 
-      {/* AI Coach floating panel */}
-      <div className={`coach-panel ${coachOpen ? 'coach-panel--open' : ''}`} role="dialog" aria-label="AI Coach" aria-modal={coachOpen} inert={coachOpen ? undefined : ''}>
+      {/* Tutor floating panel */}
+      <div className={`coach-panel ${coachOpen ? 'coach-panel--open' : ''}`} role="dialog" aria-label="Tutor" aria-modal={coachOpen} inert={coachOpen ? undefined : ''}>
         <div className="coach-panel-header">
           <div className="coach-panel-title">
-            <span className="coach-panel-badge">AI Coach</span>
+            <span className="coach-panel-badge">Tutor</span>
             <span className="coach-panel-scope">{aiScopeLabel}</span>
           </div>
           <div className="coach-panel-actions">
@@ -2185,7 +2580,7 @@ function App() {
 
       {coachOpen && <div className="coach-backdrop" onClick={() => setCoachOpen(false)} />}
 
-      <Card id="dashboard" className="card topic-dashboard">
+      <section id="dashboard" className="page-section topic-dashboard">
         <div className="section-header">
           <h2>Performance by Subject</h2>
           <button
@@ -2225,9 +2620,9 @@ function App() {
             })}
           </div>
         )}
-      </Card>
+      </section>
 
-      <Card id="categories" className="card">
+      <section id="categories" className="page-section">
         <div className="section-header">
           <h2>Category Breakdown</h2>
           <div className="section-header-actions">
@@ -2401,9 +2796,9 @@ function App() {
             </table>
           </div>
         )}
-      </Card>
+      </section>
 
-      <Card id="sessions" className="card">
+      <section id="sessions" className="page-section">
         <div className="section-header-filters">
           <h2>Performance by Session</h2>
           <div className="filter-row session-filters">
@@ -2414,7 +2809,10 @@ function App() {
             >
               <option value="">All sources</option>
               <option value="starttest">Official Guide</option>
+              <option value="ope-mock">Practice Exam</option>
               <option value="gmatclub">GMAT Club</option>
+              <option value="ttp">Target Test Prep</option>
+              <option value="lsat">LSAT</option>
             </Select>
             <Select
               className="filter-select"
@@ -2425,6 +2823,8 @@ function App() {
               <option value="Q">Quant</option>
               <option value="V">Verbal</option>
               <option value="DI">Data Insights</option>
+              <option value="RC">RC (LSAT)</option>
+              <option value="CR">CR (LSAT)</option>
             </Select>
             <div className="date-filter-group">
               <Input
@@ -2493,7 +2893,10 @@ function App() {
                   {processedSessions.map((row) => (
                     <tr key={`${row.session_external_id}-${row.run_id}`}>
                       <td>{formatDate(row.session_date)}</td>
-                      <td><SourceBadge source={row.source} /></td>
+                      <td>
+                        <SourceBadge source={row.source} />
+                        <ScoreChip row={row} />
+                      </td>
                       <td className="section-col"><SubjectCell row={row} /></td>
                       <td>{formatMaybe(row.question_count_display)}</td>
                       <td>{formatMaybe(row.error_count_display)}</td>
@@ -2510,7 +2913,7 @@ function App() {
                           type="button"
                           onClick={() => handleOpenSessionAnalysis(row)}
                         >
-                          Read more
+                          Open
                         </Button>
                       </td>
                     </tr>
@@ -2541,9 +2944,9 @@ function App() {
             </div>
           </>
         )}
-      </Card>
+      </section>
 
-      <Card id="errors" className="card">
+      <section id="errors" className="page-section">
         <div className="section-header">
           <h2>Error Log</h2>
           <button
@@ -2558,156 +2961,246 @@ function App() {
         </div>
         {!collapsedSections.errorLog && (
           <>
-            <div className="filter-row">
-                <Select
-                  value={filters.platform}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, platform: event.target.value }))}
-                >
-                  <option value="">All sources</option>
-                  <option value="starttest">Official Guide</option>
-                  <option value="gmatclub">GMAT Club</option>
-                </Select>
-                <Select
-                  value={filters.subject}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, subject: event.target.value }))}
-                >
-                  <option value="">All subjects</option>
-                  <option value="Q">Quant</option>
-                  <option value="V">Verbal</option>
-                  <option value="DI">Data Insights</option>
-                </Select>
-                <Select
-                  value={filters.difficulty}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, difficulty: event.target.value }))}
-                >
-                  <option value="">All difficulty</option>
-                  <option value="Hard">Hard</option>
-                  <option value="Medium">Medium</option>
-                  <option value="Easy">Easy</option>
-                  <option value="Unknown">Unknown</option>
-                </Select>
-                <Select
-                  value={filters.confidence}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, confidence: event.target.value }))}
-                >
-                  <option value="">All confidence</option>
-                  <option value="high">high</option>
-                  <option value="medium">medium</option>
-                  <option value="low">low</option>
-                  <option value="not selected">not selected</option>
-                </Select>
-                <Input
-                  placeholder="Search subcategory, Q Code, or stem..."
-                  value={filters.search}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))}
-                />
-                <Select
-                  value={filters.mistakeTag}
-                  onChange={(event) => setFilters((prev) => ({ ...prev, mistakeTag: event.target.value }))}
-                >
-                  <option value="">All mistake tags</option>
-                  {ALL_MISTAKE_TAGS.map((tag) => (
-                    <option key={tag} value={tag}>{tag}</option>
-                  ))}
-                </Select>
-                {(filters.subject || filters.difficulty || filters.confidence || filters.search || filters.mistakeTag || filters.platform) && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setFilters({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' })}
-                  >
-                    Clear
-                  </Button>
-                )}
-            </div>
+            {(() => {
+              const advancedActiveCount =
+                (filters.difficulty ? 1 : 0) +
+                (filters.confidence ? 1 : 0) +
+                (filters.mistakeTag ? 1 : 0);
+              const anyActive =
+                filters.subject || filters.difficulty || filters.confidence ||
+                filters.search || filters.mistakeTag || filters.platform;
+              return (
+                <div className="error-filter-bar">
+                  <div className="error-filter-primary">
+                    <Select
+                      className="filter-select"
+                      value={filters.platform}
+                      onChange={(event) => setFilters((prev) => ({ ...prev, platform: event.target.value }))}
+                    >
+                      <option value="">All sources</option>
+                      <option value="starttest">Official Guide</option>
+                      <option value="gmatclub">GMAT Club</option>
+                      <option value="ttp">Target Test Prep</option>
+                      <option value="lsat">LSAT</option>
+                    </Select>
+                    <Select
+                      className="filter-select"
+                      value={filters.subject}
+                      onChange={(event) => setFilters((prev) => ({ ...prev, subject: event.target.value }))}
+                    >
+                      <option value="">All subjects</option>
+                      <option value="Q">Quant</option>
+                      <option value="V">Verbal</option>
+                      <option value="DI">Data Insights</option>
+                      <option value="RC">RC (LSAT)</option>
+                      <option value="CR">CR (LSAT)</option>
+                    </Select>
+                    <Input
+                      className="error-filter-search"
+                      placeholder="Search subcategory, Q Code, or stem..."
+                      value={filters.search}
+                      onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))}
+                    />
+                    <button
+                      type="button"
+                      className={`error-filter-more${errorFiltersOpen ? ' is-open' : ''}${advancedActiveCount ? ' has-active' : ''}`}
+                      onClick={() => setErrorFiltersOpen((v) => !v)}
+                      aria-expanded={errorFiltersOpen}
+                    >
+                      More filters{advancedActiveCount ? ` (${advancedActiveCount})` : ''}
+                    </button>
+                    {anyActive && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          setFilters({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' });
+                          setErrorFiltersOpen(false);
+                        }}
+                      >
+                        Clear
+                      </Button>
+                    )}
+                  </div>
+                  {errorFiltersOpen && (
+                    <div className="error-filter-secondary">
+                      <Select
+                        className="filter-select"
+                        value={filters.difficulty}
+                        onChange={(event) => setFilters((prev) => ({ ...prev, difficulty: event.target.value }))}
+                      >
+                        <option value="">All difficulty</option>
+                        <option value="Hard">Hard</option>
+                        <option value="Medium">Medium</option>
+                        <option value="Easy">Easy</option>
+                        <option value="Unknown">Unknown</option>
+                      </Select>
+                      <Select
+                        className="filter-select"
+                        value={filters.confidence}
+                        onChange={(event) => setFilters((prev) => ({ ...prev, confidence: event.target.value }))}
+                      >
+                        <option value="">All confidence</option>
+                        <option value="high">high</option>
+                        <option value="medium">medium</option>
+                        <option value="low">low</option>
+                        <option value="not selected">not selected</option>
+                      </Select>
+                      <Select
+                        className="filter-select"
+                        value={filters.mistakeTag}
+                        onChange={(event) => setFilters((prev) => ({ ...prev, mistakeTag: event.target.value }))}
+                      >
+                        <option value="">All mistake tags</option>
+                        {ALL_MISTAKE_TAGS.map((tag) => (
+                          <option key={tag} value={tag}>{tag}</option>
+                        ))}
+                      </Select>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="table-wrap error-log-table-wrap">
               <table className="review-table error-log-table">
                 <thead>
                   <tr>
-                    <th className="sortable" onClick={() => handleErrorSort('session_date')}>Date {sortIndicator(errorSort, 'session_date')}</th>
-                    <th className="sortable" onClick={() => handleErrorSort('source')}>Source {sortIndicator(errorSort, 'source')}</th>
+                    <th className="sortable err-col-date" onClick={() => handleErrorSort('session_date')}>Date {sortIndicator(errorSort, 'session_date')}</th>
                     <th className="sortable section-col" onClick={() => handleErrorSort('subject')}>Subject {sortIndicator(errorSort, 'subject')}</th>
-                    <th className="category-col">Category</th>
                     <th className="sortable topic-col" onClick={() => handleErrorSort('topic')}>Subcategory {sortIndicator(errorSort, 'topic')}</th>
-                    <th className="sortable" onClick={() => handleErrorSort('difficulty')}>Difficulty {sortIndicator(errorSort, 'difficulty')}</th>
-                    <th className="sortable" onClick={() => handleErrorSort('q_code')}>Q Code {sortIndicator(errorSort, 'q_code')}</th>
-                    <th className="response-col">Response</th>
-                    <th>Redo</th>
-                    <th className="sortable" onClick={() => handleErrorSort('time_sec')}>Time (min:sec) {sortIndicator(errorSort, 'time_sec')}</th>
-                    <th className="sortable" onClick={() => handleErrorSort('mistake_type')}>Mistake Type {sortIndicator(errorSort, 'mistake_type')}</th>
-                    <th className="notes-col">Notes</th>
-                    <th className="action-col annotate-col">Annotate</th>
-                    <th className="action-col open-col">Review</th>
+                    <th className="sortable" onClick={() => handleErrorSort('difficulty')}>Diff {sortIndicator(errorSort, 'difficulty')}</th>
+                    <th className="sortable" onClick={() => handleErrorSort('time_sec')}>Time {sortIndicator(errorSort, 'time_sec')}</th>
+                    <th className="sortable" onClick={() => handleErrorSort('mistake_type')}>Mistake Tags {sortIndicator(errorSort, 'mistake_type')}</th>
+                    <th className="action-col">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {errors.length === 0 && (
                     <tr>
-                      <td colSpan="14">No errors match the current filters. Try adjusting or clearing the filters above.</td>
+                      <td colSpan="7">No errors match the current filters. Try adjusting or clearing the filters above.</td>
                     </tr>
                   )}
-                  {errors.map((row) => (
-                    <tr key={row.id}>
-                      <td>{formatDate(row.session_date)}</td>
-                      <td><SourceBadge source={row.source} /></td>
-                      <td className="section-col"><SubjectCell row={row} /></td>
-                      <td className="category-col">{formatMaybe(normalizedCategoryCode(row))}</td>
-                      <td className="topic-col">{formatMaybe(normalizedSubcategory(row))}</td>
-                      <td>{formatMaybe(row.difficulty)}</td>
-                      <td>{formatMaybe(row.q_code)}</td>
-                      <td className="response-col"><ResponseCell row={row} /></td>
-                      <td className="redo-col">
-                        {Number(row.corrected_later || 0) === 1 ? (
-                          <Badge variant="success" className="redo-pill">
-                            Corrected
-                          </Badge>
-                        ) : (
-                          <span className="muted">Not yet</span>
-                        )}
-                      </td>
-                      <td>{formatDurationSeconds(row.time_sec)}</td>
-                      <td className="mistake-tags-cell">
-                        {parseMistakeTags(row.mistake_type).length > 0
-                          ? parseMistakeTags(row.mistake_type).map((tag) => (
-                              <span key={tag} className="mistake-tag-pill">{tag}</span>
-                            ))
-                          : <span className="muted">-</span>}
-                      </td>
-                      <td className="notes-cell notes-col" title={row.notes || ''}>
-                        {formatNotePreview(row.notes)}
-                      </td>
-                      <td className="action-col annotate-col">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="readmore-btn"
-                          type="button"
-                          onClick={() => handleOpenAnnotation(row)}
+                  {errors.map((row) => {
+                    const isExpanded = expandedErrorId === row.id;
+                    const platform = getSourcePlatform(row.source);
+                    const tags = parseMistakeTags(row.mistake_type);
+                    const hasNotes = !!(row.notes && String(row.notes).trim());
+                    const canReview = hasScrapedQuestionContent(row) || row.question_url;
+                    return (
+                      <Fragment key={row.id}>
+                        <tr
+                          className={`error-row${isExpanded ? ' error-row--expanded' : ''}`}
+                          onClick={(event) => {
+                            if (event.target.closest('button, a')) return;
+                            setExpandedErrorId(isExpanded ? null : row.id);
+                          }}
                         >
-                          Annotate
-                        </Button>
-                      </td>
-                      <td className="action-col open-col">
-                        {hasScrapedQuestionContent(row) || row.question_url ? (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            type="button"
-                            className="readmore-btn"
-                            onClick={() => handleQuestionAction(row, 'error-log')}
-                            disabled={openingQuestionKey === questionOpenKey(row, 'error-log')}
-                          >
-                            {openingQuestionKey === questionOpenKey(row, 'error-log')
-                              ? 'Opening...'
-                              : formatQuestionActionLabel(row)}
-                          </Button>
-                        ) : (
-                          <span className="muted">-</span>
+                          <td className="err-col-date">
+                            <span className="err-col-date-inner">
+                              <button
+                                type="button"
+                                className="error-row-toggle"
+                                aria-expanded={isExpanded}
+                                aria-label={isExpanded ? 'Collapse details' : 'Expand details'}
+                                onClick={(event) => { event.stopPropagation(); setExpandedErrorId(isExpanded ? null : row.id); }}
+                              >
+                                {isExpanded ? '−' : '+'}
+                              </button>
+                              {platform && <span className={`source-dot source-dot--${platform}`} title={row.source || ''} aria-hidden="true" />}
+                              <span className="err-date-text">{formatDate(row.session_date)}</span>
+                            </span>
+                          </td>
+                          <td className="section-col"><SubjectCell row={row} /></td>
+                          <td className="topic-col">{formatMaybe(normalizedSubcategory(row))}</td>
+                          <td>
+                            {row.difficulty ? (
+                              <span className={`difficulty-chip difficulty-chip--${String(row.difficulty).toLowerCase()}`}>
+                                {row.difficulty}
+                                {row.difficulty_theta != null && (
+                                  <span className="difficulty-chip__theta">{Number(row.difficulty_theta).toFixed(2)}</span>
+                                )}
+                              </span>
+                            ) : <span className="muted">-</span>}
+                          </td>
+                          <td>{formatDurationSeconds(row.time_sec)}</td>
+                          <td className="mistake-tags-cell">
+                            {tags.length > 0
+                              ? tags.map((tag) => (
+                                  <span key={tag} className="mistake-tag-pill">{tag}</span>
+                                ))
+                              : <span className="muted">-</span>}
+                            {hasNotes && <span className="err-notes-marker" title="Has notes" aria-label="Has notes">●</span>}
+                          </td>
+                          <td className="action-col">
+                            <div className="error-row-actions">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="readmore-btn"
+                                type="button"
+                                onClick={() => handleOpenAnnotation(row)}
+                              >
+                                Note
+                              </Button>
+                              {canReview ? (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  type="button"
+                                  className="readmore-btn"
+                                  onClick={() => handleQuestionAction(row, 'error-log')}
+                                  disabled={openingQuestionKey === questionOpenKey(row, 'error-log')}
+                                >
+                                  {openingQuestionKey === questionOpenKey(row, 'error-log')
+                                    ? '...'
+                                    : formatQuestionActionLabel(row)}
+                                </Button>
+                              ) : null}
+                            </div>
+                          </td>
+                        </tr>
+                        {isExpanded && (
+                          <tr className="error-expand-row">
+                            <td colSpan="7">
+                              <div className="error-expand-grid">
+                                <div className="error-expand-field">
+                                  <span>Source</span>
+                                  <SourceBadge source={row.source} />
+                                </div>
+                                <div className="error-expand-field">
+                                  <span>Category</span>
+                                  <strong>{formatMaybe(normalizedCategoryCode(row))}</strong>
+                                </div>
+                                <div className="error-expand-field">
+                                  <span>Q Code</span>
+                                  <strong>{formatMaybe(row.q_code)}</strong>
+                                </div>
+                                <div className="error-expand-field error-expand-response">
+                                  <span>Response</span>
+                                  <ResponseCell row={row} />
+                                </div>
+                                <div className="error-expand-field">
+                                  <span>Redo</span>
+                                  {Number(row.corrected_later || 0) === 1 ? (
+                                    <Badge variant="success" className="redo-pill">Corrected</Badge>
+                                  ) : (
+                                    <span className="muted">Not yet</span>
+                                  )}
+                                </div>
+                                {hasNotes && (
+                                  <div className="error-expand-field error-expand-notes">
+                                    <span>Notes</span>
+                                    <p>{row.notes}</p>
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
                         )}
-                      </td>
-                    </tr>
-                  ))}
+                      </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -2734,7 +3227,7 @@ function App() {
             </div>
           </>
         )}
-      </Card>
+      </section>
 
       {syncCenterOpen && (
         <div
@@ -2766,6 +3259,38 @@ function App() {
                       ))}
                     </Select>
                   </label>
+                  {sources.find((s) => s.id === selectedSource)?.platform === 'ope-mock' && (
+                    <label>
+                      Take to scrape
+                      <div className="action-row" style={{ gap: '8px', alignItems: 'stretch' }}>
+                        <Select
+                          value={selectedTakeIdx}
+                          onChange={(e) => setSelectedTakeIdx(e.target.value)}
+                          disabled={!opeTakes.length}
+                          style={{ flex: 1 }}
+                        >
+                          {!opeTakes.length && <option value="">(Load takes first)</option>}
+                          {opeTakes.map((t) => (
+                            <option key={t.takeIdx} value={String(t.takeIdx)}>
+                              Take #{t.takeIdx} — {t.completedAt || t.completedAtText || 'unknown date'}
+                            </option>
+                          ))}
+                        </Select>
+                        <Button
+                          variant="outline"
+                          type="button"
+                          disabled={isLoadingOpeTakes || !selectedSource}
+                          onClick={loadOpeTakes}
+                          title="Read the Take # table from the OPE landing page in your Chrome tab"
+                        >
+                          {isLoadingOpeTakes ? 'Loading...' : 'Load Takes'}
+                        </Button>
+                      </div>
+                      {opeTakesError && (
+                        <span style={{ color: '#b91c1c', fontSize: '0.85em' }}>{opeTakesError}</span>
+                      )}
+                    </label>
+                  )}
                   <label>
                     Scrape Period
                     <Select value={scrapeWindow} onChange={(e) => setScrapeWindow(e.target.value)}>
@@ -2808,7 +3333,12 @@ function App() {
                     )}
                     <Button
                       type="button"
-                      disabled={isScraping || !selectedSource || (scrapeWindow === 'custom' && !customSince)}
+                      disabled={
+                        isScraping
+                        || !selectedSource
+                        || (scrapeWindow === 'custom' && !customSince)
+                        || (sources.find((s) => s.id === selectedSource)?.platform === 'ope-mock' && !selectedTakeIdx)
+                      }
                       onClick={handleScrape}
                     >
                       {isScraping ? 'Scraping...' : 'Run Scrape + Save to DB'}
@@ -3004,6 +3534,9 @@ function App() {
                 {sessionAnalysis.data?.session?.source && (
                   <SourceBadge source={sessionAnalysis.data.session.source} />
                 )}
+                {sessionAnalysis.data?.session && (
+                  <ScoreChip row={sessionAnalysis.data.session} />
+                )}
               </div>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                 {sessionAnalysis.data?.session && sources.some((s) => s.label === sessionAnalysis.data.session.source && (s.platform === 'starttest' || s.platform === 'gmatclub')) && (
@@ -3015,6 +3548,17 @@ function App() {
                     title="Phase 2: deep-enrich this session by visiting each question's page. Long-running; keep the matching tab open."
                   >
                     {isEnriching ? 'Enriching…' : 'Enrich Phase 2'}
+                  </Button>
+                )}
+                {sessionAnalysis.data?.session && sources.some((s) => s.label === sessionAnalysis.data.session.source && s.platform === 'ope-mock') && (
+                  <Button
+                    variant="outline"
+                    type="button"
+                    disabled={isEnriching}
+                    onClick={() => handleEnrichSession(sessionAnalysis.data.session.id)}
+                    title="Phase 3: deep-enrich this OPE mock by walking the Score Report popup item-by-item. Long-running (~3 min). Open the OPE landing page in Chrome and click 'View score report' for this take FIRST; leave the popup on the Score Card. Do not click anything inside the popup."
+                  >
+                    {isEnriching ? 'Enriching…' : 'Enrich Phase 3 (OPE)'}
                   </Button>
                 )}
                 <Button variant="outline" type="button" onClick={handleCloseSessionAnalysis}>
@@ -3037,29 +3581,142 @@ function App() {
 
             {!sessionAnalysis.loading && !sessionAnalysis.error && sessionAnalysis.data?.session && (
               <>
-                <div className="session-stats-primary">
-                  <div className="session-stat-hero">
-                    <span>Accuracy</span>
-                    <strong>{formatPercent(getSessionAnsweredAccuracy(sessionAnalysis.data.session))}</strong>
+                {isOpeSession && opeAnalysis ? (
+                  <div className="ope-exam-panel">
+                    <header className="ope-exam-id">
+                      <div className="ope-exam-id-text">
+                        <span className="ope-exam-eyebrow">GMAT Official Practice Exam</span>
+                        <span className="ope-exam-number">
+                          {opeAnalysis.examNumber != null ? `#${opeAnalysis.examNumber}` : '—'}
+                        </span>
+                        {sessionAnalysis.data.session.session_date && (
+                          <span className="ope-exam-taken">
+                            Taken {formatIsoDate(sessionAnalysis.data.session.session_date)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="ope-score-chart" role="img" aria-label="Scaled scores">
+                        {/* Horizontal bars stacked vertically: Total (205-805) on top,
+                            then Quant / Verbal / DI (each 60-90). Bar fill = (score-min)/(max-min).
+                            Target reference: 705 total, 80 per section. */}
+                        {[
+                          { code: 'Total', name: 'Total', field: 'total_score', min: 205, max: 805, target: 705 },
+                          { code: 'Q', name: 'Quant', field: 'quant_score', min: 60, max: 90, target: 80 },
+                          { code: 'V', name: 'Verbal', field: 'verbal_score', min: 60, max: 90, target: 80 },
+                          { code: 'DI', name: 'Data Insights', field: 'di_score', min: 60, max: 90, target: 80 },
+                        ].map(({ code, name, field, min, max, target }) => {
+                          const raw = sessionAnalysis.data?.session?.[field];
+                          const score = Number(raw);
+                          const hasScore = Number.isFinite(score) && score >= min && score <= max;
+                          const pct = hasScore ? ((score - min) / (max - min)) * 100 : 0;
+                          const targetPct = ((target - min) / (max - min)) * 100;
+                          const isTotal = code === 'Total';
+                          return (
+                            <div
+                              key={code}
+                              className={`ope-score-row section-${code}${hasScore ? '' : ' is-empty'}${isTotal ? ' is-total' : ''}`}
+                            >
+                              <span className="ope-score-row-label">{name}</span>
+                              <div className="ope-score-row-track">
+                                <div className="ope-score-row-fill" style={{ width: `${pct}%` }} />
+                                <div
+                                  className="ope-score-row-target"
+                                  style={{ left: `${targetPct}%` }}
+                                  aria-hidden="true"
+                                  title={`Target ${target}`}
+                                />
+                                <span className="ope-score-row-scale" aria-hidden="true">
+                                  {min}–{max}
+                                </span>
+                              </div>
+                              <span className="ope-score-row-value">{hasScore ? score : '—'}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </header>
+
+                    <div className="ope-section-scoreboard">
+                      {opeAnalysis.sections.map((sec) => (
+                        <article key={sec.code} className={`ope-section-card section-${sec.code}`}>
+                          <header>
+                            <span className="ope-section-name">{sec.name}</span>
+                            <span className="ope-section-count">{sec.correct}/{sec.total}</span>
+                          </header>
+                          <div className="ope-section-accuracy">
+                            {sec.accuracy != null ? sec.accuracy.toFixed(1) : '—'}
+                            <small>%</small>
+                          </div>
+                          <dl className="ope-section-meta">
+                            <div><dt>Total time</dt><dd>{formatDurationSeconds(sec.totalTime)}</dd></div>
+                            <div><dt>Avg / Q</dt><dd>{formatDurationSeconds(sec.avgTime)}</dd></div>
+                            <div><dt>Wrong</dt><dd>{sec.wrong}</dd></div>
+                          </dl>
+                          <div className="ope-section-pacing">
+                            {sec.rushedWrong > 0 && (
+                              <span className="pacing-pill pacing-rushed" title="Wrong, answered in under 60s">
+                                {sec.rushedWrong} rushed
+                              </span>
+                            )}
+                            {sec.stuckWrong > 0 && (
+                              <span className="pacing-pill pacing-stuck" title="Wrong, took over 3:00">
+                                {sec.stuckWrong} stuck
+                              </span>
+                            )}
+                            {sec.burnedCorrect > 0 && (
+                              <span className="pacing-pill pacing-burned" title="Correct but took over 3:00">
+                                {sec.burnedCorrect} burned
+                              </span>
+                            )}
+                            {!sec.rushedWrong && !sec.stuckWrong && !sec.burnedCorrect && (
+                              <span className="pacing-pill pacing-clean">clean pacing</span>
+                            )}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+
+                    {opeAnalysis.suggestions.length > 0 && (
+                      <section className="ope-suggestions">
+                        <h3>Next steps</h3>
+                        <ol>
+                          {opeAnalysis.suggestions.map((s, i) => (
+                            <li key={i} className={`ope-suggestion priority-${s.priority}`}>
+                              <strong>{s.title}</strong>
+                              <span>{s.body}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </section>
+                    )}
                   </div>
-                  <div className="session-stat-hero">
-                    <span>Questions</span>
-                    <strong>{formatMaybe(getSessionQuestionCount(sessionAnalysis.data.session))}</strong>
-                  </div>
-                  <div className="session-stat-hero">
-                    <span>Avg Time</span>
-                    <strong>{formatDurationSeconds(sessionAnalysis.data.session.avg_time_sec)}</strong>
-                  </div>
-                </div>
-                <div className="session-stats-secondary">
-                  <span>{formatDate(sessionAnalysis.data.session.session_date)}</span>
-                  <span>{formatMaybe(normalizeSubjectCodeValue(sessionAnalysis.data.session.subject))}</span>
-                  <span>Completion {formatPercent(getSessionCompletionRate(sessionAnalysis.data.session))}</span>
-                  <span>Unanswered {formatMaybe(getSessionUnansweredCount(sessionAnalysis.data.session))}</span>
-                  <span>Correct avg {formatDurationSeconds(sessionAnalysis.data.session.avg_correct_time_sec)}</span>
-                  <span>Wrong avg {formatDurationSeconds(sessionAnalysis.data.session.avg_incorrect_time_sec)}</span>
-                  <span>ID {formatMaybe(sessionAnalysis.data.session.session_external_id)}</span>
-                </div>
+                ) : (
+                  <>
+                    <div className="session-stats-primary">
+                      <div className="session-stat-hero">
+                        <span>Accuracy</span>
+                        <strong>{formatPercent(getSessionAnsweredAccuracy(sessionAnalysis.data.session))}</strong>
+                      </div>
+                      <div className="session-stat-hero">
+                        <span>Questions</span>
+                        <strong>{formatMaybe(getSessionQuestionCount(sessionAnalysis.data.session))}</strong>
+                      </div>
+                      <div className="session-stat-hero">
+                        <span>Avg Time</span>
+                        <strong>{formatDurationSeconds(sessionAnalysis.data.session.avg_time_sec)}</strong>
+                      </div>
+                    </div>
+                    <div className="session-stats-secondary">
+                      <span>{formatDate(sessionAnalysis.data.session.session_date)}</span>
+                      <span>{formatMaybe(normalizeSubjectCodeValue(sessionAnalysis.data.session.subject))}</span>
+                      <span>Completion {formatPercent(getSessionCompletionRate(sessionAnalysis.data.session))}</span>
+                      <span>Unanswered {formatMaybe(getSessionUnansweredCount(sessionAnalysis.data.session))}</span>
+                      <span>Correct avg {formatDurationSeconds(sessionAnalysis.data.session.avg_correct_time_sec)}</span>
+                      <span>Wrong avg {formatDurationSeconds(sessionAnalysis.data.session.avg_incorrect_time_sec)}</span>
+                      <span>ID {formatMaybe(sessionAnalysis.data.session.session_external_id)}</span>
+                    </div>
+                  </>
+                )}
 
                 <div className="analysis-block">
                   <h3>Difficulty Breakdown</h3>
@@ -3139,11 +3796,12 @@ function App() {
                 </div>
 
                 <div className="analysis-block">
-                  <h3>{`All Wrong Questions (${sortedSessionAnalysisWrongQuestions.length})`}</h3>
+                  <h3>{`All Questions (${sortedSessionAnalysisWrongQuestions.length})`}</h3>
                   <div className="table-wrap session-analysis-questions-wrap">
                     <table className="review-table session-analysis-questions-table">
                       <thead>
                         <tr>
+                          <th className="result-col sortable" onClick={() => handleSessionAnalysisSort('correct')}>Result {sortIndicator(sessionAnalysisSort, 'correct')}</th>
                           <th className="section-col">Subject</th>
                           <th className="category-col">Category</th>
                           <th className="sortable topic-col" onClick={() => handleSessionAnalysisSort('topic')}>Subcategory {sortIndicator(sessionAnalysisSort, 'topic')}</th>
@@ -3153,39 +3811,43 @@ function App() {
                           <th className="sortable" onClick={() => handleSessionAnalysisSort('time_sec')}>Time {sortIndicator(sessionAnalysisSort, 'time_sec')}</th>
                           <th className="sortable" onClick={() => handleSessionAnalysisSort('mistake_type')}>Mistake Type {sortIndicator(sessionAnalysisSort, 'mistake_type')}</th>
                           <th className="sortable notes-col" onClick={() => handleSessionAnalysisSort('notes')}>Notes {sortIndicator(sessionAnalysisSort, 'notes')}</th>
-                          <th className="action-col annotate-col">Annotate</th>
-                          <th className="action-col open-col">Open</th>
+                          <th className="action-col open-col">Review</th>
                         </tr>
                       </thead>
                       <tbody>
                         {!sessionAnalysis.data.slowWrongQuestions?.length && (
                           <tr>
-                            <td colSpan="11">All questions were answered correctly in this session.</td>
+                            <td colSpan="11">No answered questions in this session.</td>
                           </tr>
                         )}
-                        {sortedSessionAnalysisWrongQuestions.map((row, idx) => (
-                          <tr key={`${row.q_code || 'q'}-${idx}`}>
+                        {sortedSessionAnalysisWrongQuestions.map((row, idx) => {
+                          const isCorrect = Number(row?.correct) === 1;
+                          return (
+                          <tr key={`${row.q_code || 'q'}-${idx}`} className={isCorrect ? 'row-correct' : 'row-wrong'}>
+                            <td className="result-col">
+                              <span className={`result-pill ${isCorrect ? 'result-correct' : 'result-wrong'}`}>
+                                {isCorrect ? 'Correct' : 'Wrong'}
+                              </span>
+                            </td>
                             <td className="section-col"><SubjectCell row={row} /></td>
                             <td className="category-col">{formatMaybe(normalizedCategoryCode(row))}</td>
                             <td className="topic-col">{formatMaybe(normalizedSubcategory(row))}</td>
-                            <td>{formatMaybe(row.difficulty)}</td>
+                            <td>
+                              {row.difficulty ? (
+                                <span className={`difficulty-chip difficulty-chip--${String(row.difficulty).toLowerCase()}`}>
+                                  {row.difficulty}
+                                  {row.difficulty_theta != null && (
+                                    <span className="difficulty-chip__theta">{Number(row.difficulty_theta).toFixed(2)}</span>
+                                  )}
+                                </span>
+                              ) : <span className="muted">-</span>}
+                            </td>
                             <td>{formatMaybe(row.q_code)}</td>
                             <td className="response-col"><ResponseCell row={row} /></td>
                             <td>{formatDurationSeconds(row.time_sec)}</td>
                             <td>{formatMaybe(row.mistake_type)}</td>
                             <td className="notes-cell notes-col" title={row.notes || ''}>
                               {formatNotePreview(row.notes)}
-                            </td>
-                            <td className="action-col annotate-col">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="readmore-btn"
-                                type="button"
-                                onClick={() => handleOpenAnnotation(row)}
-                              >
-                                Annotate
-                              </Button>
                             </td>
                             <td className="action-col open-col">
                               {hasScrapedQuestionContent(row) || row.question_url ? (
@@ -3206,7 +3868,8 @@ function App() {
                               )}
                             </td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -3231,6 +3894,31 @@ function App() {
               <div className="analysis-header">
                 <h2>{questionReview.row.q_code ? `Question ${questionReview.row.q_code}` : 'Question Review'}</h2>
                 <div className="analysis-actions">
+                  {questionReviewNav.total > 1 && (
+                    <div className="question-review-nav">
+                      <Button
+                        variant="outline"
+                        type="button"
+                        onClick={() => handleOpenQuestionReview(questionReviewNav.prev)}
+                        disabled={!questionReviewNav.prev}
+                        aria-label="Previous question"
+                      >
+                        ← Prev
+                      </Button>
+                      <span className="question-review-nav-counter">
+                        {`${questionReviewNav.index + 1} / ${questionReviewNav.total}`}
+                      </span>
+                      <Button
+                        variant="outline"
+                        type="button"
+                        onClick={() => handleOpenQuestionReview(questionReviewNav.next)}
+                        disabled={!questionReviewNav.next}
+                        aria-label="Next question"
+                      >
+                        Next →
+                      </Button>
+                    </div>
+                  )}
                   {canonicalQuestionUrl(questionReview.row) ? (
                     <Button
                       variant="outline"
@@ -3308,6 +3996,19 @@ function App() {
                   </div>
                 )}
               </div>
+
+              {normalizeQuestionText(questionReview.row.passage_text) && (
+                <section className="question-review-section">
+                  <h3>Passage</h3>
+                  <div className="question-passage-card">
+                    {normalizeQuestionText(questionReview.row.passage_text)
+                      .split(/\n{2,}/)
+                      .map((para, idx) => (
+                        <p key={`passage-${idx}`}>{para}</p>
+                      ))}
+                  </div>
+                </section>
+              )}
 
               <section className="question-review-section">
                 <h3>Question Stem</h3>
@@ -3588,11 +4289,29 @@ function App() {
               </div>
               <div className="form-grid">
                 <div className="mistake-tags-section">
-                  <span className="mistake-tags-section-title">Mistake Tags</span>
+                  <div className="mistake-tags-head">
+                    <span className="mistake-tags-section-title">
+                      Mistake Tags
+                      {annotation.mistakeTags.length > 0 && (
+                        <span className="mistake-tags-count">{annotation.mistakeTags.length}</span>
+                      )}
+                    </span>
+                    <input
+                      type="search"
+                      className="mistake-tags-search"
+                      placeholder="Search tags…"
+                      value={tagSearch}
+                      onChange={(event) => setTagSearch(event.target.value)}
+                    />
+                  </div>
                   {annotation.mistakeTags.length > 0 && (
                     <div className="mistake-tags-selected">
                       {annotation.mistakeTags.map((tag) => (
-                        <span key={tag} className="mistake-tag-pill selected">
+                        <span
+                          key={tag}
+                          className="mistake-tag-pill selected"
+                          title={TAG_DESCRIPTIONS[tag] || undefined}
+                        >
                           {tag}
                           <button
                             type="button"
@@ -3606,23 +4325,51 @@ function App() {
                       ))}
                     </div>
                   )}
-                  {Object.entries(MISTAKE_TYPES).map(([category, tags]) => (
-                    <div key={category} className="mistake-category">
-                      <span className="mistake-category-label">{category}</span>
-                      <div className="mistake-tags-grid">
-                        {tags.map((tag) => (
-                          <label key={tag} className="mistake-tag-checkbox">
-                            <input
-                              type="checkbox"
-                              checked={annotation.mistakeTags.includes(tag)}
-                              onChange={() => handleToggleMistakeTag(tag)}
-                            />
-                            {tag}
-                          </label>
-                        ))}
+                  {(() => {
+                    const subjCode = normalizedSubjectCode(annotation.row);
+                    const ordered = SUBJECT_TAG_PRIORITY[subjCode] || MISTAKE_CATEGORY_ORDER;
+                    const search = tagSearch.trim().toLowerCase();
+                    const visibleCategories = ordered
+                      .map((category) => {
+                        const tags = MISTAKE_TYPES[category] || [];
+                        const filtered = search
+                          ? tags.filter((t) => t.toLowerCase().includes(search))
+                          : tags;
+                        return { category, filtered };
+                      })
+                      .filter(({ filtered }) => filtered.length > 0);
+                    if (!visibleCategories.length) {
+                      return <p className="muted mistake-tags-empty">No tags match "{tagSearch}".</p>;
+                    }
+                    return visibleCategories.map(({ category, filtered }, idx) => (
+                      <div key={category} className={`mistake-category${idx === 0 && subjCode && !search ? ' is-suggested' : ''}`}>
+                        <span className="mistake-category-label">
+                          {category}
+                          {idx === 0 && subjCode && !search && (
+                            <span className="mistake-category-suggested">
+                              {subjCode === 'Q' ? 'Quant' : subjCode === 'V' ? 'Verbal' : 'Data Insights'} priority
+                            </span>
+                          )}
+                        </span>
+                        <div className="mistake-tags-grid">
+                          {filtered.map((tag) => (
+                            <label
+                              key={tag}
+                              className="mistake-tag-checkbox"
+                              title={TAG_DESCRIPTIONS[tag] || undefined}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={annotation.mistakeTags.includes(tag)}
+                                onChange={() => handleToggleMistakeTag(tag)}
+                              />
+                              {tag}
+                            </label>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ));
+                  })()}
                 </div>
                 <label className="notes-label">
                   Notes
