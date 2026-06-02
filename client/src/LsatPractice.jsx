@@ -319,7 +319,7 @@ function LsatSessionsView({ onPickSection, onExit, onTabChange }) {
               const total = s.last_question - s.first_question + 1;
               return (
                 <li key={s.id} className="lsat-sess-row">
-                  <button type="button" className="lsat-sess-btn" onClick={() => onPickSection(s.test_num, s.section_roman)}>
+                  <button type="button" className="lsat-sess-btn" onClick={() => onPickSection(s.test_num, s.section_roman, s.question_numbers || null)}>
                     <div className={`lsat-lib-kind-badge lsat-lib-kind-${s.section_kind}`}>{s.section_kind}</div>
                     <div className="lsat-sess-main">
                       <div className="lsat-sess-title">
@@ -1115,17 +1115,17 @@ export default function LsatPractice({ onExit }) {
     setView(tab);
   }
 
-  function handlePickSection(testNum, sectionRoman) {
-    setPendingPick({ testNum, sectionRoman });
+  function handlePickSection(testNum, sectionRoman, questionNumbers = null) {
+    setPendingPick({ testNum, sectionRoman, questionNumbers: questionNumbers || null });
     setView('confirm');
   }
 
   async function handleStartSession(mode) {
     if (!pendingPick) return;
-    const { testNum, sectionRoman } = pendingPick;
+    const { testNum, sectionRoman, questionNumbers } = pendingPick;
     try {
       const secResp = await fetchJson(`/api/lsat/tests/${testNum}/sections/${sectionRoman}`);
-      const set = buildSetForSection(secResp.section);
+      const set = buildSetForSection(secResp.section, questionNumbers);
       if (!set) { alert('No questions in this section'); return; }
       const session = await fetchJson('/api/lsat/sessions', {
         method: 'POST',
@@ -1138,6 +1138,7 @@ export default function LsatPractice({ onExit }) {
           firstQuestion: set.firstQuestion,
           lastQuestion: set.lastQuestion,
           mode,
+          questionNumbers: set.questionNumbers,
         }),
       });
       setActiveSession({
@@ -1169,8 +1170,13 @@ export default function LsatPractice({ onExit }) {
 
   async function handleRetake() {
     if (!activeSession) return;
-    const { testNum, section } = activeSession;
-    handlePickSection(testNum, section.roman);
+    const { testNum, section, sessionId } = activeSession;
+    let questionNumbers = null;
+    try {
+      const resp = await fetchJson(`/api/lsat/sessions/${sessionId}`);
+      questionNumbers = resp.session?.question_numbers || null;
+    } catch (e) { /* fall back to full section */ }
+    handlePickSection(testNum, section.roman, questionNumbers);
   }
 
   if (view === 'confirm' && pendingPick) {
@@ -1178,6 +1184,7 @@ export default function LsatPractice({ onExit }) {
       <ConfirmationScreen
         testNum={pendingPick.testNum}
         sectionRoman={pendingPick.sectionRoman}
+        subset={pendingPick.questionNumbers}
         onStart={handleStartSession}
         onCancel={handleBackToLibrary}
       />
