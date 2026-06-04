@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from './components/ui/button';
 import {
   DndContext,
@@ -108,6 +108,7 @@ export default function StudyPlan({ onExit }) {
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
+  const reorderInFlight = useRef(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -296,6 +297,7 @@ export default function StudyPlan({ onExit }) {
   }
 
   async function reorderTasks(activeTaskId, overId) {
+    if (reorderInFlight.current) return;
     const dayMeta = {};
     for (const d of days) {
       dayMeta[d.date] = { week_number: d.week, day_label: d.label, day_theme: d.theme };
@@ -303,6 +305,7 @@ export default function StudyPlan({ onExit }) {
     const result = computeReorder(tasks, activeTaskId, overId, dayMeta);
     if (!result) return;
     const prevTasks = tasks;
+    reorderInFlight.current = true;
     setTasks(result.optimisticTasks);
     try {
       const data = await fetchJson('/api/study-plan/reorder', {
@@ -314,6 +317,8 @@ export default function StudyPlan({ onExit }) {
     } catch (e) {
       setError(e.message);
       setTasks(prevTasks);
+    } finally {
+      reorderInFlight.current = false;
     }
   }
 
@@ -325,6 +330,10 @@ export default function StudyPlan({ onExit }) {
     const { active, over } = event;
     setActiveId(null);
     if (over) reorderTasks(active.id, over.id);
+  }
+
+  function handleDragCancel() {
+    setActiveId(null);
   }
 
   // ─── Derived ────────────────────────────────────────────────────────────
@@ -437,6 +446,7 @@ export default function StudyPlan({ onExit }) {
         collisionDetection={closestCorners}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
+        onDragCancel={handleDragCancel}
       >
         {weeks.map(({ week, days: daysInWeek }) => (
           <WeekSection
