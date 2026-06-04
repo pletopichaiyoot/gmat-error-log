@@ -32,6 +32,7 @@ const {
   getStudyPlanTask,
   createStudyPlanTask,
   updateStudyPlanTask,
+  reorderStudyPlanTasks,
   deleteStudyPlanTask,
   getStudyPlanMeta,
   setStudyPlanMeta,
@@ -51,6 +52,7 @@ const {
   listLsatDashboardErrors,
   getLsatDashboardAnalysis,
   isLsatDashboardId,
+  updateLsatDashboardAnnotation,
 } = require('./lsat-dashboard');
 const { LlmConfigError, generatePerformanceReview, answerCoachQuestion } = require('./llm-coach-agent');
 const { classifyScrapedQuestions } = require('./question-topic-classifier');
@@ -807,19 +809,33 @@ app.delete('/api/ai/memories/:id', async (req, res) => {
 
 app.patch('/api/errors/:errorId', async (req, res) => {
   try {
-    const errorId = Number(req.params.errorId);
+    const rawId = req.params.errorId;
+    const mistakeType = req.body?.mistakeType;
+    const notes = req.body?.notes;
+    const annotation = {
+      mistakeType: typeof mistakeType === 'string' ? mistakeType : '',
+      notes: typeof notes === 'string' ? notes : '',
+    };
+
+    // LSAT errors carry a namespaced "lsat-<attemptId>" id and live in lsat_attempts,
+    // so they need their own writer rather than the question_attempts UPDATE path.
+    if (isLsatDashboardId(rawId)) {
+      const updatedLsat = await updateLsatDashboardAnnotation(rawId, annotation);
+      if (!updatedLsat) {
+        res.status(404).json({ error: 'Question attempt not found.' });
+        return;
+      }
+      res.json({ ok: true, error: updatedLsat });
+      return;
+    }
+
+    const errorId = Number(rawId);
     if (!Number.isInteger(errorId) || errorId <= 0) {
       res.status(400).json({ error: 'Invalid error id.' });
       return;
     }
 
-    const mistakeType = req.body?.mistakeType;
-    const notes = req.body?.notes;
-
-    const updated = await updateErrorAnnotation(errorId, {
-      mistakeType: typeof mistakeType === 'string' ? mistakeType : '',
-      notes: typeof notes === 'string' ? notes : '',
-    });
+    const updated = await updateErrorAnnotation(errorId, annotation);
 
     if (!updated) {
       res.status(404).json({ error: 'Question attempt not found.' });
@@ -1622,6 +1638,16 @@ app.delete('/api/study-plan/tasks/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/study-plan/reorder', async (req, res) => {
+  try {
+    const updates = (req.body && req.body.updates) || [];
+    const tasks = await reorderStudyPlanTasks(updates);
+    res.json({ tasks });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 

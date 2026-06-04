@@ -34,6 +34,7 @@ const QUESTION_ATTEMPT_INSERT_COLUMNS = [
   'mistake_type',
   'notes',
   'passage_text',
+  'taxonomy_path',
 ];
 
 if (!fs.existsSync(dbDir)) {
@@ -204,6 +205,9 @@ async function initDb() {
   await ensureQuestionAttemptsColumn('content_domain', 'TEXT');
   await ensureQuestionAttemptsColumn('passage_text', 'TEXT');
   await ensureQuestionAttemptsColumn('difficulty_theta', 'REAL');
+  // Raw StartTest taxonomy path (data-index, e.g. "Data.PAD.TRA") captured at
+  // scrape time. Kept for backfill + debugging the per-product type codes.
+  await ensureQuestionAttemptsColumn('taxonomy_path', 'TEXT');
 
   // One-time backfill: older OPE Phase 3 writes stored the raw IRT theta as a
   // numeric string in `difficulty` (e.g. "-0.647"), which the UI then rendered
@@ -345,6 +349,10 @@ async function initDb() {
   try { await run('ALTER TABLE lsat_attempts ADD COLUMN confidence TEXT'); } catch (e) { /* exists */ }
   try { await run('ALTER TABLE lsat_attempts ADD COLUMN time_ms INTEGER'); } catch (e) { /* exists */ }
   try { await run('ALTER TABLE lsat_attempts ADD COLUMN session_id INTEGER'); } catch (e) { /* exists */ }
+  // User annotations (mirrors question_attempts.mistake_type / notes) so LSAT errors
+  // are annotatable from the dashboard's review modal just like GMAT rows.
+  try { await run('ALTER TABLE lsat_attempts ADD COLUMN mistake_type TEXT'); } catch (e) { /* exists */ }
+  try { await run('ALTER TABLE lsat_attempts ADD COLUMN notes TEXT'); } catch (e) { /* exists */ }
   await run('CREATE INDEX IF NOT EXISTS idx_lsat_attempts_test ON lsat_attempts(test_num, section_roman)');
   await run('CREATE INDEX IF NOT EXISTS idx_lsat_attempts_session ON lsat_attempts(session_id)');
   // Within one session, each question can only have one attempt row (we UPDATE on retry).
@@ -487,6 +495,44 @@ async function completeLsatSession(id) {
     [JSON.stringify(numbers), id]
   );
   return { answeredCount: numbers.length };
+}
+
+// Update a single LSAT attempt's user annotation. Mirrors updateErrorAnnotation's
+// normalization (mistakeType is a JSON-array string; "[]" / empty -> NULL) so LSAT
+// rows round-trip mistake tags + notes exactly like question_attempts rows.
+async function updateLsatAttemptAnnotation(attemptId, { mistakeType, notes }) {
+  const id = Number(attemptId);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new Error('Invalid error id.');
+  }
+
+  const nextMistakeType = String(mistakeType || '').trim();
+  const nextNotes = String(notes || '').trim();
+  const storedMistakeType = nextMistakeType === '[]' ? null : nextMistakeType || null;
+
+  await run(
+    `
+      UPDATE lsat_attempts
+      SET
+        mistake_type = ?,
+        notes = ?
+      WHERE id = ?
+    `,
+    [storedMistakeType, nextNotes || null, id]
+  );
+
+  return get(
+    `
+      SELECT
+        id,
+        mistake_type,
+        notes
+      FROM lsat_attempts
+      WHERE id = ?
+      LIMIT 1
+    `,
+    [id]
+  );
 }
 
 // lsat_sessions.question_numbers is stored as a JSON array string (or NULL for
@@ -1072,7 +1118,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     if (existing?.id) {
       const existingAttempts = await all(
         `
-          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta
+          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta, taxonomy_path
           FROM question_attempts
           WHERE session_id = ?
         `,
@@ -1278,6 +1324,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           mistakeType,
           notes,
           passageText,
+          normalizedTextOrNull(q.taxonomy_path) || preservedSnapshot?.taxonomy_path || null,
       ];
       assertValueCount('question_attempts insert', QUESTION_ATTEMPT_INSERT_COLUMNS, attemptValues);
 
@@ -1830,6 +1877,29 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
 
   const rows = await all(
     `
+      WITH corr_code AS (
+        -- Latest correct attempt per q_code, encoded as a sortable composite key.
+        -- session_date is empty or fixed 'YYYY-MM-DD'; the space separator sorts
+        -- before any digit so an empty date orders before all real dates, and the
+        -- zero-padded id breaks ties within the same date. MAX() of this key thus
+        -- equals the latest (session_date, id) pair -- matching the old (date,id)
+        -- correlated comparison without the per-row table scan.
+        SELECT TRIM(q2.q_code) AS code,
+               MAX(COALESCE(s2.session_date, '') || ' ' || printf('%07d', q2.id)) AS maxkey
+        FROM question_attempts q2
+        INNER JOIN sessions s2 ON s2.id = q2.session_id
+        WHERE q2.correct = 1 AND TRIM(COALESCE(q2.q_code, '')) <> ''
+        GROUP BY TRIM(q2.q_code)
+      ),
+      corr_id AS (
+        -- Same as corr_code but keyed on q_id, for rows that lack a q_code.
+        SELECT TRIM(q2.q_id) AS qid,
+               MAX(COALESCE(s2.session_date, '') || ' ' || printf('%07d', q2.id)) AS maxkey
+        FROM question_attempts q2
+        INNER JOIN sessions s2 ON s2.id = q2.session_id
+        WHERE q2.correct = 1 AND TRIM(COALESCE(q2.q_id, '')) <> ''
+        GROUP BY TRIM(q2.q_id)
+      )
       SELECT
         q.id,
         q.run_id,
@@ -1861,43 +1931,24 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
         q.my_answer,
         q.correct_answer,
         CASE
-          WHEN EXISTS (
-            SELECT 1
-            FROM question_attempts q2
-            INNER JOIN sessions s2 ON s2.id = q2.session_id
-            WHERE q2.correct = 1
-              AND COALESCE(NULLIF(TRIM(q.q_code), ''), '') <> ''
-              AND COALESCE(NULLIF(TRIM(q2.q_code), ''), '') = COALESCE(NULLIF(TRIM(q.q_code), ''), '')
-              AND (
-                COALESCE(s2.session_date, '') > COALESCE(s.session_date, '')
-                OR (
-                  COALESCE(s2.session_date, '') = COALESCE(s.session_date, '')
-                  AND q2.id > q.id
-                )
-              )
-          ) THEN 1
-          WHEN EXISTS (
-            SELECT 1
-            FROM question_attempts q2
-            INNER JOIN sessions s2 ON s2.id = q2.session_id
-            WHERE q2.correct = 1
-              AND COALESCE(NULLIF(TRIM(q.q_code), ''), '') = ''
-              AND COALESCE(NULLIF(TRIM(q.q_id), ''), '') <> ''
-              AND COALESCE(NULLIF(TRIM(q2.q_id), ''), '') = COALESCE(NULLIF(TRIM(q.q_id), ''), '')
-              AND (
-                COALESCE(s2.session_date, '') > COALESCE(s.session_date, '')
-                OR (
-                  COALESCE(s2.session_date, '') = COALESCE(s.session_date, '')
-                  AND q2.id > q.id
-                )
-              )
-          ) THEN 1
+          WHEN COALESCE(NULLIF(TRIM(q.q_code), ''), '') <> ''
+               AND cc.maxkey IS NOT NULL
+               AND cc.maxkey > (COALESCE(s.session_date, '') || ' ' || printf('%07d', q.id)) THEN 1
+          WHEN COALESCE(NULLIF(TRIM(q.q_code), ''), '') = ''
+               AND COALESCE(NULLIF(TRIM(q.q_id), ''), '') <> ''
+               AND ci.maxkey IS NOT NULL
+               AND ci.maxkey > (COALESCE(s.session_date, '') || ' ' || printf('%07d', q.id)) THEN 1
           ELSE 0
         END AS corrected_later,
         q.mistake_type,
         q.notes
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
+      LEFT JOIN corr_code cc ON COALESCE(NULLIF(TRIM(q.q_code), ''), '') <> ''
+                            AND cc.code = TRIM(q.q_code)
+      LEFT JOIN corr_id   ci ON COALESCE(NULLIF(TRIM(q.q_code), ''), '') = ''
+                            AND COALESCE(NULLIF(TRIM(q.q_id), ''), '') <> ''
+                            AND ci.qid = TRIM(q.q_id)
       WHERE ${where.join(' AND ')}
       ORDER BY ${sortCol} ${sortDir}, q.id ${sortDir}
       ${limitClause}
@@ -3728,6 +3779,54 @@ async function deleteStudyPlanTask(id) {
   return result.changes > 0;
 }
 
+// Batch-reorder study plan tasks atomically. `updates` is an array of
+// { id, day_date, week_number, day_label, day_theme, position } describing the
+// full ordering of each affected day. Wrapped in one transaction so per-day
+// position values never collide mid-write. User fields (status/notes/title/
+// description/est_minutes/completed_at) are never touched. Returns the fresh
+// full task list.
+async function reorderStudyPlanTasks(updates) {
+  if (!Array.isArray(updates) || updates.length === 0) {
+    throw new Error('updates must be a non-empty array');
+  }
+  const clean = updates.map((u) => {
+    const id = Number(u.id);
+    if (!Number.isInteger(id) || id <= 0) throw new Error('each update needs a positive integer id');
+    const dayDate = String(u.day_date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dayDate)) throw new Error('day_date must be YYYY-MM-DD');
+    const position = Number(u.position);
+    if (!Number.isFinite(position)) throw new Error('position must be a finite number');
+    const weekNumber = Number(u.week_number);
+    if (!Number.isFinite(weekNumber)) throw new Error('week_number must be a finite number');
+    return {
+      id,
+      day_date: dayDate,
+      week_number: weekNumber,
+      day_label: u.day_label == null ? null : String(u.day_label),
+      day_theme: u.day_theme == null ? null : String(u.day_theme),
+      position,
+    };
+  });
+
+  await run('BEGIN');
+  try {
+    for (const u of clean) {
+      await run(
+        `UPDATE study_plan_tasks
+            SET day_date = ?, week_number = ?, day_label = ?, day_theme = ?, position = ?,
+                updated_at = datetime('now')
+          WHERE id = ?`,
+        [u.day_date, u.week_number, u.day_label, u.day_theme, u.position, u.id],
+      );
+    }
+    await run('COMMIT');
+  } catch (err) {
+    await run('ROLLBACK');
+    throw err;
+  }
+  return await listStudyPlanTasks();
+}
+
 async function getStudyPlanMeta() {
   const rows = await all('SELECT key, value FROM study_plan_meta');
   const out = {};
@@ -4391,6 +4490,7 @@ module.exports = {
   clearLsatAttempts,
   createLsatSession,
   completeLsatSession,
+  updateLsatAttemptAnnotation,
   listLsatSessions,
   getLsatSession,
   // Study plan
@@ -4398,6 +4498,7 @@ module.exports = {
   getStudyPlanTask,
   createStudyPlanTask,
   updateStudyPlanTask,
+  reorderStudyPlanTasks,
   deleteStudyPlanTask,
   getStudyPlanMeta,
   setStudyPlanMeta,
