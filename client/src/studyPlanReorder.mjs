@@ -47,6 +47,10 @@ function groupIdsByDay(sortedTasks) {
 // day -> { week_number, day_label, day_theme } map, return
 // { optimisticTasks, updates } or null if the drop is a no-op.
 //
+// Contract: `dayMeta` must contain the destination day. If it is absent, the
+// moved task silently retains its source-day meta (caller always supplies the
+// drop-target day, so this is a defensive fallback, not the normal path).
+//
 // `updates` contains the full ordering for each affected day (1 day for an
 // in-day reorder, 2 for a cross-day move): one
 // { id, day_date, week_number, day_label, day_theme, position } per task.
@@ -74,10 +78,15 @@ export function computeReorder(tasks, activeId, overId, dayMeta) {
     destDay = overTask.day_date;
     if (srcDay === destDay) {
       const ids = grouped.get(destDay) || [];
-      destIds = arrayMove(ids, ids.indexOf(activeId), ids.indexOf(overId));
+      const fromIdx = ids.indexOf(activeId);
+      const toIdx = ids.indexOf(overId);
+      if (fromIdx === -1 || toIdx === -1) return null;
+      destIds = arrayMove(ids, fromIdx, toIdx);
     } else {
-      const ids = (grouped.get(destDay) || []).slice();
-      ids.splice(ids.indexOf(overId), 0, activeId);
+      const ids = (grouped.get(destDay) || []).filter((id) => id !== activeId);
+      const overIdx = ids.indexOf(overId);
+      if (overIdx === -1) return null;
+      ids.splice(overIdx, 0, activeId);
       destIds = ids;
     }
   }

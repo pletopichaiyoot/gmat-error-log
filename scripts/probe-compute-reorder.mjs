@@ -57,4 +57,12 @@ assert.equal(computeReorder(base(), 1, 1, dayMeta), null);
 // 5. No-op: append a task to its own day where it is already last.
 assert.equal(computeReorder(base(), 4, dayDroppableId('2026-06-06'), dayMeta), null);
 
+// 6. Dragging the only task out of a day emits no leftover updates for that day.
+{
+  const r = computeReorder(base(), 4, dayDroppableId('2026-06-05'), dayMeta);
+  assert.ok(r);
+  assert.equal(r.updates.filter((u) => u.day_date === '2026-06-06').length, 0);
+  assert.equal(r.optimisticTasks.filter((t) => t.day_date === '2026-06-06').length, 0);
+}
+
 console.log('All computeReorder probes passed.');
