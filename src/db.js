@@ -3785,6 +3785,8 @@ async function deleteStudyPlanTask(id) {
 // position values never collide mid-write. User fields (status/notes/title/
 // description/est_minutes/completed_at) are never touched. Returns the fresh
 // full task list.
+// Updates that reference a non-existent id affect zero rows and are silently
+// ignored (the caller controls the id set).
 async function reorderStudyPlanTasks(updates) {
   if (!Array.isArray(updates) || updates.length === 0) {
     throw new Error('updates must be a non-empty array');
@@ -3821,7 +3823,7 @@ async function reorderStudyPlanTasks(updates) {
     }
     await run('COMMIT');
   } catch (err) {
-    await run('ROLLBACK');
+    try { await run('ROLLBACK'); } catch { /* ignore: surface the original error */ }
     throw err;
   }
   return await listStudyPlanTasks();
