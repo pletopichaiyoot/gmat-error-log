@@ -5,9 +5,9 @@
 // here and are invoked from the server route handlers.
 //
 // Subject mapping: LSAT Reading Comprehension -> "RC"; Logical Reasoning -> "CR"
-// (GMAT's Critical Reasoning analog). Difficulty (Easy/Medium/Hard) comes from the
-// gpt-5-nano classifier written into lsat-questions.json; unclassified questions
-// stay null (the frontend renders them as "—").
+// (GMAT's Critical Reasoning analog). Difficulty (Easy/Medium/Hard) comes from an
+// LLM classifier (see each question's difficulty_source) written into
+// lsat-questions.json; unclassified questions stay null (rendered as "—").
 
 const fs = require('fs');
 const path = require('path');

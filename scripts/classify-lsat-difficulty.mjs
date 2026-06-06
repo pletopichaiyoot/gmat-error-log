@@ -79,7 +79,10 @@ function writeReview(scope, rows) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const model = args.model || process.env.LSAT_DIFFICULTY_MODEL || 'gpt-5-nano';
+  // gpt-5-mini default: gpt-5-nano under-calls "Hard" badly (≈3% on the pilot) even
+  // with an explicit calibration rubric; mini lands a believable ~20% Hard spread.
+  // Override with --model or LSAT_DIFFICULTY_MODEL.
+  const model = args.model || process.env.LSAT_DIFFICULTY_MODEL || 'gpt-5-mini';
   const bank = JSON.parse(fs.readFileSync(BANK_PATH, 'utf8'));
 
   const targets = collectTargets(bank, { test: args.test, force: args.force, limit: args.limit });
