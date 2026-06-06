@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {
-  parseArgs, collectTargets, buildBatches, parseModelResponse,
-  applyLabels, extractText, resolvePassage, VALID_LABELS,
+  parseArgs, collectTargets, buildBatches, buildPromptPayload, parseModelResponse,
+  applyLabels, extractText, resolvePassage, SYSTEM_PROMPT, VALID_LABELS,
 } from './classify-lsat-difficulty.core.mjs';
 
 const fixture = () => ({
@@ -118,6 +118,30 @@ const fixture = () => ({
   assert.equal(resolvePassage(sec, 3), 'P1');
   assert.equal(resolvePassage(sec, 6), 'P2');
   assert.equal(resolvePassage({ passage: 'SOLO', passages: [] }, 1), 'SOLO');
+}
+
+// buildPromptPayload: system === SYSTEM_PROMPT; user is JSON with kind/passage/questions
+{
+  const t = collectTargets(fixture(), { force: true });
+  const batches = buildBatches(t);
+  const rcBatch = batches.find((b) => b.kind === 'RC');
+  const lrBatch = batches.find((b) => b.kind === 'LR');
+
+  const rc = buildPromptPayload(rcBatch);
+  assert.equal(rc.system, SYSTEM_PROMPT);
+  const rcUser = JSON.parse(rc.user);
+  assert.equal(rcUser.kind, 'Reading Comprehension');
+  assert.equal(rcUser.passage, 'PASSAGE TEXT');
+  assert.equal(rcUser.questions.length, rcBatch.entries.length);
+  assert.equal(rcUser.questions[0].number, rcBatch.entries[0].number);
+  assert.ok('choices' in rcUser.questions[0]);
+
+  const lr = buildPromptPayload(lrBatch);
+  assert.equal(lr.system, SYSTEM_PROMPT);
+  const lrUser = JSON.parse(lr.user);
+  assert.equal(lrUser.kind, 'Logical Reasoning');
+  assert.equal('passage' in lrUser, false); // LR batches carry no passage key
+  assert.ok(lrUser.questions.length > 0);
 }
 
 assert.deepEqual(VALID_LABELS, ['Easy', 'Medium', 'Hard']);
