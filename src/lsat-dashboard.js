@@ -5,12 +5,18 @@
 // here and are invoked from the server route handlers.
 //
 // Subject mapping: LSAT Reading Comprehension -> "RC"; Logical Reasoning -> "CR"
-// (GMAT's Critical Reasoning analog). LSAT has no difficulty bands, so difficulty
-// columns are left null (the frontend renders them as "—").
+// (GMAT's Critical Reasoning analog). Difficulty (Easy/Medium/Hard) comes from the
+// gpt-5-nano classifier written into lsat-questions.json; unclassified questions
+// stay null (the frontend renders them as "—").
 
 const fs = require('fs');
 const path = require('path');
-const { listLsatSessions, listLsatAttempts, getLsatSession } = require('./db');
+const {
+  listLsatSessions,
+  listLsatAttempts,
+  getLsatSession,
+  updateLsatAttemptAnnotation,
+} = require('./db');
 
 let _dataCache = null;
 function loadLsatData() {
@@ -24,7 +30,26 @@ function loadLsatData() {
   return _dataCache;
 }
 
-// `${testNum}|${roman}|${number}` -> { stem, choices:[{label,text}], correct, kind }
+// Resolve the passage text for one question within a section. RC sections carry a
+// `passages` array of { firstQuestion, text } — a question belongs to the passage
+// with the largest firstQuestion <= its number. LR sections have an empty passages
+// array (the stimulus lives inline in the stem), so this returns null for them.
+function passageForQuestion(section, questionNumber) {
+  const passages = (Array.isArray(section.passages) ? section.passages : [])
+    .filter((p) => p && typeof p.text === 'string' && p.text.trim());
+  if (passages.length) {
+    const sorted = passages.slice().sort((a, b) => (a.firstQuestion || 0) - (b.firstQuestion || 0));
+    let match = null;
+    for (const p of sorted) {
+      if ((p.firstQuestion || 0) <= questionNumber) match = p;
+    }
+    return (match || sorted[0]).text;
+  }
+  if (typeof section.passage === 'string' && section.passage.trim()) return section.passage;
+  return null;
+}
+
+// `${testNum}|${roman}|${number}` -> { stem, choices:[{label,text}], correct, kind, passage }
 let _qIndexCache = null;
 function questionIndex() {
   if (_qIndexCache) return _qIndexCache;
@@ -38,6 +63,9 @@ function questionIndex() {
           choices: Array.isArray(q.choices) ? q.choices : [],
           correct: q.correct || null,
           kind: s.kind,
+          passage: passageForQuestion(s, q.number),
+          difficulty: q.difficulty || null,
+          difficulty_source: q.difficulty_source || null,
         });
       }
     }
@@ -140,11 +168,11 @@ function buildQuestionRow(s, a) {
     cat_id: null,
     question_url: null,
     question_stem: q.stem || '',
-    passage_text: null,
+    passage_text: q.passage || null,
     answer_choices: JSON.stringify(q.choices || []),
     response_format: 'mcq',
     response_details: null,
-    difficulty: null,
+    difficulty: q.difficulty || null,
     difficulty_theta: null,
     confidence: a.confidence || null,
     topic: topicForKind(a.section_kind),
@@ -269,9 +297,29 @@ function isLsatDashboardId(id) {
   return typeof id === 'string' && id.startsWith('lsat-');
 }
 
+// Save a mistake-tag / notes annotation for an LSAT error row. The dashboard sends
+// the namespaced "lsat-<attemptId>" id (buildQuestionRow's `id`); strip the prefix,
+// delegate the write to db.js, and return the row in the same shape as the GMAT path
+// ({ id, mistake_type, notes }) but with the namespaced id so the frontend's
+// applyAnnotationLocally matches it against annotation.row.id.
+async function updateLsatDashboardAnnotation(lsatId, { mistakeType, notes }) {
+  const numericId = Number(String(lsatId).replace(/^lsat-/, ''));
+  if (!Number.isInteger(numericId) || numericId <= 0) {
+    throw new Error('Invalid error id.');
+  }
+  const updated = await updateLsatAttemptAnnotation(numericId, { mistakeType, notes });
+  if (!updated) return null;
+  return {
+    id: `lsat-${updated.id}`,
+    mistake_type: updated.mistake_type,
+    notes: updated.notes,
+  };
+}
+
 module.exports = {
   listLsatDashboardSessions,
   listLsatDashboardErrors,
   getLsatDashboardAnalysis,
   isLsatDashboardId,
+  updateLsatDashboardAnnotation,
 };
