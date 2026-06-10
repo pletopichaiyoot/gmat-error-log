@@ -31,3 +31,18 @@ coverage/
 # Agent / testing scratch dir — see CLAUDE.md "Temp file convention"
 /tmp/*
 !/tmp/.gitkeep
+
+# Copyrighted study materials & personal docs — never publish (public repo)
+/data/lsat-questions.json
+/*.pdf
+/*.ics
+/COACHING.md
+/MBA_APPLICATION_PLAN.md
+/Counting_Probability_Cheatsheet.md
+
+# Local DB / data backups (timestamped suffixes escape the *.bak rule)
+/data/*.bak-*
+
+# Agent tooling caches and worktrees
+/.claude/worktrees/
+/.agents/
