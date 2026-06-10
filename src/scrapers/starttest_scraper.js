@@ -165,20 +165,41 @@ function mapSubjectCode(tier1) {
   return '';
 }
 
+// Map a DI tier-2 label (GMAC's human-readable type name) → canonical type.
+// The label is product-independent ("Two-part Analysis" is always TPA) so it is
+// the most reliable signal when the tier-2 path *code* varies by product.
+function mapDiTypeFromLabel(tier2Label) {
+  const s = String(tier2Label || '').toLowerCase();
+  if (!s) return '';
+  if (s.includes('multi-source') || s.includes('multi source')) return 'MSR';
+  if (s.includes('two-part') || s.includes('two part')) return 'TPA';
+  if (s.includes('graphic')) return 'GI';
+  if (s.includes('table')) return 'TA';
+  if (s.includes('data sufficiency')) return 'DS';
+  return '';
+}
+
 // Best-effort category_code normalization. Leaves '' when ambiguous.
-function mapCategoryCode(subjectCode, tier2) {
+// `tier2Label` (the data-index tier-2 row's human label) is an optional fallback
+// for DI, where the path *code* differs across products (the main OG product uses
+// M2I/TPA; the DI Review product uses M2D/PAD) but the label is consistent.
+function mapCategoryCode(subjectCode, tier2, tier2Label) {
   if (subjectCode === 'V') {
     if (tier2 === 'CR' || tier2 === 'RC') return tier2;
     return '';
   }
   if (subjectCode === 'Q') return 'PS'; // StartTest uses Quant.PS for all Problem Solving
   if (subjectCode === 'DI') {
-    if (tier2 === 'M2I' || tier2 === 'MSR') return 'MSR';
-    if (tier2 === 'TAN' || tier2 === 'TAB') return 'TA';
-    if (tier2 === 'GRI' || tier2 === 'GRA') return 'GI';
-    if (tier2 === 'TPA') return 'TPA';
+    // Known tier-2 codes, across products (M2I/M2D = Multi-source; TPA/PAD = Two-part).
+    if (tier2 === 'M2I' || tier2 === 'M2D' || tier2 === 'MSR') return 'MSR';
+    if (tier2 === 'TAN' || tier2 === 'TAB' || tier2 === 'TA') return 'TA';
+    if (tier2 === 'GRI' || tier2 === 'GRA' || tier2 === 'GI') return 'GI';
+    if (tier2 === 'TPA' || tier2 === 'PAD') return 'TPA';
     if (tier2 === 'DS')  return 'DS';
-    return ''; // ALG/ARI/PAD etc. — DI math-flavored; leave empty until taxonomy is confirmed
+    // Unknown code (e.g. a product-specific 3-letter code we haven't catalogued):
+    // fall back to GMAC's authoritative tier-2 label rather than guessing or
+    // dropping to '' (the old behaviour that left these rows type-less).
+    return mapDiTypeFromLabel(tier2Label);
   }
   return '';
 }
@@ -450,6 +471,61 @@ function matchTaxonomyEntry(labelIndex, subjectHint, topicLabel) {
   return labelIndex.get(topicLabel) || null;
 }
 
+// Stable join key for matching a QHistory row across filtered (per-leaf) views:
+// correctness + time-spent (seconds) + difficulty. The SAME underlying question
+// yields the same key in both the liid=0 and a per-leaf liid=<n> QHistory table.
+function qhRowJoinKey(row) {
+  const yn = String(row?.correct || '').toUpperCase().startsWith('Y') ? 'Y' : 'N';
+  return `${yn}|${parseTimeSpent(row?.timeSpent) ?? ''}|${String(row?.difficulty || '').trim()}`;
+}
+
+// Detect "theme collisions": a leaf label that lives under >1 distinct tier-2
+// type within the same subject (e.g. DI "Tradeoffs" under both Multi-source
+// Reasoning and Two-part Analysis). When this happens the QHistory "Content
+// Area" (the theme) alone cannot tell which type a row is — readReport's label
+// index keeps only the last leaf per theme, so every shared-theme row would
+// otherwise collapse onto one type. Returns Map<`${subject}|${theme}`, rec[]>
+// for colliding themes only (empty for the common, non-colliding case).
+function findThemeCollisions(taxonomy) {
+  const byKey = new Map();
+  for (const rec of taxonomy || []) {
+    const theme = rec.labels?.[rec.labels.length - 1];
+    if (!theme || !rec.parts) continue;
+    const key = `${rec.parts[0]}|${theme}`;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(rec);
+  }
+  const colliding = new Map();
+  for (const [key, recs] of byKey) {
+    const distinctTypes = new Set(recs.map((r) => r.parts[1]));
+    if (recs.length > 1 && distinctTypes.size > 1) colliding.set(key, recs);
+  }
+  return colliding;
+}
+
+// Post-pass helper: re-home to one session's diagnostic report (minting a fresh
+// rotating `code`) and fetch the QHistory filtered to a single taxonomy leaf
+// (liid). Used ONLY to disambiguate theme collisions, and only AFTER the main
+// per-session loop has captured every session — so the re-home here can't
+// consume a rotating code that another session still needs.
+async function fetchLeafQHistoryRows(page, { preset, sid, liid, totalQ }) {
+  await navigateToProduct(page, preset.productId, preset.type || 6);
+  const reportUrl = await page.evaluate((id) => {
+    const tr = document.getElementById(String(id));
+    const a = tr?.querySelector('a[href*="NavigateToDiagnosticReport"]:not([href*="widgetview"])');
+    return a ? a.href : null;
+  }, sid);
+  if (!reportUrl) throw new ScrapeAnomalyError(`disambig: no report link for sid=${sid} on product landing.`);
+  await goto(page, reportUrl);
+  const getq = await page.evaluate(() =>
+    (typeof jsondata_reviewtable !== 'undefined' && jsondata_reviewtable && jsondata_reviewtable.getqhistoryurl) || null);
+  if (!getq) throw new ScrapeAnomalyError(`disambig: report for sid=${sid} has no getqhistoryurl.`);
+  const rel = `${getq}&sid=${encodeURIComponent(sid)}&d=0&c=0&s=2&liid=${encodeURIComponent(liid)}&ct=${encodeURIComponent(totalQ || 0)}`;
+  const url = await resolvePageRelative(page, rel);
+  await goto(page, url);
+  return readQHistoryRows(page);
+}
+
 function buildQuestionRecord({ qhRow, itemMeta, taxonomyHit, sessionSource }) {
   const correct = String(qhRow.correct || '').toUpperCase().startsWith('Y') ? 1 : 0;
   const parts = taxonomyHit?.parts || [];
@@ -457,7 +533,7 @@ function buildQuestionRecord({ qhRow, itemMeta, taxonomyHit, sessionSource }) {
   const subjectCodeByPath = mapSubjectCode(parts[0]);
   const subjectCodeByItem = subjectFromItemName(itemMeta?.ItemName);
   const subjectCode = subjectCodeByPath || subjectCodeByItem;
-  const categoryCode = mapCategoryCode(subjectCode, parts[1]);
+  const categoryCode = mapCategoryCode(subjectCode, parts[1], labels[1]);
   // Prefer the leaf LABEL for subcategory, since `parts[2]` is just a path
   // segment that may be a structural bucket code with no human meaning. For
   // example, OG Verbal RC's taxonomy is `Verbal.RC.Open.{EVA,INF,MAI,SUI}`
@@ -493,6 +569,7 @@ function buildQuestionRecord({ qhRow, itemMeta, taxonomyHit, sessionSource }) {
     topic,
     topic_source: 'starttest-report',
     content_domain: contentDomain,
+    taxonomy_path: taxonomyHit?.path || null,   // raw data-index, e.g. "Data.PAD.TRA"
     mistake_type: null,
     notes: null,
     // Extras carried through for Phase 2 bookkeeping (not stored directly):
@@ -571,6 +648,12 @@ async function scrapeSessionPhase1({ page, sid, sourceLabel, homeMeta }) {
     };
   }
 
+  // Themes that appear under >1 type in this report (e.g. DI "Tradeoffs" under
+  // both Multi-source and Two-part). For these, the QHistory Content Area can't
+  // disambiguate the type — we stage them for a per-leaf disambiguation post-pass.
+  const collisions = findThemeCollisions(reportInfo.taxonomy);
+  const disambigThemes = new Map(); // `${subj}|${theme}` -> { subjectPathKey, theme, leaves, members[] }
+
   const questions = [];
   for (let i = 0; i < qhRows.length; i += 1) {
     const row = qhRows[i];
@@ -590,6 +673,21 @@ async function scrapeSessionPhase1({ page, sid, sourceLabel, homeMeta }) {
       taxonomyHit: hit,
       sessionSource: sourceLabel,
     }));
+
+    // Stage collision disambiguation (resolved later, after the session loop).
+    const themeKey = `${parts[0] || ''}|${row.contentArea || ''}`;
+    if (collisions.has(themeKey)) {
+      if (!disambigThemes.has(themeKey)) {
+        const recs = collisions.get(themeKey);
+        disambigThemes.set(themeKey, {
+          subjectPathKey,
+          theme: row.contentArea,
+          leaves: recs.map((r) => ({ listitemid: r.listitemid, path: r.path, parts: r.parts, labels: r.labels })),
+          members: [],
+        });
+      }
+      disambigThemes.get(themeKey).members.push({ qIndex: i, joinKey: qhRowJoinKey(row) });
+    }
   }
 
   const firstDate = qhRows[0]?.date ? parseDateMDY(qhRows[0].date) : null;
@@ -605,6 +703,11 @@ async function scrapeSessionPhase1({ page, sid, sourceLabel, homeMeta }) {
     subject,
     stats: summarizeQuestions(questions, firstDate),
     questions,
+    // Internal only (stripped before the result leaves runPhase1). Drives the
+    // shared-theme type disambiguation post-pass.
+    _disambig: disambigThemes.size
+      ? { sid: String(sid), totalQ, themes: Array.from(disambigThemes.values()) }
+      : null,
   };
 }
 
@@ -701,6 +804,70 @@ async function runPhase1({ page, options = {} }) {
       console.warn(`[starttest] sid=${homeMeta.sid} phase-1 failed:`, msg);
     }
   }
+
+  // ── Shared-theme type disambiguation (post-pass) ────────────────────────────
+  // For DI products the report path is Subject.Type.Theme and a theme can sit
+  // under multiple types (e.g. "Tradeoffs" under Multi-source AND Two-part). The
+  // main loop above assigned each row the LAST leaf for its theme; here we fetch
+  // the per-leaf QHistory for the colliding leaves and re-assign each row to its
+  // true leaf by matching correctness+time+difficulty. Runs only when collisions
+  // exist (zero overhead otherwise) and only AFTER the loop, so the re-home
+  // navigation can't consume a rotating code another session still needs.
+  const applyLeafToQuestion = (q, rec) => {
+    const parts = rec.parts || [];
+    const labels = rec.labels || [];
+    const subjectByPath = mapSubjectCode(parts[0]);
+    const subjectCode = subjectByPath || q.subject_code || null;
+    const leafLabel = labels[labels.length - 1] || q.subcategory || null;
+    q.subject_code = subjectCode;
+    q.category_code = mapCategoryCode(subjectCode, parts[1], labels[1]) || null;
+    q.cat_id = rec.listitemid ?? q.cat_id;
+    q.subcategory = leafLabel;
+    q.topic = leafLabel;
+    q.subject_sub = subjectByPath || q.subject_sub || null;
+    q.subject_sub_raw = parts[0] || q.subject_sub_raw || null;
+    q.content_domain = labels[0] || parts[0] || q.content_domain || null;
+    q.taxonomy_path = rec.path || q.taxonomy_path || null;
+  };
+
+  for (const session of sessions) {
+    const dis = session._disambig;
+    if (!dis) continue;
+    try {
+      for (const t of dis.themes) {
+        const leaves = t.leaves || [];
+        if (leaves.length < 2) continue;
+        const fetched = leaves.slice(0, -1);          // fetch all but the residual
+        const residual = leaves[leaves.length - 1];   // unmatched rows fall here
+        const leafQueues = [];
+        for (const leaf of fetched) {
+          const rows = await fetchLeafQHistoryRows(page, {
+            preset, sid: dis.sid, liid: leaf.listitemid, totalQ: dis.totalQ,
+          });
+          leafQueues.push({ leaf, keys: rows.map(qhRowJoinKey) });
+          await sleep(jitter(1500, 3000));
+        }
+        for (const m of t.members) {
+          let assigned = residual;
+          for (const lq of leafQueues) {
+            const idx = lq.keys.indexOf(m.joinKey);
+            if (idx !== -1) { lq.keys.splice(idx, 1); assigned = lq.leaf; break; }
+          }
+          applyLeafToQuestion(session.questions[m.qIndex], assigned);
+        }
+        if (typeof options.onProgress === 'function') {
+          options.onProgress({ phase: 'phase1', event: 'disambig', sid: dis.sid, theme: t.theme });
+        }
+      }
+    } catch (error) {
+      const msg = error?.message || String(error);
+      warnings.push({ sid: dis.sid, message: `disambig: ${msg}` });
+      if (error instanceof ScrapeAnomalyError) throw error;
+      // eslint-disable-next-line no-console
+      console.warn(`[starttest] sid=${dis.sid} disambiguation failed:`, msg);
+    }
+  }
+  sessions.forEach((s) => { delete s._disambig; });
 
   return {
     extracted_at: new Date().toISOString(),
@@ -1524,6 +1691,9 @@ module.exports = {
     parsePctCorrect,
     mapSubjectCode,
     mapCategoryCode,
+    mapDiTypeFromLabel,
+    findThemeCollisions,
+    qhRowJoinKey,
     subjectFromItemName,
     sleep,
     jitter,
