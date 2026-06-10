@@ -666,9 +666,5 @@ async function classifyScrapedQuestions(data, options = {}) {
 }
 
 module.exports = {
-  ALL_TOPIC_LABELS,
-  STARTTEST_PATH_TO_CANONICAL,
-  STARTTEST_LEAF_TO_CANONICAL,
-  mapStartTestToCanonical,
   classifyScrapedQuestions,
 };

@@ -159,8 +159,6 @@ function enrichQuestionMetadata(row = {}, session = {}) {
 }
 
 module.exports = {
-  normalizeSubjectCode,
-  normalizeCategoryCode,
   deriveQuestionMetadata,
   enrichQuestionMetadata,
 };
