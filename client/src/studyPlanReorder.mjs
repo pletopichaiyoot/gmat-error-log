@@ -26,6 +26,106 @@ export function sortTasks(tasks) {
   });
 }
 
+// Stable flat order for first-class day rows: (week, sort_order, date). Both the
+// renderer and the day-drag math sort with this so display and persistence agree.
+export function sortDayRows(days) {
+  return [...(days || [])].sort((a, b) => {
+    const wa = Number(a.week_number ?? a.week ?? 0);
+    const wb = Number(b.week_number ?? b.week ?? 0);
+    if (wa !== wb) return wa - wb;
+    const sa = Number(a.sort_order ?? 0);
+    const sb = Number(b.sort_order ?? 0);
+    if (sa !== sb) return sa - sb;
+    return a.date < b.date ? -1 : a.date > b.date ? 1 : 0;
+  });
+}
+
+// Build the ordered day list for rendering by merging first-class day rows (from
+// the server, authoritative for meta + ordering) with the tasks that live on
+// each day. Days persist independently of tasks, so an emptied or newly-added
+// day still renders. A task whose date has no day row is defensively given a
+// synthesized day (floated to the end of its week) so nothing is ever hidden.
+export function buildDays(tasks, days = []) {
+  const sortedTasks = sortTasks(tasks);
+  const map = new Map();
+  for (const d of days || []) {
+    map.set(d.date, {
+      date: d.date,
+      week: d.week_number,
+      label: d.day_label,
+      theme: d.day_theme,
+      sort_order: Number(d.sort_order ?? 0),
+      tasks: [],
+    });
+  }
+  for (const t of sortedTasks) {
+    if (!map.has(t.day_date)) {
+      map.set(t.day_date, {
+        date: t.day_date,
+        week: t.week_number,
+        label: t.day_label,
+        theme: t.day_theme,
+        sort_order: Number.MAX_SAFE_INTEGER,
+        tasks: [],
+      });
+    }
+    map.get(t.day_date).tasks.push(t);
+  }
+  return Array.from(map.values()).sort((a, b) => {
+    const wa = Number(a.week ?? 0);
+    const wb = Number(b.week ?? 0);
+    if (wa !== wb) return wa - wb;
+    const sa = Number(a.sort_order ?? 0);
+    const sb = Number(b.sort_order ?? 0);
+    if (sa !== sb) return sa - sb;
+    return a.date < b.date ? -1 : a.date > b.date ? 1 : 0;
+  });
+}
+
+// Droppable/draggable id helpers for whole-day dragging. Day rows use a distinct
+// `dayrow:` namespace so the drag handler can tell a day drag from a task drag
+// (numeric id) or a task-drop-onto-day (`day:` id).
+const DAY_ROW_PREFIX = 'dayrow:';
+export function dayRowDraggableId(date) {
+  return `${DAY_ROW_PREFIX}${date}`;
+}
+export function isDayRowDraggableId(id) {
+  return typeof id === 'string' && id.startsWith(DAY_ROW_PREFIX);
+}
+export function dateFromDayRowId(id) {
+  return String(id).slice(DAY_ROW_PREFIX.length);
+}
+
+// Given the current day rows, the dragged day's date, and the drop target
+// (`overId` = a `dayrow:DATE` id), return { optimisticDays, updates } with a
+// dense 0..n-1 sort_order renumber, or null for a no-op / non-day drop. Dropping
+// onto a day in another week moves the dragged day into that week.
+export function computeDayReorder(days, activeDate, overId) {
+  if (overId == null || !isDayRowDraggableId(overId)) return null;
+  const overDate = dateFromDayRowId(overId);
+  if (overDate === activeDate) return null;
+  const ordered = sortDayRows(days);
+  const fromIdx = ordered.findIndex((d) => d.date === activeDate);
+  const toIdx = ordered.findIndex((d) => d.date === overDate);
+  if (fromIdx === -1 || toIdx === -1) return null;
+  const destWeek = Number(ordered[toIdx].week_number);
+  const moved = arrayMove(ordered, fromIdx, toIdx).map((d, i) => ({
+    ...d,
+    week_number: d.date === activeDate ? destWeek : Number(d.week_number),
+    sort_order: i,
+  }));
+  const byDate = new Map((days || []).map((d) => [d.date, d]));
+  const isNoop = moved.every((d) => {
+    const cur = byDate.get(d.date);
+    return cur && Number(cur.sort_order ?? 0) === d.sort_order && Number(cur.week_number) === d.week_number;
+  });
+  if (isNoop) return null;
+  return {
+    optimisticDays: moved,
+    updates: moved.map((d) => ({ date: d.date, sort_order: d.sort_order, week_number: d.week_number })),
+  };
+}
+
 function arrayMove(arr, from, to) {
   const copy = arr.slice();
   const [item] = copy.splice(from, 1);

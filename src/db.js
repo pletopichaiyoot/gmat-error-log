@@ -4,7 +4,9 @@ const sqlite3 = require('sqlite3').verbose();
 const { deriveQuestionMetadata, enrichQuestionMetadata } = require('./question-metadata');
 
 const dbDir = path.resolve(__dirname, '..', 'data');
-const dbPath = path.join(dbDir, 'gmat-error-log.db');
+// Default to the real DB; GMAT_DB_PATH lets tests/tools point at a throwaway
+// copy without touching production data.
+const dbPath = process.env.GMAT_DB_PATH || path.join(dbDir, 'gmat-error-log.db');
 const QUESTION_ATTEMPT_INSERT_COLUMNS = [
   'run_id',
   'session_id',
@@ -406,6 +408,26 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_study_plan_week ON study_plan_tasks(week_number)');
   await run('CREATE INDEX IF NOT EXISTS idx_study_plan_status ON study_plan_tasks(status)');
 
+  // First-class plan days. Days used to be derived purely from task rows, so an
+  // emptied or brand-new day could not exist. Persisting them here lets the user
+  // add days, delete days, reschedule a day to another date, and reorder whole
+  // days, while keeping `study_plan_tasks.day_date` as the (unique) join key.
+  await run(`
+    CREATE TABLE IF NOT EXISTS study_plan_days (
+      date TEXT PRIMARY KEY,
+      week_number INTEGER NOT NULL DEFAULT 1,
+      day_label TEXT,
+      day_theme TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  await run('CREATE INDEX IF NOT EXISTS idx_study_plan_days_order ON study_plan_days(sort_order)');
+  // Backfill for existing installs: populate the day table once from the seed
+  // skeleton plus any day a task currently lives on.
+  await backfillStudyPlanDays();
+
   // Plan-level metadata (test date, target score, seeded flag).
   await run(`
     CREATE TABLE IF NOT EXISTS study_plan_meta (
@@ -414,6 +436,9 @@ async function initDb() {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
+
+  // One-time: shift existing plan weeks from Sun–Sat to Monday-start (idempotent).
+  await rebucketWeeksMonSunOnce();
 
   // Full-length mock exam results. One row per mock attempt. Section scores
   // are GMAT Focus scale (60-90); total is 205-805. Percentiles are 0-100.
@@ -1613,6 +1638,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
     source: 's.source',
     q_code: 'q.q_code',
     subject: 'subject',
+    category: 'category',
     difficulty: 'q.difficulty',
     topic: 'topic',
     time_sec: 'q.time_sec',
@@ -1906,6 +1932,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
         s.session_external_id,
         s.session_date,
         ${subjectExpr} AS subject,
+        ${categoryHintExpr} AS category,
         q.subject_code,
         q.category_code,
         q.subcategory,
@@ -3845,11 +3872,348 @@ async function setStudyPlanMeta(key, value) {
   );
 }
 
-// Wipe the entire plan (tasks only — meta preserved) so a fresh seed can run.
-// Returns the number of deleted rows.
+// ─── Study Plan days (first-class) ───────────────────────────────────────────
+
+function validateStudyPlanDate(value) {
+  const s = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new Error('date must be YYYY-MM-DD');
+  return s;
+}
+
+// Map each 'YYYY-MM-DD' date -> a Monday-start week number (1-based). Weeks run
+// Mon..Sun, so a Sunday is the LAST day of its week (not the first). When the
+// plan's earliest day is a Sunday it has no preceding Mon..Sat, so it folds into
+// week 1 alongside the following Mon..Sun block.
+function mondayWeekNumbers(dates) {
+  const out = new Map();
+  if (!Array.isArray(dates) || dates.length === 0) return out;
+  const epochDay = (s) => Math.floor(new Date(`${s}T00:00:00`).getTime() / 86400000);
+  const dow = (s) => new Date(`${s}T00:00:00`).getDay(); // 0=Sun .. 6=Sat
+  const mondayEpoch = (s) => epochDay(s) - ((dow(s) + 6) % 7);
+  const min = [...dates].sort()[0];
+  const anchorMon = dow(min) === 0 ? epochDay(min) + 1 : mondayEpoch(min);
+  for (const s of dates) {
+    const wk = epochDay(s) < anchorMon ? 1 : Math.floor((mondayEpoch(s) - anchorMon) / 7) + 1;
+    out.set(s, wk);
+  }
+  return out;
+}
+
+// One-time migration: re-bucket existing plan days + tasks from Sun–Sat weeks to
+// Monday-start (Mon–Sun) weeks. Idempotent via the week_scheme meta flag, so it
+// runs exactly once (on the first server start after this change).
+async function rebucketWeeksMonSunOnce() {
+  const meta = await getStudyPlanMeta();
+  if (meta.week_scheme === 'mon-sun') return;
+  const dayRows = await all('SELECT date FROM study_plan_days');
+  if (dayRows.length) {
+    const wk = mondayWeekNumbers(dayRows.map((r) => r.date));
+    await run('BEGIN');
+    try {
+      for (const [date, week] of wk) {
+        await run(
+          "UPDATE study_plan_days SET week_number = ?, updated_at = datetime('now') WHERE date = ?",
+          [week, date],
+        );
+        await run('UPDATE study_plan_tasks SET week_number = ? WHERE day_date = ?', [week, date]);
+      }
+      await run('COMMIT');
+    } catch (err) {
+      try { await run('ROLLBACK'); } catch { /* surface the original error */ }
+      throw err;
+    }
+  }
+  await setStudyPlanMeta('week_scheme', 'mon-sun');
+}
+
+// Populate study_plan_days once (idempotent: no-op when already populated) from
+// the seed skeleton plus any day a task currently lives on. sort_order is the
+// global date rank so the board renders in date order out of the box.
+async function backfillStudyPlanDays() {
+  const row = await get('SELECT COUNT(*) AS n FROM study_plan_days');
+  if (row && Number(row.n) > 0) return;
+  const byDate = new Map();
+  for (const d of buildStudyPlanDaySkeleton()) byDate.set(d.date, { ...d });
+  const taskDays = await all(
+    `SELECT day_date AS date, MIN(week_number) AS week_number, day_label, day_theme
+       FROM study_plan_tasks GROUP BY day_date`
+  );
+  for (const t of taskDays) {
+    if (!byDate.has(t.date)) {
+      byDate.set(t.date, {
+        date: t.date,
+        week_number: t.week_number == null ? 1 : t.week_number,
+        day_label: t.day_label ?? null,
+        day_theme: t.day_theme ?? null,
+      });
+    }
+  }
+  const ordered = Array.from(byDate.values()).sort((a, b) =>
+    a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  let i = 0;
+  for (const d of ordered) {
+    await run(
+      `INSERT INTO study_plan_days (date, week_number, day_label, day_theme, sort_order)
+       VALUES (?, ?, ?, ?, ?) ON CONFLICT(date) DO NOTHING`,
+      [d.date, d.week_number == null ? 1 : d.week_number, d.day_label ?? null, d.day_theme ?? null, i++],
+    );
+  }
+}
+
+async function listStudyPlanDays() {
+  return await all(
+    `SELECT date, week_number, day_label, day_theme, sort_order
+       FROM study_plan_days
+      ORDER BY week_number ASC, sort_order ASC, date ASC`,
+  );
+}
+
+async function createStudyPlanDay(input) {
+  const date = validateStudyPlanDate(input.date);
+  const existing = await get('SELECT date FROM study_plan_days WHERE date = ?', [date]);
+  if (existing) throw new Error('A day already exists on that date.');
+  const weekNumber = Number.isFinite(Number(input.week_number)) ? Number(input.week_number) : 1;
+  const dayLabel = input.day_label == null ? null : String(input.day_label);
+  const dayTheme = input.day_theme == null ? null : String(input.day_theme);
+  const row = await get('SELECT COALESCE(MAX(sort_order), -1) AS m FROM study_plan_days');
+  const sortOrder = (row?.m ?? -1) + 1;
+  await run(
+    `INSERT INTO study_plan_days (date, week_number, day_label, day_theme, sort_order)
+     VALUES (?, ?, ?, ?, ?)`,
+    [date, weekNumber, dayLabel, dayTheme, sortOrder],
+  );
+  return await get(
+    'SELECT date, week_number, day_label, day_theme, sort_order FROM study_plan_days WHERE date = ?',
+    [date],
+  );
+}
+
+// Edit a day in place, including rescheduling to a new date. A reschedule
+// cascades to that day's tasks (their day_date + denormalized day meta) inside
+// one transaction. Rescheduling onto an occupied date is rejected.
+async function updateStudyPlanDay(date, patch) {
+  const oldDate = validateStudyPlanDate(date);
+  const day = await get('SELECT * FROM study_plan_days WHERE date = ?', [oldDate]);
+  if (!day) return null;
+  const next = {
+    date: oldDate,
+    week_number: day.week_number,
+    day_label: day.day_label,
+    day_theme: day.day_theme,
+  };
+  if (Object.prototype.hasOwnProperty.call(patch, 'date') && patch.date != null) {
+    const nd = validateStudyPlanDate(patch.date);
+    if (nd !== oldDate) {
+      const clash = await get('SELECT date FROM study_plan_days WHERE date = ?', [nd]);
+      if (clash) throw new Error('A day already exists on that date.');
+      next.date = nd;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'week_number')) {
+    const w = Number(patch.week_number);
+    if (!Number.isFinite(w)) throw new Error('week_number must be a number');
+    next.week_number = w;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'day_label')) {
+    next.day_label = patch.day_label == null ? null : String(patch.day_label);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'day_theme')) {
+    next.day_theme = patch.day_theme == null ? null : String(patch.day_theme);
+  }
+  await run('BEGIN');
+  try {
+    const upd = await run(
+      `UPDATE study_plan_days
+          SET date = ?, week_number = ?, day_label = ?, day_theme = ?, updated_at = datetime('now')
+        WHERE date = ?`,
+      [next.date, next.week_number, next.day_label, next.day_theme, oldDate],
+    );
+    // Guard the read-then-write window: if the day vanished after the existence
+    // check (concurrent delete), surface it rather than silently no-op.
+    if (upd.changes === 0) throw new Error('Day was modified or deleted during the update.');
+    await run(
+      `UPDATE study_plan_tasks
+          SET day_date = ?, week_number = ?, day_label = ?, day_theme = ?, updated_at = datetime('now')
+        WHERE day_date = ?`,
+      [next.date, next.week_number, next.day_label, next.day_theme, oldDate],
+    );
+    await run('COMMIT');
+  } catch (err) {
+    try { await run('ROLLBACK'); } catch { /* surface the original error */ }
+    throw err;
+  }
+  return await get(
+    'SELECT date, week_number, day_label, day_theme, sort_order FROM study_plan_days WHERE date = ?',
+    [next.date],
+  );
+}
+
+// Delete a day and all its tasks in one transaction. Reversible via undo
+// (the client snapshots before calling this).
+async function deleteStudyPlanDay(date) {
+  const d = validateStudyPlanDate(date);
+  await run('BEGIN');
+  try {
+    await run('DELETE FROM study_plan_tasks WHERE day_date = ?', [d]);
+    const res = await run('DELETE FROM study_plan_days WHERE date = ?', [d]);
+    await run('COMMIT');
+    return res.changes > 0;
+  } catch (err) {
+    try { await run('ROLLBACK'); } catch { /* surface the original error */ }
+    throw err;
+  }
+}
+
+// Batch-reorder days (drag a whole day). `updates` is the full ordering of each
+// affected day: { date, sort_order, week_number }. A week change cascades to the
+// day's tasks so week grouping stays consistent. One transaction.
+async function reorderStudyPlanDays(updates) {
+  if (!Array.isArray(updates) || updates.length === 0) {
+    throw new Error('updates must be a non-empty array');
+  }
+  const clean = updates.map((u) => {
+    const date = validateStudyPlanDate(u.date);
+    const sortOrder = Number(u.sort_order);
+    if (!Number.isFinite(sortOrder)) throw new Error('sort_order must be a finite number');
+    const weekNumber = Number(u.week_number);
+    if (!Number.isFinite(weekNumber)) throw new Error('week_number must be a finite number');
+    return { date, sort_order: sortOrder, week_number: weekNumber };
+  });
+  await run('BEGIN');
+  try {
+    for (const u of clean) {
+      await run(
+        `UPDATE study_plan_days
+            SET sort_order = ?, week_number = ?, updated_at = datetime('now')
+          WHERE date = ?`,
+        [u.sort_order, u.week_number, u.date],
+      );
+      await run(
+        `UPDATE study_plan_tasks SET week_number = ?, updated_at = datetime('now') WHERE day_date = ?`,
+        [u.week_number, u.date],
+      );
+    }
+    await run('COMMIT');
+  } catch (err) {
+    try { await run('ROLLBACK'); } catch { /* surface the original error */ }
+    throw err;
+  }
+  return await listStudyPlanDays();
+}
+
+// Reconcile the whole plan (days + tasks + meta) to an exact snapshot. Powers
+// multi-level undo/redo: the client captures state before each action and posts
+// the snapshot to roll back (or forward) to. Deleted tasks return with their
+// original id, notes, status, and position intact. One transaction, validated
+// up front so a bad payload never half-applies.
+async function restoreStudyPlanSnapshot(snapshot) {
+  const snap = snapshot || {};
+  const days = Array.isArray(snap.days) ? snap.days : [];
+  const tasks = Array.isArray(snap.tasks) ? snap.tasks : [];
+  const meta = snap.meta && typeof snap.meta === 'object' ? snap.meta : null;
+
+  for (const d of days) validateStudyPlanDate(d.date);
+  for (const t of tasks) {
+    const id = Number(t.id);
+    if (!Number.isInteger(id) || id <= 0) throw new Error('each task needs a positive integer id');
+    validateStudyPlanDate(t.day_date);
+  }
+
+  await run('BEGIN');
+  try {
+    // Days: drop rows absent from the snapshot, then upsert each snapshot row.
+    const dayDates = days.map((d) => d.date);
+    if (dayDates.length) {
+      const ph = dayDates.map(() => '?').join(',');
+      await run(`DELETE FROM study_plan_days WHERE date NOT IN (${ph})`, dayDates);
+    } else {
+      await run('DELETE FROM study_plan_days');
+    }
+    for (const d of days) {
+      await run(
+        `INSERT INTO study_plan_days (date, week_number, day_label, day_theme, sort_order)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(date) DO UPDATE SET
+           week_number = excluded.week_number,
+           day_label   = excluded.day_label,
+           day_theme   = excluded.day_theme,
+           sort_order  = excluded.sort_order,
+           updated_at  = datetime('now')`,
+        [d.date, Number(d.week_number) || 1, d.day_label ?? null, d.day_theme ?? null, Number(d.sort_order) || 0],
+      );
+    }
+
+    // Tasks: drop ids absent from the snapshot, then upsert each (explicit id so
+    // an undone delete returns with its original id).
+    const ids = tasks.map((t) => Number(t.id));
+    if (ids.length) {
+      const ph = ids.map(() => '?').join(',');
+      await run(`DELETE FROM study_plan_tasks WHERE id NOT IN (${ph})`, ids);
+    } else {
+      await run('DELETE FROM study_plan_tasks');
+    }
+    for (const t of tasks) {
+      await run(
+        `INSERT INTO study_plan_tasks
+           (id, day_date, week_number, day_label, day_theme, position, title,
+            description, est_minutes, status, completed_at, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           day_date     = excluded.day_date,
+           week_number  = excluded.week_number,
+           day_label    = excluded.day_label,
+           day_theme    = excluded.day_theme,
+           position     = excluded.position,
+           title        = excluded.title,
+           description  = excluded.description,
+           est_minutes  = excluded.est_minutes,
+           status       = excluded.status,
+           completed_at = excluded.completed_at,
+           notes        = excluded.notes,
+           updated_at   = datetime('now')`,
+        [Number(t.id), t.day_date, Number(t.week_number) || 1, t.day_label ?? null,
+          t.day_theme ?? null, Number(t.position) || 0, String(t.title || ''),
+          t.description ?? null, t.est_minutes == null ? null : Number(t.est_minutes),
+          normalizeStudyPlanStatus(t.status), t.completed_at ?? null, t.notes ?? null],
+      );
+    }
+
+    // Meta: upsert each snapshot key (never deletes meta keys).
+    if (meta) {
+      for (const k of Object.keys(meta)) {
+        await run(
+          `INSERT INTO study_plan_meta (key, value, updated_at)
+           VALUES (?, ?, datetime('now'))
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+          [String(k), meta[k] == null ? null : String(meta[k])],
+        );
+      }
+    }
+    await run('COMMIT');
+  } catch (err) {
+    try { await run('ROLLBACK'); } catch { /* surface the original error */ }
+    throw err;
+  }
+  const [outTasks, outDays, outMeta] = await Promise.all([
+    listStudyPlanTasks(), listStudyPlanDays(), getStudyPlanMeta(),
+  ]);
+  return { tasks: outTasks, days: outDays, meta: outMeta };
+}
+
+// Wipe the entire plan (tasks AND days — meta preserved) so a fresh seed can
+// run. seedStudyPlanIfEmpty re-seeds days afterward via backfillStudyPlanDays.
+// Returns the number of deleted task rows.
 async function resetStudyPlanTasks() {
-  const result = await run('DELETE FROM study_plan_tasks');
-  return { deleted: result.changes };
+  await run('BEGIN');
+  try {
+    const result = await run('DELETE FROM study_plan_tasks');
+    await run('DELETE FROM study_plan_days');
+    await run('COMMIT');
+    return { deleted: result.changes };
+  } catch (err) {
+    try { await run('ROLLBACK'); } catch { /* surface the original error */ }
+    throw err;
+  }
 }
 
 // ─── Mock Results helpers ───────────────────────────────────────────────────
@@ -4086,12 +4450,29 @@ async function seedStudyPlanIfEmpty() {
       inserted++;
     }
   }
+  // Seed the first-class day rows to match (no-op if already populated).
+  await backfillStudyPlanDays();
   // Set initial meta only if absent.
   const meta = await getStudyPlanMeta();
   if (!meta.test_date) await setStudyPlanMeta('test_date', '2026-06-20');
   if (!meta.plan_title) await setStudyPlanMeta('plan_title', 'GMAT Final Sprint — 4 Weeks');
   if (!meta.daily_target_hours) await setStudyPlanMeta('daily_target_hours', '2.5');
   return { seeded: true, inserted };
+}
+
+// The plan's canonical day skeleton (date + week/label/theme), independent of
+// whether any task currently lives on that day. The dashboard renders the union
+// of this skeleton and the days tasks live on, so a day whose last task is
+// dragged away stays visible as an empty drop target instead of vanishing.
+// Derived from buildStudyPlanSeed() (the authoritative source of day metadata);
+// no DB read, no side effects.
+function buildStudyPlanDaySkeleton() {
+  return buildStudyPlanSeed().days.map((d) => ({
+    date: d.date,
+    week_number: d.week,
+    day_label: d.label,
+    day_theme: d.theme,
+  }));
 }
 
 function buildStudyPlanSeed() {
@@ -4461,6 +4842,10 @@ function buildStudyPlanSeed() {
       ],
     },
   ];
+  // Bucket the seed's days into Monday-start (Mon–Sun) weeks so a fresh plan and
+  // the existing-data migration agree on week boundaries (see rebucketWeeksMonSunOnce).
+  const wk = mondayWeekNumbers(days.map((d) => d.date));
+  for (const d of days) d.week = wk.get(d.date) ?? d.week;
   return { days };
 }
 
@@ -4504,6 +4889,13 @@ module.exports = {
   deleteStudyPlanTask,
   getStudyPlanMeta,
   setStudyPlanMeta,
+  buildStudyPlanDaySkeleton,
+  listStudyPlanDays,
+  createStudyPlanDay,
+  updateStudyPlanDay,
+  deleteStudyPlanDay,
+  reorderStudyPlanDays,
+  restoreStudyPlanSnapshot,
   seedStudyPlanIfEmpty,
   resetStudyPlanTasks,
   syncStudyPlanFromSeed,

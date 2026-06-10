@@ -176,7 +176,8 @@ body {
   display: flex;
   align-items: center;
   gap: var(--s2);
-  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 /* ─── Typography ─────────────────────────────────────────────── */
@@ -218,7 +219,8 @@ h3.eyebrow {
 }
 
 p { margin: 0; }
-.muted { color: var(--muted); }
+/* Readable body text — kept above the 4.5:1 AA floor (var(--muted) #7a807c is ~3.7:1 on cream and is reserved for bold uppercase micro-labels). */
+.muted { color: var(--ink-2); }
 
 /* ─── Form controls ──────────────────────────────────────────── */
 .form-grid {
@@ -343,7 +345,23 @@ textarea {
   color: var(--danger);
 }
 
-
+/* Full-width boot/connectivity error banner with inline Retry */
+.boot-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+  flex-wrap: wrap;
+}
+/* Readable body text on the danger tint (≥4.5:1 AA); the danger left border + tint carry the error signal, so the copy itself uses ink, not the low-contrast danger red. */
+.status.error.boot-error-banner { color: var(--ink-2); }
+.boot-error-banner .boot-error-text { flex: 1; min-width: 0; }
+.boot-error-banner code {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  font-size: 0.82em;
+}
 
 .ai-message {
   border: 1px solid var(--border);
@@ -386,7 +404,7 @@ textarea {
 }
 
 .ai-message.typing p {
-  color: var(--muted);
+  color: var(--ink-2);
   font-style: italic;
 }
 
@@ -788,9 +806,220 @@ tbody tr td[colspan] {
 .metric-list > li.metric-empty {
   display: block;
   padding: var(--s2) var(--s3);
-  color: var(--muted);
+  color: var(--ink-2);
   font-style: italic;
   text-align: center;
+}
+
+/* ─── First-run live checklist (empty-DB activation) ──────────── */
+.first-run { padding: 0; }
+
+.first-run-card {
+  max-width: 640px;
+  margin: var(--s6) auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  box-shadow: var(--shadow);
+  padding: var(--s8);
+}
+
+.first-run-title {
+  margin: 0 0 var(--s3);
+  font-family: 'Manrope', 'Trebuchet MS', sans-serif;
+  font-size: 1.22rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: var(--ink);
+  text-wrap: balance;
+  outline: none;
+}
+.first-run-title:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: var(--r-xs);
+}
+
+.first-run-lede {
+  margin: 0 0 var(--s6);
+  max-width: 52ch;
+  color: var(--ink-2);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+
+.first-run-steps {
+  list-style: none;
+  margin: 0 0 var(--s5);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s5);
+}
+
+.first-run-step {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+}
+
+/* Numerals stay quiet so the action buttons are the only loud (solid-sage)
+   elements. Only a COMPLETED step earns solid green (success = green). */
+.first-run-step-num {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  margin-top: 1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.first-run-step.is-active .first-run-step-num {
+  background: var(--primary-lt);
+  color: var(--primary);
+  box-shadow: inset 0 0 0 1px rgba(61, 122, 94, 0.45);
+}
+.first-run-step.is-done .first-run-step-num {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  box-shadow: none;
+}
+
+.first-run-step-body { min-width: 0; }
+.first-run-step-body strong {
+  display: block;
+  color: var(--ink);
+  font-size: 0.98rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.first-run-step-body p {
+  margin: 2px 0 0;
+  max-width: 52ch;
+  color: var(--ink-2);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+/* Steps not yet reachable read dimmed-but-legible, never disabled-gray. */
+.first-run-step.is-pending .first-run-step-body strong,
+.first-run-step.is-pending .first-run-step-body p { opacity: 0.7; }
+
+.first-run-step-action {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin-top: var(--s3);
+}
+
+.first-run-source { max-width: 260px; height: 36px; }
+
+.first-run-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink-2);
+  font-size: 0.8rem;
+}
+.first-run-dot::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+.first-run-dot.is-on { color: var(--primary); }
+.first-run-dot.is-on::before {
+  background: var(--primary);
+  animation: firstRunPulse 2.2s var(--ease) infinite;
+}
+
+@keyframes firstRunPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(61, 122, 94, 0.32); }
+  70%  { box-shadow: 0 0 0 6px rgba(61, 122, 94, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(61, 122, 94, 0); }
+}
+
+.first-run-note { color: var(--ink-2); font-size: 0.82rem; }
+
+.first-run-status {
+  margin: var(--s5) 0 0;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-s);
+  background: var(--primary-lt);
+  color: var(--ink-2);
+  font-size: 0.85rem;
+}
+.first-run-status.is-error {
+  background: var(--danger-lt);
+  border-color: rgba(181, 74, 68, 0.30);
+  color: var(--ink-2);
+}
+
+.first-run-advanced {
+  margin-top: var(--s4);
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--primary);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.first-run-advanced:hover { color: #35705a; }
+
+@media (max-width: 640px) {
+  .first-run-card { margin: var(--s4) 0; padding: var(--s6) var(--s5); }
+  .first-run-source { max-width: 100%; width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .first-run-dot.is-on::before { animation: none; }
+}
+
+/* ─── Table empty states (filter-aware) ───────────────────────── */
+.table-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s6) var(--s4);
+  text-align: center;
+}
+
+.table-empty-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.table-empty-sub {
+  margin: 0 0 var(--s2);
+  max-width: 46ch;
+  color: var(--ink-2);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.table-empty-loading {
+  display: block;
+  padding: var(--s4);
+  color: var(--ink-2);
+  font-style: italic;
 }
 
 /* ─── Filter row (Error Log & Sessions) ───────────────────────── */
@@ -868,14 +1097,30 @@ tbody tr td[colspan] {
 .filter-row.session-filters {
   display: flex;
   flex-direction: row;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   background: var(--surface-2);
-  padding: 6px 12px;
+  padding: var(--s3) var(--s4);
   border-radius: var(--r-s);
   border: 1px solid var(--border);
-  gap: var(--s4);
+  gap: var(--s3) var(--s4);
   margin-bottom: 0;
+}
+
+/* Desktop-first layout. The shadcn Select primitive is `w-full`, so without a
+   width each select grabs a whole row and the controls stack. Pin them compact
+   and inline; the date group takes the slack (margin-right:auto) so the action
+   buttons sit at the right edge — a tidy single filter row on desktop. */
+.session-filters .filter-select {
+  width: 190px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.session-filters .date-filter-group {
+  margin-right: auto;
+}
+.session-filters .date-filter-group input {
+  width: 150px;
 }
 
 .date-filter-group {
@@ -895,6 +1140,7 @@ tbody tr td[colspan] {
 
 .filter-select {
   min-height: 34px;
+  min-width: 130px;
   padding: 4px 10px;
   background: #fff;
 }
@@ -1520,8 +1766,19 @@ th.sortable:hover {
   color: var(--primary);
 }
 
+.question-review-overlay {
+  padding: 0;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
 .question-review-dialog {
-  width: min(1180px, calc(100vw - 24px));
+  width: 100vw;
+  max-width: 100vw;
+  height: 100vh;
+  max-height: 100vh;
+  border-radius: 0;
+  border: none;
 }
 
 .question-review-shell {
@@ -1816,6 +2073,18 @@ th.sortable:hover {
 .question-review-layout {
   display: grid;
   gap: var(--s4);
+}
+
+.question-review-col {
+  display: grid;
+  gap: var(--s4);
+  align-content: start;
+}
+
+.question-annotation-grid {
+  display: grid;
+  gap: var(--s3);
+  grid-template-columns: 1fr;
 }
 
 .answer-choice-list,
@@ -2563,7 +2832,7 @@ th.sortable:hover {
   border-radius: 6px;
   font-size: 0.8rem;
   font-weight: 600;
-  color: var(--muted);
+  color: var(--ink-2);
   text-decoration: none;
   transition: background var(--t) var(--ease), color var(--t) var(--ease);
 }
@@ -3040,7 +3309,12 @@ html {
   }
 
   .question-review-layout {
-    grid-template-columns: minmax(0, 1.6fr) minmax(300px, 0.9fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .question-annotation-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 0.8fr);
     align-items: start;
   }
 
@@ -5295,5 +5569,586 @@ html {
   align-items: center;
   justify-content: flex-end;
   gap: 14px;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Study Plan (sage/gold). Migrated off the legacy indigo island onto the main
+   token system. Components: history controls, week/day cards, day editor,
+   drag affordances, and the undo toast.
+   z-index scale: section-nav 100 · coach dock 1100 · undo toast 1150 · modal 1200
+   ────────────────────────────────────────────────────────────────────────── */
+
+.sp-stat-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.sp-stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  margin-top: 2px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.sp-linkbtn {
+  margin-left: 8px;
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  color: var(--primary);
+  cursor: pointer;
+  padding: 0;
+}
+.sp-linkbtn:hover { color: var(--primary-deep, #35705a); text-decoration: underline; }
+
+.sp-th-row th {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Inputs — recessed wells with the gold keyboard-focus signature */
+.sp-input {
+  padding: 6px 10px;
+  border-radius: var(--r-s);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 13px;
+  font-family: inherit;
+}
+.sp-input-full { width: 100%; }
+.sp-input:hover { border-color: var(--border-2); }
+.sp-input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(61, 122, 94, 0.14);
+}
+.sp-input:focus-visible {
+  outline: 2px solid rgba(196, 168, 67, 0.7);
+  outline-offset: 1px;
+}
+
+/* Progress bar */
+.sp-progress {
+  height: 10px;
+  border-radius: var(--r-pill, 9999px);
+  background: var(--primary-md);
+  overflow: hidden;
+}
+.sp-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--primary), var(--primary-deep, #35705a));
+  transition: width var(--t2, 280ms) var(--ease, ease);
+}
+
+/* Undo / Redo control pair in the top bar */
+.sp-history {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--r-s);
+  overflow: hidden;
+  background: var(--surface);
+}
+.sp-history-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--ink-2);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background var(--t, 160ms) var(--ease, ease), color var(--t, 160ms) var(--ease, ease);
+}
+.sp-history-btn + .sp-history-btn { border-left: 1px solid var(--border); }
+.sp-history-btn:not(:disabled):hover { background: var(--primary-lt); color: var(--primary); }
+.sp-history-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.sp-history-btn:focus-visible { outline: 2px solid rgba(196, 168, 67, 0.7); outline-offset: -2px; }
+
+/* Week section header */
+.sp-week-head {
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  background: rgba(61, 122, 94, 0.05);
+  cursor: pointer;
+}
+.sp-addday-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--primary);
+  background: transparent;
+  border: 1px solid rgba(61, 122, 94, 0.45);
+  border-radius: var(--r-s);
+  cursor: pointer;
+  transition: background var(--t, 160ms) var(--ease, ease);
+}
+.sp-addday-btn:hover { background: var(--primary-lt); }
+.sp-addday-btn:focus-visible { outline: 2px solid rgba(196, 168, 67, 0.7); outline-offset: 1px; }
+
+/* Day card */
+.sp-day {
+  padding: 10px 24px 12px;
+  border-top: 1px solid var(--border);
+  background: transparent;
+}
+.sp-day.is-today { background: var(--primary-lt); }
+.sp-day-dragmode { cursor: grabbing; }
+.sp-day-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.sp-day-grip {
+  align-self: center;
+  display: inline-flex;
+  background: transparent;
+  border: none;
+  padding: 2px;
+  margin-left: -4px;
+  color: var(--muted);
+  cursor: grab;
+  touch-action: none;
+  border-radius: var(--r-xs);
+  transition: color var(--t, 160ms) var(--ease, ease), background var(--t, 160ms) var(--ease, ease);
+}
+.sp-day-grip:hover { color: var(--primary); background: var(--primary-lt); }
+.sp-day-grip:focus-visible { outline: 2px solid rgba(196, 168, 67, 0.7); outline-offset: 1px; }
+.sp-day-date {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.sp-day-date.is-today { color: var(--primary); }
+.sp-day-date.is-past { color: var(--muted); }
+.sp-day-theme { font-size: 15px; font-weight: 600; color: var(--ink); }
+.sp-day-theme-empty { font-weight: 400; font-style: italic; color: var(--muted); }
+
+/* Inline day editor */
+.sp-day-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin: 8px 0 4px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-s);
+}
+.sp-day-editor > label { min-width: 130px; }
+
+/* Drop zone for tasks */
+.sp-day-drop {
+  margin-top: 8px;
+  border-radius: var(--r-s);
+  outline: 2px dashed transparent;
+  outline-offset: 2px;
+  transition: outline-color var(--t, 160ms) var(--ease, ease);
+}
+.sp-day-drop.is-over { outline-color: rgba(61, 122, 94, 0.5); }
+.sp-day-empty {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 0 8px 28px;
+  font-style: italic;
+}
+
+.sp-addtask-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 28px;
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  color: var(--primary);
+  cursor: pointer;
+  padding: 4px 0;
+  font-family: inherit;
+}
+.sp-addtask-btn:hover { text-decoration: underline; }
+
+.sp-task-grip {
+  cursor: grab;
+  background: transparent;
+  border: none;
+  padding: 8px 2px 0 0;
+  color: var(--muted);
+  touch-action: none;
+  line-height: 1;
+}
+.sp-task-grip:hover { color: var(--primary); }
+.sp-task-grip:focus-visible { outline: 2px solid rgba(196, 168, 67, 0.7); outline-offset: 1px; border-radius: var(--r-xs); }
+
+.sp-check {
+  margin-top: 4px;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+
+/* Icon buttons (notes / edit / skip / delete) */
+.sp-iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--r-xs);
+  color: var(--ink-2);
+  line-height: 1;
+  transition: background var(--t, 160ms) var(--ease, ease), color var(--t, 160ms) var(--ease, ease);
+}
+.sp-iconbtn:hover { background: var(--primary-lt); color: var(--primary); }
+.sp-iconbtn.is-active { background: var(--primary-md); color: var(--primary); }
+.sp-iconbtn:focus-visible { outline: 2px solid rgba(196, 168, 67, 0.7); outline-offset: 1px; }
+
+/* Drag previews (the floating thing under the cursor) */
+.sp-drag-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: var(--r-s);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  border: 1px solid rgba(61, 122, 94, 0.4);
+  font-size: 14px;
+  font-weight: 500;
+  max-width: 480px;
+  cursor: grabbing;
+}
+.sp-drag-preview-day {
+  border-color: var(--primary);
+  flex-wrap: wrap;
+  max-width: 560px;
+}
+
+/* Undo toast */
+.sp-toast-wrap {
+  position: fixed;
+  left: 24px;
+  bottom: 24px;
+  z-index: 1150;
+  pointer-events: none;
+}
+.sp-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px 10px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r);
+  box-shadow: 0 8px 40px rgba(21, 34, 27, 0.16), 0 2px 8px rgba(21, 34, 27, 0.08);
+  font-size: 13.5px;
+  color: var(--ink);
+  max-width: min(420px, calc(100vw - 48px));
+  animation: sp-toast-in var(--t2, 280ms) cubic-bezier(0.16, 1, 0.3, 1);
+}
+.sp-toast-msg { font-weight: 500; }
+.sp-toast-action {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid rgba(61, 122, 94, 0.5);
+  color: var(--primary);
+  font-weight: 700;
+  font-size: 12.5px;
+  font-family: inherit;
+  padding: 5px 12px;
+  border-radius: var(--r-s);
+  cursor: pointer;
+  transition: background var(--t, 160ms) var(--ease, ease);
+}
+.sp-toast-action:hover { background: var(--primary-lt); }
+.sp-toast-action:focus-visible { outline: 2px solid rgba(196, 168, 67, 0.7); outline-offset: 1px; }
+.sp-toast-close {
+  flex-shrink: 0;
+  display: inline-flex;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--r-xs);
+  line-height: 1;
+}
+.sp-toast-close:hover { color: var(--ink); background: var(--primary-lt); }
+.sp-toast-close:focus-visible { outline: 2px solid rgba(196, 168, 67, 0.7); outline-offset: 1px; }
+
+@keyframes sp-toast-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sp-toast { animation: sp-toast-fade var(--t, 160ms) ease; }
+  .sp-progress-fill { transition: none; }
+  @keyframes sp-toast-fade { from { opacity: 0; } to { opacity: 1; } }
+}
+
+@media (max-width: 560px) {
+  .sp-toast-wrap { left: 16px; right: 16px; bottom: 16px; }
+  .sp-toast { max-width: none; }
+  .sp-history-btn span { display: none; }
+  .sp-history-btn { padding: 6px 10px; }
+}
+
+/* ─── Today's Plan dashboard panel ──────────────────────────────────────────
+   Brings study-plan content onto the dashboard on the sage/gold token system
+   (reuses .sp-progress / .sp-check / .sp-iconbtn / .sp-input). Writes through the
+   same /api/study-plan endpoints as the full board. */
+.today-body { display: flex; flex-direction: column; gap: var(--s4); }
+
+.today-fulllink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--primary);
+  text-decoration: none;
+  padding: 4px 8px;
+  border-radius: var(--r-xs);
+  transition: background var(--t) var(--ease);
+}
+.today-fulllink:hover { background: var(--primary-lt); text-decoration: underline; }
+.today-fulllink:focus-visible { outline: 2px solid rgba(196, 168, 67, 0.7); outline-offset: 1px; }
+
+/* Orientation strip — recessed grouped surface, distinct from the task list */
+.today-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+  padding: 14px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-s);
+}
+.today-head-main { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.today-daterow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+
+.today-daychip {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: var(--r-pill, 9999px);
+  background: var(--surface);
+  color: var(--ink-2);
+  border: 1px solid var(--border-2);
+}
+.today-daychip.is-today {
+  background: var(--primary);
+  color: #fff;
+  border-color: transparent;
+}
+.today-datelabel {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.today-theme {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+  max-width: 60ch;
+}
+
+.today-countdown {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+  flex-shrink: 0;
+}
+.today-countdown-num {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.today-progress { display: flex; flex-direction: column; gap: 6px; }
+.today-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--s3);
+  font-size: 0.8rem;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.today-progress-count { font-weight: 600; }
+
+.today-clear {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--primary);
+}
+.today-notasks {
+  margin: 0;
+  font-size: 0.85rem;
+  font-style: italic;
+  color: var(--ink-2);
+}
+
+/* Task list */
+.today-tasks { list-style: none; margin: 0; padding: 0; }
+.today-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+}
+.today-task + .today-task { border-top: 1px solid var(--border); }
+.today-task-main { flex: 1; min-width: 0; }
+.today-task-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.92rem;
+  font-weight: 500;
+  color: var(--ink);
+}
+.today-task.is-done .today-task-text {
+  text-decoration: line-through;
+  color: var(--ink-2);
+}
+.today-task.is-skipped { opacity: 0.55; }
+.today-task.is-skipped .today-task-text { text-decoration: line-through; }
+
+.today-task-mins {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--ink-2);
+  background: var(--surface-2);
+  padding: 1px 7px;
+  border-radius: var(--r-pill, 9999px);
+  font-variant-numeric: tabular-nums;
+}
+.today-task-flag {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.today-task-desc {
+  margin: 2px 0 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.today-task-actions { display: flex; gap: 2px; flex-shrink: 0; }
+
+/* Inline editors */
+.today-task-editing { padding: 10px 0; }
+.today-edit { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.today-edit-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
+.today-edit-mins { display: flex; flex-direction: column; gap: 3px; }
+.today-edit-actions { display: flex; gap: 8px; margin-left: auto; }
+
+.today-notes { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.today-notes-field { resize: vertical; background: var(--primary-lt); }
+.today-notes-actions { display: flex; gap: 6px; }
+
+/* Add task */
+.today-addtask {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 28px;
+  padding: 4px 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  font-family: inherit;
+  background: transparent;
+  border: none;
+  color: var(--primary);
+  cursor: pointer;
+}
+.today-addtask:hover { text-decoration: underline; }
+.today-addtask:focus-visible { outline: 2px solid rgba(196, 168, 67, 0.7); outline-offset: 2px; border-radius: var(--r-xs); }
+.today-addtask-row { display: flex; align-items: center; gap: 8px; }
+
+/* Empty state */
+.today-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s8) var(--s4);
+  text-align: center;
+}
+.today-empty-msg { margin: 0; font-size: 0.9rem; color: var(--ink-2); }
+
+/* Skeleton */
+.today-skeleton { display: flex; flex-direction: column; gap: 10px; }
+.today-skel-head, .today-skel-row {
+  border-radius: var(--r-s);
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--bg) 37%, var(--surface-2) 63%);
+  background-size: 400% 100%;
+  animation: today-shimmer 1.4s ease infinite;
+}
+.today-skel-head { height: 56px; }
+.today-skel-row { height: 30px; border-radius: var(--r-xs); }
+@keyframes today-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: 0 0; }
+}
+
+@media (max-width: 560px) {
+  .today-head { padding: 12px; }
+  .today-countdown { flex-direction: row; align-items: baseline; gap: 6px; text-align: left; }
+  .today-fulllink { padding: 4px; }
+}
+
+/* Global reduced-motion guard — the per-module guards above only cover the LSAT/OPE/toast subtrees.
+   This neutralizes the main dashboard's rise/pulse, the coach panel scale+fade, and any shimmer. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 

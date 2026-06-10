@@ -4,6 +4,7 @@ import { Badge } from './components/ui/badge';
 import { Input } from './components/ui/input';
 import { Textarea } from './components/ui/textarea';
 import { Select } from './components/ui/select';
+import TodayPlan from './TodayPlan';
 // Heavy route-level views — lazy-loaded so they don't bloat the initial bundle.
 // The dashboard (default route) loads without them; they fetch on demand when
 // the user navigates to #lsat or #study-plan.
@@ -272,6 +273,19 @@ function normalizeQuestionText(value) {
     .trim();
 }
 
+// Split a passage into display paragraphs. Splits on blank lines (the paragraph
+// break both LSAT JSON and StartTest enrichment use), drops a leading "Passage:"
+// label, and collapses intra-paragraph whitespace so each <p> wraps cleanly.
+// normalizeQuestionText can't be used directly here because it flattens every
+// newline into a space, which would erase the paragraph boundaries.
+function splitPassageParagraphs(value) {
+  return String(value || '')
+    .replace(/^\s*passage\s*:\s*/i, '')
+    .split(/\n{2,}/)
+    .map((para) => para.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
 function parseAnswerChoices(value) {
   if (Array.isArray(value)) return value;
   const text = String(value || '').trim();
@@ -299,6 +313,48 @@ function parseResponseDetails(value) {
 function getResponseSlots(row) {
   const details = parseResponseDetails(row?.response_details);
   return Array.isArray(details?.slots) ? details.slots : [];
+}
+
+// Decode a matrix item's selections into display-ready structures.
+//
+// Per-cell `isCorrect` is unreliable for matrix questions: StartTest's review
+// DOM rarely color-codes matrix cells, so the Phase 2 scraper leaves isCorrect
+// unset (color=null) on nearly every cell. The authoritative correct answer is
+// `correctCsv` (the row's correct_answer, sourced from the Key1 form field).
+// We decode it orientation-aware, because TPA and MSR tables transpose it:
+//   - per-column (len === colCount): value i = correct ROW number for column i   (Two-Part Analysis)
+//   - per-row    (len === rowCount): value i = correct COLUMN number for row i    (some MSR tables)
+// User picks come from the reliable per-cell isUserSelected flags (radiochecked.gif).
+// Returns 1-indexed structures so callers can render row/column numbers directly.
+function decodeMatrixSelections(choices, correctCsv) {
+  const rowCount = Array.isArray(choices) ? choices.length : 0;
+  const colCount = choices?.[0]?.options?.length ?? 0;
+  const headers = Array.isArray(choices?.[0]?.headers) ? choices[0].headers : [];
+  const correctCells = new Set();              // "row,col" keys, 1-indexed
+  const correctByCol = new Array(colCount).fill(null);
+  const userByCol = new Array(colCount).fill(null);
+  const ck = String(correctCsv || '').split(/\s*,\s*/);
+  if (ck.length === colCount && colCount > 0) {
+    ck.forEach((rowNum, ci) => {
+      const r = Number(rowNum);
+      if (rowNum && Number.isFinite(r) && r >= 1) {
+        correctCells.add(`${r},${ci + 1}`);
+        correctByCol[ci] = r;
+      }
+    });
+  } else if (ck.length === rowCount && rowCount > 0) {
+    ck.forEach((colNum, ri) => {
+      const c = Number(colNum);
+      if (colNum && Number.isFinite(c) && c >= 1 && c <= colCount) {
+        correctCells.add(`${ri + 1},${c}`);
+        correctByCol[c - 1] = ri + 1;
+      }
+    });
+  }
+  (choices || []).forEach((row, ri) => (row?.options || []).forEach((o, ci) => {
+    if (o?.isUserSelected && ci < colCount) userByCol[ci] = ri + 1;
+  }));
+  return { rowCount, colCount, headers, correctCells, correctByCol, userByCol };
 }
 
 function formatResponseFormat(value) {
@@ -419,8 +475,14 @@ function normalizedCategoryCode(row) {
   if (topic === 'GRAPHICS INTERPRETATION' || topic === 'G&T GRAPHS' || topic === 'G&T MATH RELATED' || topic === 'G&T NON-MATH RELATED') return 'GI';
   if (topic === 'TWO-PART ANALYSIS' || topic === 'TPA MATH RELATED' || topic === 'TPA NON-MATH RELATED') return 'TPA';
 
+  // Data Insights rows with no specific DS/MSR/TA/GI/TPA question-type. The
+  // "OG Data Insights" product tags questions by theme (e.g. "Tradeoffs",
+  // "Practical Constraints") rather than by question-type, so the scraper
+  // leaves category_code empty. Show the broad "Data Insights" category here
+  // instead of echoing the topic — echoing it would duplicate the subcategory
+  // column. The specific theme stays in the subcategory column.
+  if (upper === 'DI' || upper === 'DATA') return 'Data Insights';
   if (!raw) return '-';
-  if (upper === 'DI') return 'Unknown DI';
   return raw;
 }
 
@@ -586,33 +648,6 @@ function truncateTableText(value, maxLength = 44) {
   return `${text.slice(0, maxLength - 1)}…`;
 }
 
-function isStructuredResponseRow(row) {
-  return String(row?.response_format || '').trim().toLowerCase() === 'composite' || getResponseSlots(row).length > 0;
-}
-
-function getCompactResponseValue(row, key = 'my_answer') {
-  if (isStructuredResponseRow(row)) {
-    const partCount = getResponseSlots(row).length;
-    if (partCount > 0) return `${partCount}-part structured`;
-    return 'Structured';
-  }
-  return truncateTableText(row?.[key], 38);
-}
-
-function getCompactResponseDisplay(row) {
-  if (isStructuredResponseRow(row)) {
-    return getCompactResponseValue(row, 'my_answer');
-  }
-
-  const mine = getCompactResponseValue(row, 'my_answer');
-  const correct = getCompactResponseValue(row, 'correct_answer');
-  if (mine === '-' && correct === '-') return '-';
-  if (mine === '-') return `Correct: ${correct}`;
-  if (correct === '-') return `Mine: ${mine}`;
-  if (mine === correct) return mine;
-  return `${mine} -> ${correct}`;
-}
-
 function SubjectCell({ row }) {
   const subjectCode = normalizedSubjectCode(row);
   const subjectDisplay = normalizeSubjectFamilyDisplay(subjectCode);
@@ -694,14 +729,6 @@ function ScoreChip({ row }) {
   );
 }
 
-function ResponseCell({ row }) {
-  return (
-    <div className="response-summary-cell">
-      <strong>{getCompactResponseDisplay(row)}</strong>
-    </div>
-  );
-}
-
 function mapSubjectFamily(subject) {
   const raw = String(subject || '').trim();
   const upper = raw.toUpperCase();
@@ -760,10 +787,169 @@ const AI_COACH_QUICK_PROMPTS = [
 ];
 
 function buildCoachGreeting(scopeLabel) {
+  const scope = scopeLabel === 'All runs' ? 'your whole practice record' : scopeLabel;
   return {
     role: 'assistant',
-    content: `I’m your GMAT coach for ${scopeLabel}. Ask about weak topics, timing, drill plans, or score-improvement strategy.`,
+    content: `Ready when you are — I’ve read ${scope}. Ask where you’re losing the most points, what to drill next, or how to steady your timing, and I’ll give it to you straight.`,
   };
+}
+
+// Per-platform domains used to detect (best-effort) whether the user's
+// debug-Chrome already has the right practice tab open, so step 2 can confirm.
+const FIRST_RUN_PLATFORM_DOMAINS = {
+  starttest: ['starttest.com'],
+  gmatclub: ['gmatclub.com'],
+  ttp: ['targettestprep.com'],
+  'ope-mock': ['mba.com'],
+};
+
+function firstRunPracticeTabOpen(tabs, platform) {
+  const domains = FIRST_RUN_PLATFORM_DOMAINS[platform] || [];
+  if (!domains.length || !Array.isArray(tabs)) return false;
+  return tabs.some((t) => domains.some((d) => String(t.url || '').includes(d)));
+}
+
+// First-run activation panel. Shown only when the database is genuinely empty
+// (no runs, no sessions, no errors) so a returning user never sees it. It is a
+// live checklist, not a static teach card: the CTA fires step 1 (open
+// debug-Chrome), the steps light up from a polled CDP status, and the scrape
+// runs inline so the warm first-run moment never hands off to a cold modal.
+function FirstRunWelcome({
+  cdpStatus,
+  sources,
+  selectedSource,
+  onSelectSource,
+  onOpenChrome,
+  isOpening,
+  onOpenProduct,
+  isOpeningProduct,
+  onScrape,
+  isScraping,
+  onOpenSyncPanel,
+  status,
+}) {
+  const headingRef = useRef(null);
+  useEffect(() => {
+    // Land keyboard / screen-reader focus on the panel when it first appears.
+    headingRef.current?.focus();
+  }, []);
+
+  const preset = sources.find((s) => s.id === selectedSource);
+  const platform = preset?.platform || 'starttest';
+  const cdpUp = Boolean(cdpStatus?.connected);
+  const practiceTabOpen = cdpUp && firstRunPracticeTabOpen(cdpStatus?.tabs, platform);
+  const isOpe = platform === 'ope-mock';
+
+  const step1 = cdpUp ? 'done' : 'active';
+  const step2 = practiceTabOpen ? 'done' : cdpUp ? 'active' : 'pending';
+  const step3 = cdpUp ? 'active' : 'pending';
+  const busy = isOpening || isOpeningProduct || isScraping;
+
+  return (
+    <section className="first-run" aria-labelledby="first-run-title">
+      <div className="first-run-card">
+        <h2 id="first-run-title" className="first-run-title" tabIndex={-1} ref={headingRef}>
+          Let’s get your first session in.
+        </h2>
+        <p className="first-run-lede">
+          This is your private GMAT record. Connect your practice, run one scrape, and
+          your sessions, errors, and weak spots fill in below.
+        </p>
+
+        <ol className="first-run-steps">
+          <li className={`first-run-step is-${step1}`}>
+            <span className="first-run-step-num" aria-hidden="true">{step1 === 'done' ? '✓' : '1'}</span>
+            <div className="first-run-step-body">
+              <strong>Open Chrome with debugging on</strong>
+              <p>Launches your logged-in Chrome on port 9222 so the scraper can read your history.</p>
+              <div className="first-run-step-action">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={cdpUp ? 'outline' : undefined}
+                  onClick={onOpenChrome}
+                  disabled={isOpening}
+                >
+                  {isOpening ? 'Opening…' : cdpUp ? 'Reopen Chrome' : 'Open Chrome'}
+                </Button>
+                <span className={`first-run-dot ${cdpUp ? 'is-on' : 'is-off'}`} role="status">
+                  {cdpUp ? 'Chrome connected on :9222' : 'Not detected yet'}
+                </span>
+              </div>
+            </div>
+          </li>
+
+          <li className={`first-run-step is-${step2}`}>
+            <span className="first-run-step-num" aria-hidden="true">{step2 === 'done' ? '✓' : '2'}</span>
+            <div className="first-run-step-body">
+              <strong>Log in and open your practice</strong>
+              <p>Pick your source, then open it in that Chrome window.</p>
+              <div className="first-run-step-action">
+                <Select
+                  className="first-run-source"
+                  value={selectedSource}
+                  onChange={(e) => onSelectSource(e.target.value)}
+                  aria-label="Practice source"
+                >
+                  {sources.map((s) => (
+                    <option key={s.id} value={s.id}>{s.label}</option>
+                  ))}
+                </Select>
+                {platform === 'starttest' ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={onOpenProduct}
+                    disabled={!cdpUp || isOpeningProduct}
+                  >
+                    {isOpeningProduct ? 'Opening…' : 'Open in GMAT'}
+                  </Button>
+                ) : (
+                  <span className="first-run-note">Log in to {preset?.label || 'your practice'} in the Chrome window.</span>
+                )}
+                {practiceTabOpen && <span className="first-run-dot is-on" role="status">Practice tab open</span>}
+              </div>
+            </div>
+          </li>
+
+          <li className={`first-run-step is-${step3}`}>
+            <span className="first-run-step-num" aria-hidden="true">3</span>
+            <div className="first-run-step-body">
+              <strong>Run the scrape</strong>
+              <p>Your sessions, errors, and topic breakdowns fill in here. It takes about a minute.</p>
+              <div className="first-run-step-action">
+                {isOpe ? (
+                  <>
+                    <Button type="button" size="sm" onClick={onOpenSyncPanel}>Open Sync panel</Button>
+                    <span className="first-run-note">Mock exams need a take picked in the full panel.</span>
+                  </>
+                ) : (
+                  <Button type="button" size="sm" onClick={onScrape} disabled={!cdpUp || isScraping}>
+                    {isScraping ? 'Scraping…' : 'Run scrape'}
+                  </Button>
+                )}
+              </div>
+            </div>
+          </li>
+        </ol>
+
+        {status?.message && (
+          <p
+            className={`first-run-status${status.isError ? ' is-error' : ''}`}
+            role={status.isError ? 'alert' : 'status'}
+            aria-busy={busy || undefined}
+          >
+            {status.message}
+          </p>
+        )}
+
+        <button type="button" className="first-run-advanced" onClick={onOpenSyncPanel}>
+          Use the full Sync panel
+        </button>
+      </div>
+    </section>
+  );
 }
 
 function modeFromHash(hash) {
@@ -785,6 +971,8 @@ function App() {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
   const [status, setStatus] = useState({ message: 'Loading...', isError: false });
+  const [bootError, setBootError] = useState(null);
+  const [isDashboardLoading, setIsDashboardLoading] = useState(true);
   const [sources, setSources] = useState([]);
   const [selectedSource, setSelectedSource] = useState('');
   const [runs, setRuns] = useState([]);
@@ -806,8 +994,16 @@ function App() {
   const [isOpening, setIsOpening] = useState(false);
   const [isOpeningProduct, setIsOpeningProduct] = useState(false);
   const [isScraping, setIsScraping] = useState(false);
+  // Live debug-Chrome status for the first-run checklist (polled while empty-DB).
+  const [cdpStatus, setCdpStatus] = useState({ connected: false, tabs: [], checked: false });
   const [isEnriching, setIsEnriching] = useState(false);
   const [lastEnrichResult, setLastEnrichResult] = useState(null);
+  // Session id pending enrich confirmation. We use an in-app dialog instead of a
+  // native window.confirm(): the dashboard typically runs in the same Chrome the
+  // scraper drives over CDP, and any attached Playwright/CDP client auto-dismisses
+  // native JS dialogs the instant they open — which made the confirm flash and
+  // vanish so enrich never ran. Plain DOM can't be auto-dismissed.
+  const [enrichConfirmId, setEnrichConfirmId] = useState(null);
   // OPE (mock exam) take-picker state. Populated when the selected source is
   // an ope-mock platform; cleared otherwise.
   const [opeTakes, setOpeTakes] = useState([]);
@@ -875,9 +1071,11 @@ function App() {
   const aiChatEndRef = useRef(null);
 
   const [showDifficultyCols, setShowDifficultyCols] = useState(false);
+  const [showSessionDifficultyCols, setShowSessionDifficultyCols] = useState(false);
 
   // Collapsible sections state
   const [collapsedSections, setCollapsedSections] = useState({
+    today: false,
     topicDashboard: false,
     categoryBreakdown: false,
     performanceBySession: false,
@@ -971,6 +1169,7 @@ function App() {
   }
 
   async function handleDeleteSession(sessionId) {
+    if (!window.confirm('Delete this chat session? This cannot be undone.')) return;
     try {
       await fetchJson(`/api/ai/sessions/${sessionId}`, { method: 'DELETE' });
       setChatSessions((prev) => prev.filter((s) => s.id !== sessionId));
@@ -1068,26 +1267,26 @@ function App() {
     return rows;
   }
 
-  useEffect(() => {
-    let active = true;
-    async function boot() {
-      try {
-        await loadSources();
-        await loadRuns();
-        await loadDashboard('');
-        if (active) {
-          setStatus({ message: 'Ready. Start by opening Chrome and running scrape.', isError: false });
-        }
-      } catch (error) {
-        if (active) {
-          setStatus({ message: error.message, isError: true });
-        }
-      }
+  async function runBoot() {
+    setIsDashboardLoading(true);
+    setBootError(null);
+    setStatus({ message: 'Loading…', isError: false });
+    try {
+      await loadSources();
+      await loadRuns();
+      await loadDashboard('');
+      setStatus({ message: 'Ready. Start by opening Chrome and running scrape.', isError: false });
+    } catch (error) {
+      setBootError({ message: formatRequestError(error), status: error?.status || null });
+      setStatus({ message: formatRequestError(error), isError: true });
+    } finally {
+      setIsDashboardLoading(false);
     }
-    boot();
-    return () => {
-      active = false;
-    };
+  }
+
+  useEffect(() => {
+    runBoot();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -1107,10 +1306,11 @@ function App() {
       if (patternDrilldown.open) { setPatternDrilldown((prev) => ({ ...prev, open: false })); return; }
       if (sessionAnalysis.open) { handleCloseSessionAnalysis(); return; }
       if (syncCenterOpen) { setSyncCenterOpen(false); return; }
+      if (coachOpen) { setCoachOpen(false); return; }
     }
     document.addEventListener('keydown', handleEscape);
     return () => document.removeEventListener('keydown', handleEscape);
-  }, [annotation.open, questionReview.open, patternDrilldown.open, sessionAnalysis.open, syncCenterOpen]);
+  }, [annotation.open, questionReview.open, patternDrilldown.open, sessionAnalysis.open, syncCenterOpen, coachOpen]);
 
   useEffect(() => {
     setAiReview('');
@@ -1362,6 +1562,23 @@ function App() {
       console.error('Scrape request failed', error);
     } finally {
       setIsScraping(false);
+    }
+  }
+
+  // Probe the local debug-Chrome. Never throws to the caller; a down browser is
+  // a normal state, not an error, so the first-run checklist just shows it.
+  async function checkCdpStatus() {
+    try {
+      const result = await fetchJson('/api/cdp-status');
+      setCdpStatus({
+        connected: Boolean(result?.connected),
+        tabs: Array.isArray(result?.tabs) ? result.tabs : [],
+        checked: true,
+      });
+      return result;
+    } catch {
+      setCdpStatus({ connected: false, tabs: [], checked: true });
+      return null;
     }
   }
 
@@ -2077,6 +2294,10 @@ function App() {
       error: '',
       data: null,
     });
+    // Drop any prior enrich outcome / pending confirm so neither resurfaces on
+    // the next session opened (the status block renders on lastEnrichResult alone).
+    setLastEnrichResult(null);
+    setEnrichConfirmId(null);
   }
 
   function handleOpenAnnotation(row) {
@@ -2349,6 +2570,46 @@ function App() {
     }
   }
 
+  // True only on a genuinely empty database — drives the first-run welcome and
+  // suppresses the four empty data sections. Runs are never filtered, so they
+  // are the most reliable "has anything ever been scraped" signal. Computed
+  // before the appMode early returns so the polling hook below stays
+  // unconditional (rules-of-hooks).
+  const hasEverScraped =
+    runs.length > 0
+    || (sessionPagination.total || 0) > 0
+    || (errorPagination.total || 0) > 0;
+  const isFirstRun = !isDashboardLoading && !bootError && !hasEverScraped;
+
+  // Filter-aware empty states: "filtered to nothing" (offer Clear) vs
+  // "no data yet" (offer Sync) read very differently to the user.
+  const hasActiveErrorFilters = Boolean(
+    filters.subject || filters.difficulty || filters.topic
+    || filters.confidence || filters.search || filters.mistakeTag || filters.platform,
+  );
+  const hasActiveSessionFilters = Boolean(
+    sessionPlatformFilter || sessionSubjectFilter
+    || sessionDateRange.start || sessionDateRange.end,
+  );
+  function clearErrorFilters() {
+    setFilters({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' });
+  }
+  function clearSessionFilters() {
+    setSessionPlatformFilter('');
+    setSessionSubjectFilter('');
+    setSessionDateRange({ start: '', end: '' });
+  }
+
+  // Poll debug-Chrome status only while the first-run checklist is on screen so
+  // its step dots stay live. Cheap HTTP probe; stops the moment data exists.
+  useEffect(() => {
+    if (!isFirstRun || appMode !== 'gmat') return undefined;
+    checkCdpStatus();
+    const id = setInterval(() => { checkCdpStatus(); }, 4000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFirstRun, appMode]);
+
   if (appMode === 'lsat') {
     return (
       <Suspense fallback={<RouteFallback />}>
@@ -2369,8 +2630,13 @@ function App() {
       <header className="top-bar">
         <div className="top-bar-left">
           <h1 className="top-bar-title">GMAT Analytics</h1>
-          {status.message && (
-            <span className={`top-bar-status${status.isError ? ' error' : ''}`}>{status.message}</span>
+          {status.message && !bootError && (
+            <span
+              className={`top-bar-status${status.isError ? ' error' : ''}`}
+              role={status.isError ? 'alert' : 'status'}
+            >
+              {status.message}
+            </span>
           )}
         </div>
         <div className="top-bar-actions">
@@ -2395,20 +2661,35 @@ function App() {
         </div>
       </header>
 
-      {/* Section nav */}
-      <nav className="section-nav" aria-label="Jump to section">
-        <a href="#dashboard" className="section-nav-link">Dashboard</a>
-        <a href="#categories" className="section-nav-link">Categories</a>
-        <a href="#sessions" className="section-nav-link">Sessions</a>
-        <a href="#errors" className="section-nav-link">Error Log</a>
-      </nav>
+      {bootError && (
+        <div className="status error boot-error-banner" role="alert">
+          <span className="boot-error-text">
+            <strong>Couldn’t reach your data.</strong> {bootError.message}{' '}
+            If the local API isn’t running, start it with <code>npm run dev:api</code>, then retry.
+          </span>
+          <Button variant="outline" size="sm" type="button" onClick={() => runBoot()}>
+            Retry
+          </Button>
+        </div>
+      )}
+
+      {/* Section nav — hidden on first run when there is nothing to jump to */}
+      {!isFirstRun && (
+        <nav className="section-nav" aria-label="Jump to section">
+          <a href="#today" className="section-nav-link">Today</a>
+          <a href="#dashboard" className="section-nav-link">Dashboard</a>
+          <a href="#categories" className="section-nav-link">Categories</a>
+          <a href="#sessions" className="section-nav-link">Sessions</a>
+          <a href="#errors" className="section-nav-link">Error Log</a>
+        </nav>
+      )}
 
       {/* Floating AI Coach FAB */}
       <button
         type="button"
         className={`coach-fab ${coachOpen ? 'coach-fab--open' : ''}`}
         onClick={() => setCoachOpen((v) => !v)}
-        aria-label={coachOpen ? 'Close Tutor' : 'Open Tutor'}
+        aria-label={coachOpen ? 'Close Coach' : 'Open Coach'}
       >
         {coachOpen ? (
           '\u2715'
@@ -2419,11 +2700,11 @@ function App() {
         )}
       </button>
 
-      {/* Tutor floating panel */}
-      <div className={`coach-panel ${coachOpen ? 'coach-panel--open' : ''}`} role="dialog" aria-label="Tutor" aria-modal={coachOpen} inert={coachOpen ? undefined : ''}>
+      {/* Coach floating panel */}
+      <div className={`coach-panel ${coachOpen ? 'coach-panel--open' : ''}`} role="dialog" aria-label="Coach" aria-modal={coachOpen} inert={coachOpen ? undefined : ''}>
         <div className="coach-panel-header">
           <div className="coach-panel-title">
-            <span className="coach-panel-badge">Tutor</span>
+            <span className="coach-panel-badge">Coach</span>
             <span className="coach-panel-scope">{aiScopeLabel}</span>
           </div>
           <div className="coach-panel-actions">
@@ -2580,6 +2861,30 @@ function App() {
 
       {coachOpen && <div className="coach-backdrop" onClick={() => setCoachOpen(false)} />}
 
+      {isFirstRun && (
+        <FirstRunWelcome
+          cdpStatus={cdpStatus}
+          sources={sources}
+          selectedSource={selectedSource}
+          onSelectSource={setSelectedSource}
+          onOpenChrome={handleOpenChrome}
+          isOpening={isOpening}
+          onOpenProduct={handleOpenProduct}
+          isOpeningProduct={isOpeningProduct}
+          onScrape={handleScrape}
+          isScraping={isScraping}
+          onOpenSyncPanel={() => setSyncCenterOpen(true)}
+          status={status}
+        />
+      )}
+
+      {!isFirstRun && (
+      <>
+      <TodayPlan
+        collapsed={collapsedSections.today}
+        onToggleCollapse={() => toggleSection('today')}
+      />
+
       <section id="dashboard" className="page-section topic-dashboard">
         <div className="section-header">
           <h2>Performance by Subject</h2>
@@ -2630,6 +2935,7 @@ function App() {
               type="button"
               className={`difficulty-toggle ${showDifficultyCols ? 'difficulty-toggle--active' : ''}`}
               onClick={() => setShowDifficultyCols((v) => !v)}
+              aria-pressed={showDifficultyCols}
             >
               {showDifficultyCols ? 'Hide' : 'Show'} Difficulty
             </button>
@@ -2829,14 +3135,18 @@ function App() {
             <div className="date-filter-group">
               <Input
                 type="date"
+                aria-label="Start date"
                 placeholder="Start Date"
+                max={sessionDateRange.end || undefined}
                 value={sessionDateRange.start}
                 onChange={(e) => setSessionDateRange((prev) => ({ ...prev, start: e.target.value }))}
               />
               <span>to</span>
               <Input
                 type="date"
+                aria-label="End date"
                 placeholder="End Date"
+                min={sessionDateRange.start || undefined}
                 value={sessionDateRange.end}
                 onChange={(e) => setSessionDateRange((prev) => ({ ...prev, end: e.target.value }))}
               />
@@ -2854,6 +3164,14 @@ function App() {
                 Clear
               </Button>
             )}
+            <button
+              type="button"
+              className={`difficulty-toggle ${showSessionDifficultyCols ? 'difficulty-toggle--active' : ''}`}
+              onClick={() => setShowSessionDifficultyCols((v) => !v)}
+              aria-pressed={showSessionDifficultyCols}
+            >
+              {showSessionDifficultyCols ? 'Hide' : 'Show'} Difficulty
+            </button>
             <button
               type="button"
               className="collapse-toggle"
@@ -2878,16 +3196,34 @@ function App() {
                     <th className="sortable" onClick={() => handleSessionSort('error_count_display')}>Errors {sortIndicator(sessionSort, 'error_count_display')}</th>
                     <th className="sortable" onClick={() => handleSessionSort('answered_accuracy_pct')}>Accuracy % {sortIndicator(sessionSort, 'answered_accuracy_pct')}</th>
                     <th className="sortable" onClick={() => handleSessionSort('avg_time_sec')}>Avg Time {sortIndicator(sessionSort, 'avg_time_sec')}</th>
-                    <th>Hard (Q / Acc / Avg)</th>
-                    <th>Medium (Q / Acc / Avg)</th>
-                    <th>Easy (Q / Acc / Avg)</th>
+                    {showSessionDifficultyCols && <th title="Questions / Accuracy / Average time">Hard (Q / Acc / Avg)</th>}
+                    {showSessionDifficultyCols && <th title="Questions / Accuracy / Average time">Medium (Q / Acc / Avg)</th>}
+                    {showSessionDifficultyCols && <th title="Questions / Accuracy / Average time">Easy (Q / Acc / Avg)</th>}
                     <th>Session Analysis</th>
                   </tr>
                 </thead>
                 <tbody>
                   {processedSessions.length === 0 && (
                     <tr>
-                      <td colSpan="11">No sessions yet. Use "Sync GMAT Practice" above to import your first session.</td>
+                      <td colSpan={showSessionDifficultyCols ? 11 : 8}>
+                        {isDashboardLoading ? (
+                          <span className="table-empty-loading">Loading your sessions…</span>
+                        ) : bootError ? (
+                          <span className="table-empty-loading">Couldn’t load sessions. See the message above and retry.</span>
+                        ) : hasActiveSessionFilters ? (
+                          <div className="table-empty">
+                            <p className="table-empty-title">No sessions match these filters.</p>
+                            <p className="table-empty-sub">Widen the date range or clear the source and subject filters to see more.</p>
+                            <Button variant="outline" size="sm" type="button" onClick={clearSessionFilters}>Clear filters</Button>
+                          </div>
+                        ) : (
+                          <div className="table-empty">
+                            <p className="table-empty-title">No sessions yet.</p>
+                            <p className="table-empty-sub">Sync a practice session to start tracking your accuracy and timing.</p>
+                            <Button size="sm" type="button" onClick={() => setSyncCenterOpen(true)}>Sync a session</Button>
+                          </div>
+                        )}
+                      </td>
                     </tr>
                   )}
                   {processedSessions.map((row) => (
@@ -2902,9 +3238,9 @@ function App() {
                       <td>{formatMaybe(row.error_count_display)}</td>
                       <td>{formatPercent(row.answered_accuracy_pct)}</td>
                       <td>{formatDurationSeconds(row.avg_time_sec)}</td>
-                      <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>
-                      <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>
-                      <td>{formatDifficultyStat(row.easy_total, row.easy_accuracy_pct, row.easy_avg_time_sec)}</td>
+                      {showSessionDifficultyCols && <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>}
+                      {showSessionDifficultyCols && <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>}
+                      {showSessionDifficultyCols && <td>{formatDifficultyStat(row.easy_total, row.easy_accuracy_pct, row.easy_avg_time_sec)}</td>}
                       <td>
                         <Button
                           variant="outline"
@@ -3068,6 +3404,7 @@ function App() {
                   <tr>
                     <th className="sortable err-col-date" onClick={() => handleErrorSort('session_date')}>Date {sortIndicator(errorSort, 'session_date')}</th>
                     <th className="sortable section-col" onClick={() => handleErrorSort('subject')}>Subject {sortIndicator(errorSort, 'subject')}</th>
+                    <th className="sortable category-col" onClick={() => handleErrorSort('category')}>Category {sortIndicator(errorSort, 'category')}</th>
                     <th className="sortable topic-col" onClick={() => handleErrorSort('topic')}>Subcategory {sortIndicator(errorSort, 'topic')}</th>
                     <th className="sortable" onClick={() => handleErrorSort('difficulty')}>Diff {sortIndicator(errorSort, 'difficulty')}</th>
                     <th className="sortable" onClick={() => handleErrorSort('time_sec')}>Time {sortIndicator(errorSort, 'time_sec')}</th>
@@ -3078,7 +3415,25 @@ function App() {
                 <tbody>
                   {errors.length === 0 && (
                     <tr>
-                      <td colSpan="7">No errors match the current filters. Try adjusting or clearing the filters above.</td>
+                      <td colSpan="8">
+                        {isDashboardLoading ? (
+                          <span className="table-empty-loading">Loading your error log…</span>
+                        ) : bootError ? (
+                          <span className="table-empty-loading">Couldn’t load the error log. See the message above and retry.</span>
+                        ) : hasActiveErrorFilters ? (
+                          <div className="table-empty">
+                            <p className="table-empty-title">No errors match these filters.</p>
+                            <p className="table-empty-sub">Adjust or clear the filters above to see more of your log.</p>
+                            <Button variant="outline" size="sm" type="button" onClick={clearErrorFilters}>Clear filters</Button>
+                          </div>
+                        ) : (
+                          <div className="table-empty">
+                            <p className="table-empty-title">No errors logged yet.</p>
+                            <p className="table-empty-sub">Sync a session, then every wrong answer collects here for review.</p>
+                            <Button size="sm" type="button" onClick={() => setSyncCenterOpen(true)}>Sync a session</Button>
+                          </div>
+                        )}
+                      </td>
                     </tr>
                   )}
                   {errors.map((row) => {
@@ -3112,6 +3467,7 @@ function App() {
                             </span>
                           </td>
                           <td className="section-col"><SubjectCell row={row} /></td>
+                          <td className="category-col">{formatMaybe(normalizedCategoryCode(row))}</td>
                           <td className="topic-col">{formatMaybe(normalizedSubcategory(row))}</td>
                           <td>
                             {row.difficulty ? (
@@ -3162,23 +3518,15 @@ function App() {
                         </tr>
                         {isExpanded && (
                           <tr className="error-expand-row">
-                            <td colSpan="7">
+                            <td colSpan="8">
                               <div className="error-expand-grid">
                                 <div className="error-expand-field">
                                   <span>Source</span>
                                   <SourceBadge source={row.source} />
                                 </div>
                                 <div className="error-expand-field">
-                                  <span>Category</span>
-                                  <strong>{formatMaybe(normalizedCategoryCode(row))}</strong>
-                                </div>
-                                <div className="error-expand-field">
                                   <span>Q Code</span>
                                   <strong>{formatMaybe(row.q_code)}</strong>
-                                </div>
-                                <div className="error-expand-field error-expand-response">
-                                  <span>Response</span>
-                                  <ResponseCell row={row} />
                                 </div>
                                 <div className="error-expand-field">
                                   <span>Redo</span>
@@ -3228,6 +3576,8 @@ function App() {
           </>
         )}
       </section>
+      </>
+      )}
 
       {syncCenterOpen && (
         <div
@@ -3436,7 +3786,6 @@ function App() {
                           <th>Subcategory</th>
                           <th>Difficulty</th>
                           <th>Q Code</th>
-                          <th className="response-col">Response</th>
                           <th>Confidence</th>
                           <th>Redo</th>
                           <th>Open</th>
@@ -3449,7 +3798,7 @@ function App() {
                       <tbody>
                         {!patternDrilldown.rows.length && (
                           <tr>
-                            <td colSpan="15">No rows match this pattern.</td>
+                            <td colSpan="14">No rows match this pattern.</td>
                           </tr>
                         )}
                         {patternDrilldown.rows.map((row) => (
@@ -3461,7 +3810,6 @@ function App() {
                             <td>{formatMaybe(normalizedSubcategory(row))}</td>
                             <td>{formatMaybe(row.difficulty)}</td>
                             <td>{formatMaybe(row.q_code)}</td>
-                            <td className="response-col"><ResponseCell row={row} /></td>
                             <td>{formatMaybe(row.confidence)}</td>
                             <td>
                               {Number(row.corrected_later || 0) === 1 ? (
@@ -3491,7 +3839,17 @@ function App() {
                               )}
                             </td>
                             <td>{formatDurationSeconds(row.time_sec)}</td>
-                            <td>{formatMaybe(row.mistake_type)}</td>
+                            <td>
+                              {parseMistakeTags(row.mistake_type).length ? (
+                                <span style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                                  {parseMistakeTags(row.mistake_type).map((tag) => (
+                                    <span key={tag} className="mistake-tag-pill">{tag}</span>
+                                  ))}
+                                </span>
+                              ) : (
+                                formatMaybe(row.mistake_type)
+                              )}
+                            </td>
                             <td className="notes-cell" title={row.notes || ''}>
                               {formatNotePreview(row.notes)}
                             </td>
@@ -3544,7 +3902,7 @@ function App() {
                     variant="outline"
                     type="button"
                     disabled={isEnriching}
-                    onClick={() => handleEnrichSession(sessionAnalysis.data.session.id)}
+                    onClick={() => setEnrichConfirmId(sessionAnalysis.data.session.id)}
                     title="Phase 2: deep-enrich this session by visiting each question's page. Long-running; keep the matching tab open."
                   >
                     {isEnriching ? 'Enriching…' : 'Enrich Phase 2'}
@@ -3555,7 +3913,7 @@ function App() {
                     variant="outline"
                     type="button"
                     disabled={isEnriching}
-                    onClick={() => handleEnrichSession(sessionAnalysis.data.session.id)}
+                    onClick={() => setEnrichConfirmId(sessionAnalysis.data.session.id)}
                     title="Phase 3: deep-enrich this OPE mock by walking the Score Report popup item-by-item. Long-running (~3 min). Open the OPE landing page in Chrome and click 'View score report' for this take FIRST; leave the popup on the Score Card. Do not click anything inside the popup."
                   >
                     {isEnriching ? 'Enriching…' : 'Enrich Phase 3 (OPE)'}
@@ -3566,7 +3924,32 @@ function App() {
                 </Button>
               </div>
             </div>
-            {lastEnrichResult && sessionAnalysis.data?.session && (
+            {enrichConfirmId != null && !isEnriching && (
+              <div className="status" style={{ marginBottom: '8px', fontSize: '0.85rem' }}>
+                <div style={{ marginBottom: '8px' }}>
+                  Deep-enrich this session? This walks every question in your open GMAT tab over ~3–5 minutes — keep that tab on the matching product and don’t click around in it until it finishes.
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <Button
+                    type="button"
+                    onClick={() => {
+                      const id = enrichConfirmId;
+                      setEnrichConfirmId(null);
+                      handleEnrichSession(id);
+                    }}
+                  >
+                    Start enrichment
+                  </Button>
+                  <Button variant="outline" type="button" onClick={() => setEnrichConfirmId(null)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
+            {lastEnrichResult && (
+              // Gated on the result alone (not sessionAnalysis.data) so it stays
+              // readable while the post-enrich refresh transiently nulls `data`
+              // — otherwise the outcome flashes and vanishes before it can be read.
               <div className={`status ${lastEnrichResult.ok === false || lastEnrichResult.aborted ? 'error' : ''}`} style={{ marginBottom: '8px', fontSize: '0.85rem' }}>
                 {lastEnrichResult.ok === false
                   ? `Phase 2 failed: ${lastEnrichResult.error}`
@@ -3807,7 +4190,6 @@ function App() {
                           <th className="sortable topic-col" onClick={() => handleSessionAnalysisSort('topic')}>Subcategory {sortIndicator(sessionAnalysisSort, 'topic')}</th>
                           <th className="sortable" onClick={() => handleSessionAnalysisSort('difficulty')}>Difficulty {sortIndicator(sessionAnalysisSort, 'difficulty')}</th>
                           <th className="sortable" onClick={() => handleSessionAnalysisSort('q_code')}>Q Code {sortIndicator(sessionAnalysisSort, 'q_code')}</th>
-                          <th className="response-col">Response</th>
                           <th className="sortable" onClick={() => handleSessionAnalysisSort('time_sec')}>Time {sortIndicator(sessionAnalysisSort, 'time_sec')}</th>
                           <th className="sortable" onClick={() => handleSessionAnalysisSort('mistake_type')}>Mistake Type {sortIndicator(sessionAnalysisSort, 'mistake_type')}</th>
                           <th className="sortable notes-col" onClick={() => handleSessionAnalysisSort('notes')}>Notes {sortIndicator(sessionAnalysisSort, 'notes')}</th>
@@ -3817,7 +4199,7 @@ function App() {
                       <tbody>
                         {!sessionAnalysis.data.slowWrongQuestions?.length && (
                           <tr>
-                            <td colSpan="11">No answered questions in this session.</td>
+                            <td colSpan="10">No answered questions in this session.</td>
                           </tr>
                         )}
                         {sortedSessionAnalysisWrongQuestions.map((row, idx) => {
@@ -3843,9 +4225,18 @@ function App() {
                               ) : <span className="muted">-</span>}
                             </td>
                             <td>{formatMaybe(row.q_code)}</td>
-                            <td className="response-col"><ResponseCell row={row} /></td>
                             <td>{formatDurationSeconds(row.time_sec)}</td>
-                            <td>{formatMaybe(row.mistake_type)}</td>
+                            <td>
+                              {parseMistakeTags(row.mistake_type).length ? (
+                                <span style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                                  {parseMistakeTags(row.mistake_type).map((tag) => (
+                                    <span key={tag} className="mistake-tag-pill">{tag}</span>
+                                  ))}
+                                </span>
+                              ) : (
+                                formatMaybe(row.mistake_type)
+                              )}
+                            </td>
                             <td className="notes-cell notes-col" title={row.notes || ''}>
                               {formatNotePreview(row.notes)}
                             </td>
@@ -3883,7 +4274,7 @@ function App() {
 
       {questionReview.open && questionReview.row && (
         <div
-          className="analysis-overlay"
+          className="analysis-overlay question-review-overlay"
           role="dialog"
           aria-modal="true"
           aria-label="Question Review"
@@ -3975,49 +4366,116 @@ function App() {
                       <div><span>Confidence</span><strong>{formatMaybe(questionReview.row.confidence)}</strong></div>
                     </div>
                   </div>
-                ) : (
-                  <div className="question-review-stats">
-                    <div>
-                      <span>Your Answer</span>
-                      <strong>{formatMaybe(questionReview.row.my_answer || summarizeStructuredResponse(questionReview.row, 'user_value'))}</strong>
+                ) : (() => {
+                  const sRow = questionReview.row;
+                  let yourVal = formatMaybe(sRow.my_answer || summarizeStructuredResponse(sRow, 'user_value'));
+                  let correctVal = formatMaybe(sRow.correct_answer || summarizeStructuredResponse(sRow, 'correct_value'));
+                  // Matrix CSVs are transposed between my_answer (often per-row)
+                  // and correct_answer (per-column), so the raw strings look
+                  // mismatched even when the answer is right. Render both in the
+                  // same "<column> → row N" orientation so they line up.
+                  if (String(sRow.response_format || '').toLowerCase() === 'matrix') {
+                    const mc = parseAnswerChoices(sRow.answer_choices);
+                    if (Array.isArray(mc[0]?.options)) {
+                      const { colCount, headers, correctByCol, userByCol } = decodeMatrixSelections(mc, sRow.correct_answer);
+                      const colLabel = (ci) => normalizeQuestionText(headers[ci] || '') || `Col ${ci + 1}`;
+                      const fmtPairs = (arr) => arr
+                        .map((r, ci) => (r ? `${colLabel(ci)} → ${r}` : null))
+                        .filter(Boolean)
+                        .join(', ');
+                      if (colCount > 0) {
+                        const u = fmtPairs(userByCol);
+                        const c = fmtPairs(correctByCol);
+                        if (u) yourVal = u;
+                        if (c) correctVal = c;
+                      }
+                    }
+                  }
+                  return (
+                    <div className="question-review-stats">
+                      <div>
+                        <span>Your Answer</span>
+                        <strong>{yourVal}</strong>
+                      </div>
+                      <div>
+                        <span>Correct</span>
+                        <strong>{correctVal}</strong>
+                      </div>
+                      <div>
+                        <span>Time</span>
+                        <strong>{formatDurationSeconds(sRow.time_sec)}</strong>
+                      </div>
+                      <div>
+                        <span>Confidence</span>
+                        <strong>{formatMaybe(sRow.confidence)}</strong>
+                      </div>
                     </div>
-                    <div>
-                      <span>Correct</span>
-                      <strong>{formatMaybe(questionReview.row.correct_answer || summarizeStructuredResponse(questionReview.row, 'correct_value'))}</strong>
-                    </div>
-                    <div>
-                      <span>Time</span>
-                      <strong>{formatDurationSeconds(questionReview.row.time_sec)}</strong>
-                    </div>
-                    <div>
-                      <span>Confidence</span>
-                      <strong>{formatMaybe(questionReview.row.confidence)}</strong>
-                    </div>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
 
-              {normalizeQuestionText(questionReview.row.passage_text) && (
-                <section className="question-review-section">
-                  <h3>Passage</h3>
-                  <div className="question-passage-card">
-                    {normalizeQuestionText(questionReview.row.passage_text)
-                      .split(/\n{2,}/)
-                      .map((para, idx) => (
-                        <p key={`passage-${idx}`}>{para}</p>
-                      ))}
+              <section className="question-review-section question-annotation-section">
+                <h3>Annotation</h3>
+                <div className="question-annotation-grid">
+                  <div className="question-side-card">
+                    <span className="question-side-label">Mistake Tags</span>
+                    <div className="question-side-tags">
+                      {parseMistakeTags(questionReview.row.mistake_type).length ? (
+                        parseMistakeTags(questionReview.row.mistake_type).map((tag) => (
+                          <span key={tag} className="mistake-tag-pill">{tag}</span>
+                        ))
+                      ) : (
+                        <span className="muted">No tags yet</span>
+                      )}
+                    </div>
                   </div>
-                </section>
-              )}
-
-              <section className="question-review-section">
-                <h3>Question Stem</h3>
-                <div className="question-stem-card">
-                  <p>{normalizeQuestionText(questionReview.row.question_stem) || 'No locally scraped stem yet.'}</p>
+                  <div className="question-side-card">
+                    <span className="question-side-label">Notes</span>
+                    <p>{normalizeQuestionText(questionReview.row.notes) || 'No notes yet.'}</p>
+                  </div>
+                  <div className="question-side-card">
+                    <span className="question-side-label">Actions</span>
+                    <div className="question-side-actions">
+                      <Button variant="outline" type="button" onClick={() => handleOpenAnnotation(questionReview.row)}>
+                        Annotate
+                      </Button>
+                      {canonicalQuestionUrl(questionReview.row) ? (
+                        <Button
+                          variant="outline"
+                          type="button"
+                          onClick={() => handleOpenQuestionInGmat(questionReview.row, 'question-review-side')}
+                          disabled={openingQuestionKey === questionOpenKey(questionReview.row, 'question-review-side')}
+                        >
+                          {openingQuestionKey === questionOpenKey(questionReview.row, 'question-review-side')
+                            ? 'Opening...'
+                            : 'Open in GMAT'}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
                 </div>
               </section>
 
               <section className="question-review-layout">
+                <div className="question-review-col">
+                  {splitPassageParagraphs(questionReview.row.passage_text).length > 0 && (
+                    <div className="question-review-section">
+                      <h3>Passage</h3>
+                      <div className="question-passage-card">
+                        {splitPassageParagraphs(questionReview.row.passage_text).map((para, idx) => (
+                          <p key={`passage-${idx}`}>{para}</p>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className="question-review-section">
+                    <h3>Question Stem</h3>
+                    <div className="question-stem-card">
+                      <p>{normalizeQuestionText(questionReview.row.question_stem) || 'No locally scraped stem yet.'}</p>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="question-review-section">
                   <h3>
                     {getResponseSlots(questionReview.row).length
@@ -4110,8 +4568,13 @@ function App() {
                       );
 
                       if (fmt === 'matrix' && Array.isArray(choices[0]?.options)) {
-                        const headers = Array.isArray(choices[0]?.headers) ? choices[0].headers : [];
-                        const colCount = headers.length || (choices[0]?.options?.length ?? 0);
+                        const { colCount, headers, correctCells } = decodeMatrixSelections(choices, corrAns);
+                        // `headers` may carry a trailing label for the row-label
+                        // column (e.g. "Description of work"); the answer columns
+                        // are the first `colCount` entries — drive colCount off the
+                        // options, not headers, so that label isn't rendered as a
+                        // spurious empty answer column.
+                        const cornerLabel = headers.length > colCount ? (headers[colCount] || '') : '';
                         return (
                           <div className="answer-matrix-wrap">
                             {Legend}
@@ -4119,7 +4582,7 @@ function App() {
                               className="answer-matrix-grid"
                               style={{ gridTemplateColumns: `minmax(0,1fr) repeat(${colCount}, minmax(80px, max-content))` }}
                             >
-                              <div className="amg-corner" />
+                              <div className="amg-corner">{normalizeQuestionText(cornerLabel)}</div>
                               {Array.from({ length: colCount }).map((_, ci) => (
                                 <div key={`h-${ci}`} className="amg-header">{headers[ci] || ''}</div>
                               ))}
@@ -4132,7 +4595,11 @@ function App() {
                                   {Array.from({ length: colCount }).map((_, ci) => {
                                     const opt = (row?.options || [])[ci] || {};
                                     const userPicked = !!opt.isUserSelected;
-                                    const correct = !!opt.isCorrect;
+                                    // Per-cell isCorrect is unreliable for matrix (color is
+                                    // usually null); the authoritative correct cells come from
+                                    // correct_answer via decodeMatrixSelections. Union the two
+                                    // so a rare color-flagged cell is still honored.
+                                    const correct = correctCells.has(`${ri + 1},${ci + 1}`) || !!opt.isCorrect;
                                     const cls = userPicked && correct ? 'cell-right'
                                       : userPicked ? 'cell-wrong'
                                       : correct ? 'cell-correct'
@@ -4222,48 +4689,6 @@ function App() {
                   ) : (
                     <p className="muted">No answer choices were scraped for this question.</p>
                   )}
-                </div>
-
-                <div className="question-review-section">
-                  <h3>Study Notes</h3>
-                  <div className="question-side-stack">
-                    <div className="question-side-card">
-                      <span className="question-side-label">Mistake Tags</span>
-                      <div className="question-side-tags">
-                        {parseMistakeTags(questionReview.row.mistake_type).length ? (
-                          parseMistakeTags(questionReview.row.mistake_type).map((tag) => (
-                            <span key={tag} className="mistake-tag-pill">{tag}</span>
-                          ))
-                        ) : (
-                          <span className="muted">No tags yet</span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="question-side-card">
-                      <span className="question-side-label">Notes</span>
-                      <p>{normalizeQuestionText(questionReview.row.notes) || 'No notes yet.'}</p>
-                    </div>
-                    <div className="question-side-card">
-                      <span className="question-side-label">Actions</span>
-                      <div className="question-side-actions">
-                        <Button variant="outline" type="button" onClick={() => handleOpenAnnotation(questionReview.row)}>
-                          Annotate
-                        </Button>
-                        {canonicalQuestionUrl(questionReview.row) ? (
-                          <Button
-                            variant="outline"
-                            type="button"
-                            onClick={() => handleOpenQuestionInGmat(questionReview.row, 'question-review-side')}
-                            disabled={openingQuestionKey === questionOpenKey(questionReview.row, 'question-review-side')}
-                          >
-                            {openingQuestionKey === questionOpenKey(questionReview.row, 'question-review-side')
-                              ? 'Opening...'
-                              : 'Open in GMAT'}
-                          </Button>
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
                 </div>
               </section>
             </div>

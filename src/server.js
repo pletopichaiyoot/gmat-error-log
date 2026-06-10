@@ -36,6 +36,12 @@ const {
   deleteStudyPlanTask,
   getStudyPlanMeta,
   setStudyPlanMeta,
+  listStudyPlanDays,
+  createStudyPlanDay,
+  updateStudyPlanDay,
+  deleteStudyPlanDay,
+  reorderStudyPlanDays,
+  restoreStudyPlanSnapshot,
   seedStudyPlanIfEmpty,
   resetStudyPlanTasks,
   syncStudyPlanFromSeed,
@@ -79,6 +85,32 @@ const {
   deleteSession: deleteCoachSession,
 } = require('./coach-session');
 const { isMemoryEnabled, getAllMemories, deleteMemory, deleteAllMemories } = require('./memory');
+
+// Process-level safety net. The Phase 2 scrapers hold a long-lived Playwright
+// CDP connection to the user's Chrome that we deliberately never close (closing
+// it would tear down their logged-in session). When that connection emits an
+// async error on a later tick — socket drop mid-navigation, a target/page
+// closing, a protocol call rejecting after its own `await` already returned —
+// it surfaces as an unhandledRejection / uncaughtException OUTSIDE any route's
+// try/catch. Without these handlers, Node 24 treats that as fatal and exits
+// non-zero, which under `node --watch` prints "Failed running 'src/server.js'.
+// Waiting for file changes..." and takes the ENTIRE API down (every subsequent
+// request gets ECONNREFUSED through the Vite proxy). A single failed enrich
+// must never kill the whole server: log loudly, keep serving.
+process.on('unhandledRejection', (reason) => {
+  // eslint-disable-next-line no-console
+  console.error(
+    `[unhandledRejection ${new Date().toISOString()}] survived (not fatal):`,
+    reason instanceof Error ? reason.stack || reason.message : reason
+  );
+});
+process.on('uncaughtException', (error) => {
+  // eslint-disable-next-line no-console
+  console.error(
+    `[uncaughtException ${new Date().toISOString()}] survived (not fatal):`,
+    error instanceof Error ? error.stack || error.message : error
+  );
+});
 
 const app = express();
 const PORT = Number(process.env.PORT || 4310);
@@ -433,6 +465,42 @@ if (require('fs').existsSync(clientDistPath)) {
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, dbPath });
+});
+
+// Lightweight probe of the user's debug-Chrome on the CDP port. Hits Chrome's
+// DevTools HTTP endpoints directly (no Playwright connect) so it is fast and
+// side-effect free — used by the first-run checklist to show a live status dot
+// and detect whether a practice tab is open. Always 200s; `connected` carries
+// the result so the frontend never has to treat a down browser as an error.
+app.get('/api/cdp-status', async (req, res) => {
+  const base = String(process.env.CHROME_CDP_URL || 'http://localhost:9222').replace(/\/+$/, '');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
+  try {
+    const versionRes = await fetch(`${base}/json/version`, { signal: controller.signal });
+    if (!versionRes.ok) throw new Error(`HTTP ${versionRes.status}`);
+    const version = await versionRes.json().catch(() => ({}));
+    let pages = [];
+    try {
+      const listRes = await fetch(`${base}/json/list`, { signal: controller.signal });
+      if (listRes.ok) {
+        const list = await listRes.json().catch(() => []);
+        if (Array.isArray(list)) pages = list.filter((t) => t && t.type === 'page');
+      }
+    } catch {
+      // tab list is best-effort; a connected browser with no listable tabs is still "connected"
+    }
+    res.json({
+      connected: true,
+      browser: version.Browser || null,
+      tabs: pages.map((t) => ({ title: t.title || '', url: t.url || '' })),
+    });
+  } catch (error) {
+    const reason = error?.name === 'AbortError' ? 'timeout' : String(error?.message || error);
+    res.json({ connected: false, reason, tabs: [] });
+  } finally {
+    clearTimeout(timer);
+  }
 });
 
 app.get('/api/runs', async (req, res) => {
@@ -1597,8 +1665,12 @@ app.get('/api/lsat/stats', async (req, res) => {
 app.get('/api/study-plan', async (req, res) => {
   try {
     await seedStudyPlanIfEmpty();
-    const [tasks, meta] = await Promise.all([listStudyPlanTasks(), getStudyPlanMeta()]);
-    res.json({ tasks, meta });
+    const [tasks, meta, days] = await Promise.all([
+      listStudyPlanTasks(), getStudyPlanMeta(), listStudyPlanDays(),
+    ]);
+    // `days` are first-class rows, so an emptied or newly-added day persists
+    // independently of whether any task currently lives on it.
+    res.json({ tasks, meta, days });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1646,6 +1718,59 @@ app.post('/api/study-plan/reorder', async (req, res) => {
     const updates = (req.body && req.body.updates) || [];
     const tasks = await reorderStudyPlanTasks(updates);
     res.json({ tasks });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ─── Study plan days (first-class) ──────────────────────────────────────────
+
+app.post('/api/study-plan/days', async (req, res) => {
+  try {
+    const day = await createStudyPlanDay(req.body || {});
+    res.status(201).json({ day });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.patch('/api/study-plan/days/:date', async (req, res) => {
+  try {
+    const day = await updateStudyPlanDay(req.params.date, req.body || {});
+    if (!day) return res.status(404).json({ error: 'Day not found.' });
+    res.json({ day });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/study-plan/days/:date', async (req, res) => {
+  try {
+    const ok = await deleteStudyPlanDay(req.params.date);
+    if (!ok) return res.status(404).json({ error: 'Day not found.' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Drag-reorder whole days. Body: { updates: [{ date, sort_order, week_number }] }.
+app.post('/api/study-plan/days/reorder', async (req, res) => {
+  try {
+    const updates = (req.body && req.body.updates) || [];
+    const days = await reorderStudyPlanDays(updates);
+    res.json({ days });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Undo/redo: reconcile the whole plan to a client-captured snapshot.
+// Body: { days, tasks, meta }. Returns the fresh full plan.
+app.post('/api/study-plan/restore', async (req, res) => {
+  try {
+    const result = await restoreStudyPlanSnapshot(req.body || {});
+    res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
