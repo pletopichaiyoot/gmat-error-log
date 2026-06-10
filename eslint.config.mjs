@@ -52,6 +52,7 @@ export default [
       'data/**',
       'tmp/**',
       '.claude/**',
+      '.agents/**',
       'scripts/parse-lsat-pdf.js',
     ],
   },

@@ -479,13 +479,16 @@ function qhRowJoinKey(row) {
   return `${yn}|${parseTimeSpent(row?.timeSpent) ?? ''}|${String(row?.difficulty || '').trim()}`;
 }
 
-// Detect "theme collisions": a leaf label that lives under >1 distinct tier-2
-// type within the same subject (e.g. DI "Tradeoffs" under both Multi-source
-// Reasoning and Two-part Analysis). When this happens the QHistory "Content
-// Area" (the theme) alone cannot tell which type a row is — readReport's label
-// index keeps only the last leaf per theme, so every shared-theme row would
-// otherwise collapse onto one type. Returns Map<`${subject}|${theme}`, rec[]>
-// for colliding themes only (empty for the common, non-colliding case).
+// Detect "theme collisions": a leaf label that lives under >1 distinct
+// taxonomy leaf (path) within the same subject — across tier-2 types (DI
+// "Tradeoffs" under both Multi-source Reasoning and Two-part Analysis) or
+// across tier-3 branches of the SAME type (Official Practice Verbal CR has
+// "Weaken" under both Critique and Plan). When this happens the QHistory
+// "Content Area" (the theme) alone cannot tell which leaf a row is —
+// readReport's label index keeps only the last leaf per theme, so every
+// shared-theme row would otherwise collapse onto one leaf. Returns
+// Map<`${subject}|${theme}`, rec[]> for colliding themes only (empty for the
+// common, non-colliding case).
 function findThemeCollisions(taxonomy) {
   const byKey = new Map();
   for (const rec of taxonomy || []) {
@@ -497,8 +500,8 @@ function findThemeCollisions(taxonomy) {
   }
   const colliding = new Map();
   for (const [key, recs] of byKey) {
-    const distinctTypes = new Set(recs.map((r) => r.parts[1]));
-    if (recs.length > 1 && distinctTypes.size > 1) colliding.set(key, recs);
+    const distinctPaths = new Set(recs.map((r) => r.path));
+    if (distinctPaths.size > 1) colliding.set(key, recs);
   }
   return colliding;
 }
