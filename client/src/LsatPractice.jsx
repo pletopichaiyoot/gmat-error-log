@@ -815,9 +815,9 @@ function SessionView({
             type="button"
             className="lsat-st-finish-btn"
             onClick={() => setShowFinishConfirm(true)}
-            title="Finish now and save only the questions you've answered"
+            title="End the session now and save only the questions you've answered"
           >
-            Finish
+            End Session
           </button>
         </div>
 

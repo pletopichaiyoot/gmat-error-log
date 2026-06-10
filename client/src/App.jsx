@@ -970,6 +970,18 @@ function App() {
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
+  // App stays mounted while the LSAT / study-plan surfaces are shown, so the
+  // dashboard data goes stale (e.g. an LSAT session practiced just now is
+  // missing from Performance by Session). Refetch on return to the dashboard.
+  const prevAppModeRef = useRef(appMode);
+  useEffect(() => {
+    const prev = prevAppModeRef.current;
+    prevAppModeRef.current = appMode;
+    if (appMode === 'gmat' && prev !== 'gmat') {
+      loadDashboard().catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appMode]);
   const [status, setStatus] = useState({ message: 'Loading...', isError: false });
   const [bootError, setBootError] = useState(null);
   const [isDashboardLoading, setIsDashboardLoading] = useState(true);

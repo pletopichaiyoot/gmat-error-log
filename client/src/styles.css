@@ -5530,20 +5530,22 @@ html {
 }
 
 /* ===== LSAT: force-finish button + confirm dialog ===== */
+/* Lives on the teal topbar — must stay white-on-teal (teal-on-teal renders
+   invisible; that bug shipped once already). */
 .lsat-st-finish-btn {
   min-height: 0;
   margin-left: 12px;
-  padding: 6px 14px;
+  padding: 5px 14px;
   font-size: 13px;
   font-weight: 600;
-  color: var(--st-teal);
-  background: transparent;
-  border: 1px solid var(--st-teal);
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.65);
   border-radius: 4px;
   cursor: pointer;
   transition: background var(--t) var(--ease), color var(--t) var(--ease);
 }
-.lsat-st-finish-btn:hover { background: var(--st-teal); color: #fff; }
+.lsat-st-finish-btn:hover { background: #fff; color: var(--st-teal); }
 
 .lsat-finish-overlay {
   position: fixed;
