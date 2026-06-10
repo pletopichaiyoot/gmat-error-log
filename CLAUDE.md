@@ -15,6 +15,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Local GMAT analytics app: scrapes GMAT Official Practice, GMAT Club, and Target Test Prep sessions via Chrome CDP, stores in SQLite, provides dashboards + LLM-powered coaching. Single user, macOS-focused.
 
+## Design Context
+
+Strategic and visual design are documented in two root files (Stitch DESIGN.md format), maintained via the `/impeccable` skill. **Read both before building or restyling any frontend surface.**
+
+- **[PRODUCT.md](PRODUCT.md)** — register (`product`), users, purpose, brand personality (**"The Patient Coach"**: encouraging, honest, calm-under-pressure), anti-references (no gamification, no enterprise BI), and strategic design principles.
+- **[DESIGN.md](DESIGN.md)** — the visual system: warm-paper palette (forest-sage `#3d7a5e` primary, aged-brass `#c4a843` accent, cream surfaces), Manrope-titles / Space-Grotesk-body typography, flat-by-default elevation, the gold/red/green answer semantic, and forceful Do's/Don'ts. Machine-readable tokens live in its YAML frontmatter; `.impeccable/design.json` is the live-panel sidecar.
+
+For design work run `/impeccable <command>` (e.g. `critique`, `audit`, `polish`, `live`). Live mode is pre-configured (`.impeccable/live/config.json`, injects into `client/index.html`).
+
 ## Commands
 
 | Task | Command |
@@ -124,6 +133,8 @@ The GMAT Club source mirrors StartTest's two-phase split:
 ## Querying the error log & analyzing performance
 
 For schema, conventions (unanswered-row filter, subject normalization, topic canonicalization), ad-hoc SQL recipes, and REST API parameter reference, see [ANALYSIS.md](ANALYSIS.md). Reach for it whenever the user asks "what did I get wrong", "where am I weakest", "show me my accuracy on X", or anything that involves running a query against `data/gmat-error-log.db` or hitting `/api/sessions`, `/api/errors`, `/api/patterns`, or `/api/sessions/:id/analysis`.
+
+When the user wants to **review or be coached on his practice** ("review today's/this week's practice", "how did I do", "where am I weak", "dissect my misses", "review my timing", "re-summarize my performance", "what should I drill"), read **COACHING.md** first (a local, untracked file — personal playbook, deliberately not published in this public repo; skip gracefully if absent). It's the playbook: the diagnostic checklist (DS sufficiency C/E-trap, TPA placement slips, timing-allocation reads, end-of-set collapse), the **MSR-skip rule** (exclude MSR from weakness reads — it's strategic, not a skill gap), the Phase-2 enrichment workflow for sessions that lack answer detail, and the "Patient Coach" voice. ANALYSIS.md is the reference; COACHING.md is how to use it for him.
 
 ## REST endpoints (selected)
 

@@ -1,0 +1,176 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-06-06T12:00:00+07:00",
+  "title": "Design System: GMAT Error Log",
+  "extensions": {
+    "colorMeta": {
+      "forest-sage": { "role": "primary", "displayName": "Forest Sage", "canonical": "#3d7a5e", "tonalRamp": ["oklch(0.18 0.05 158)", "oklch(0.27 0.06 158)", "oklch(0.36 0.07 158)", "oklch(0.45 0.08 158)", "oklch(0.52 0.08 158)", "oklch(0.66 0.07 158)", "oklch(0.80 0.05 158)", "oklch(0.93 0.03 158)"] },
+      "sage-deep": { "role": "primary", "displayName": "Sage Deep", "canonical": "#35705a" },
+      "aged-brass": { "role": "secondary", "displayName": "Aged Brass", "canonical": "#c4a843", "tonalRamp": ["oklch(0.25 0.05 95)", "oklch(0.35 0.07 95)", "oklch(0.45 0.09 95)", "oklch(0.55 0.10 95)", "oklch(0.65 0.11 95)", "oklch(0.74 0.10 95)", "oklch(0.85 0.07 95)", "oklch(0.94 0.04 95)"] },
+      "brass-ink": { "role": "secondary", "displayName": "Brass Ink", "canonical": "#8f7c35", "note": "Readable dark-gold for text/labels; aged-brass is too light to read as text on cream." },
+      "warm-limestone": { "role": "neutral", "displayName": "Warm Limestone", "canonical": "#f5f4ef", "tonalRamp": ["oklch(0.26 0.008 95)", "oklch(0.36 0.008 95)", "oklch(0.46 0.006 95)", "oklch(0.56 0.006 95)", "oklch(0.66 0.006 95)", "oklch(0.78 0.006 95)", "oklch(0.90 0.005 95)", "oklch(0.97 0.004 95)"], "note": "Shared ink-to-paper neutral spine: deep-pine-ink and pine-ink-soft are the dark end, oat-surface/warm-limestone the light end." },
+      "oat-surface": { "role": "neutral", "displayName": "Oat Surface", "canonical": "#fdfcf8" },
+      "oat-recessed": { "role": "neutral", "displayName": "Oat Recessed", "canonical": "#f2f0ea" },
+      "deep-pine-ink": { "role": "neutral", "displayName": "Deep Pine Ink", "canonical": "#2a302c" },
+      "pine-ink-soft": { "role": "neutral", "displayName": "Pine Ink Soft", "canonical": "#4a524e" },
+      "stone-muted": { "role": "neutral", "displayName": "Stone Muted", "canonical": "#7a807c", "note": "Tertiary text + micro-labels only; ~3.7:1 on cream, below AA for body text." },
+      "warm-border": { "role": "neutral", "displayName": "Warm Border", "canonical": "#dcd8d0" },
+      "warm-border-strong": { "role": "neutral", "displayName": "Warm Border Strong", "canonical": "#c8c3ba" },
+      "brick-danger": { "role": "tertiary", "displayName": "Brick Danger", "canonical": "#b54a44", "tonalRamp": ["oklch(0.22 0.06 25)", "oklch(0.32 0.09 25)", "oklch(0.42 0.12 25)", "oklch(0.50 0.13 25)", "oklch(0.58 0.13 25)", "oklch(0.68 0.11 25)", "oklch(0.80 0.07 25)", "oklch(0.92 0.03 25)"] },
+      "slate-info": { "role": "tertiary", "displayName": "Slate Info", "canonical": "#4a7fa5", "tonalRamp": ["oklch(0.24 0.04 245)", "oklch(0.34 0.05 245)", "oklch(0.44 0.06 245)", "oklch(0.52 0.07 245)", "oklch(0.60 0.07 245)", "oklch(0.70 0.06 245)", "oklch(0.82 0.04 245)", "oklch(0.93 0.02 245)"] },
+      "on-primary": { "role": "neutral", "displayName": "On Primary", "canonical": "#ffffff" }
+    },
+    "sourceKey": {
+      "note": "Per-data-source color families — a key, not theme accents (The Source-Color Rule).",
+      "starttest": { "label": "Official Guide", "text": "#1e3a8a", "bg": "rgba(56,102,209,0.12)", "border": "rgba(56,102,209,0.32)", "dot": "#3866d1" },
+      "gmatclub": { "label": "GMAT Club", "text": "#92400e", "bg": "rgba(217,119,6,0.14)", "border": "rgba(217,119,6,0.38)", "dot": "#d97706" },
+      "ttp": { "label": "Target Test Prep", "text": "#065f46", "bg": "rgba(16,185,129,0.14)", "border": "rgba(16,185,129,0.36)" },
+      "ope-mock": { "label": "Practice Exam", "text": "#6b21a8", "bg": "rgba(168,85,247,0.14)", "border": "rgba(168,85,247,0.36)" },
+      "lsat": { "label": "LSAT", "text": "#9f1239", "bg": "rgba(225,29,72,0.12)", "border": "rgba(225,29,72,0.34)" }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Fluid clamp() numerals — OPE exam id + section accuracy only. Space Grotesk, tabular-nums." },
+      "headline": { "displayName": "Headline", "purpose": "Primary section titles. Manrope 700, tight tracking." },
+      "title": { "displayName": "Title", "purpose": "App title + card heads. Manrope 600." },
+      "body": { "displayName": "Body", "purpose": "All running UI text + prose. Space Grotesk 400, lh 1.6." },
+      "label": { "displayName": "Micro-label", "purpose": "Uppercase tracked captions/eyebrows/table-headers/chips. The most repeated type move." }
+    },
+    "shadows": [
+      { "name": "resting", "value": "0 1px 2px rgba(0,0,0,0.03), 0 3px 10px rgba(21,34,27,0.04)", "purpose": "Token --shadow. Cards, top bar, sticky nav. Barely-there resting lift." },
+      { "name": "overlay", "value": "0 2px 6px rgba(0,0,0,0.05), 0 10px 28px rgba(21,34,27,0.07)", "purpose": "Token --shadow-2. The modal, above a rgba(12,16,14,0.48) scrim." },
+      { "name": "soft", "value": "0 1px 2px rgba(0,0,0,0.05), 0 6px 24px rgba(21,34,27,0.08)", "purpose": "Tailwind shadow-soft — shadcn Card/Dialog primitives." },
+      { "name": "btn-primary", "value": "0 1px 2px rgba(61,122,94,0.15)", "purpose": "Green-tinted micro-lift on the primary button (hover: 0 1px 4px rgba(61,122,94,0.22))." },
+      { "name": "coach-fab", "value": "0 3px 14px rgba(61,122,94,0.30)", "purpose": "Floating AI coach FAB green glow (hover deepens to 0 4px 16px rgba(61,122,94,0.35))." },
+      { "name": "coach-panel", "value": "0 8px 40px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.06)", "purpose": "Floating chat dock — the most pronounced elevation in the app." },
+      { "name": "dropdown", "value": "0 8px 24px rgba(0,0,0,0.12)", "purpose": "Transient select/menu popovers." },
+      { "name": "focus-ring-green", "value": "0 0 0 3px rgba(47,109,79,0.14)", "purpose": "Bare-input :focus ring (affordance, not depth)." }
+    ],
+    "motion": [
+      { "name": "ease-standard", "value": "cubic-bezier(0.2, 0, 0, 1)", "purpose": "Token --ease. Fast-out, gentle-settle curve for all transitions." },
+      { "name": "duration-fast", "value": "160ms", "purpose": "Token --t. Default micro-interaction (hover, border/bg/color)." },
+      { "name": "duration-slow", "value": "280ms", "purpose": "Token --t2. Entrances and larger moves." },
+      { "name": "rise", "value": "@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }", "purpose": "Page-shell mount entrance at --t2 --ease." }
+    ],
+    "breakpoints": [
+      { "name": "phone", "value": "480px" },
+      { "name": "mobile-max", "value": "640px" },
+      { "name": "ope", "value": "720px" },
+      { "name": "tablet", "value": "768px" },
+      { "name": "table-collapse", "value": "880px" },
+      { "name": "desktop", "value": "960px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Solid sage-green CTA with a green micro-lift shadow and a gold focus ring.",
+      "html": "<button class=\"ds-btn-primary\">Run scrape</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; height: 40px; padding: 8px 16px; border: none; border-radius: 10px; background: #3d7a5e; color: #ffffff; font-family: 'Space Grotesk', sans-serif; font-size: 0.875rem; font-weight: 600; box-shadow: 0 1px 2px rgba(61,122,94,0.15); cursor: pointer; transition: background-color 160ms cubic-bezier(0.2,0,0,1), box-shadow 160ms cubic-bezier(0.2,0,0,1); } .ds-btn-primary:hover { background: #35705a; box-shadow: 0 1px 4px rgba(61,122,94,0.22); } .ds-btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(196,168,67,0.7); } .ds-btn-primary:disabled { opacity: 0.5; pointer-events: none; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Ghost-bordered green action for secondary tasks beside a primary CTA.",
+      "html": "<button class=\"ds-btn-secondary\">Open in GMAT</button>",
+      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; height: 40px; padding: 8px 16px; border: 1px solid rgba(61,122,94,0.5); border-radius: 10px; background: transparent; color: #3d7a5e; font-family: 'Space Grotesk', sans-serif; font-size: 0.875rem; font-weight: 600; cursor: pointer; transition: background-color 160ms cubic-bezier(0.2,0,0,1); } .ds-btn-secondary:hover { background: rgba(61,122,94,0.08); } .ds-btn-secondary:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(196,168,67,0.7); }"
+    },
+    {
+      "name": "Source Chip",
+      "kind": "chip",
+      "refersTo": "source-chip",
+      "description": "Cross-table data-source identity marker — one fixed hue family per source, outside the brand tokens.",
+      "html": "<span class=\"ds-source-chip ds-source-starttest\">Official Guide</span> <span class=\"ds-source-chip ds-source-gmatclub\">GMAT Club</span>",
+      "css": ".ds-source-chip { display: inline-flex; align-items: center; min-height: 22px; padding: 2px 9px; border-radius: 9999px; font-family: 'Space Grotesk', sans-serif; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap; } .ds-source-starttest { background: rgba(56,102,209,0.12); color: #1e3a8a; border: 1px solid rgba(56,102,209,0.32); } .ds-source-gmatclub { background: rgba(217,119,6,0.14); color: #92400e; border: 1px solid rgba(217,119,6,0.38); }"
+    },
+    {
+      "name": "Status Pill",
+      "kind": "chip",
+      "refersTo": "badge-default",
+      "description": "Performance-classification taxonomy: STRONG (green) / IMPROVING (gold) / NEEDS-FOCUS (red), soft tinted fills.",
+      "html": "<span class=\"ds-status-pill ds-status-strong\">Strong</span> <span class=\"ds-status-pill ds-status-improving\">Improving</span> <span class=\"ds-status-pill ds-status-needs-focus\">Needs focus</span>",
+      "css": ".ds-status-pill { display: inline-flex; align-items: center; min-height: 22px; padding: 2px 8px; border-radius: 9999px; font-family: 'Space Grotesk', sans-serif; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; } .ds-status-strong { background: rgba(61,122,94,0.10); color: #3d7a5e; border: 1px solid rgba(61,122,94,0.25); } .ds-status-improving { background: rgba(196,168,67,0.10); color: #8f7c35; border: 1px solid rgba(196,168,67,0.25); } .ds-status-needs-focus { background: rgba(181,74,68,0.10); color: #b54a44; border: 1px solid rgba(181,74,68,0.25); }"
+    },
+    {
+      "name": "Difficulty Chip",
+      "kind": "chip",
+      "refersTo": "badge-default",
+      "description": "Hard/Medium/Easy difficulty band with an optional inner IRT theta value.",
+      "html": "<span class=\"ds-difficulty-chip ds-diff-hard\">Hard <em>0.82</em></span>",
+      "css": ".ds-difficulty-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 9999px; background: rgba(255,255,255,0.68); font-family: 'Space Grotesk', sans-serif; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; } .ds-difficulty-chip em { font-style: normal; font-size: 0.62rem; font-variant-numeric: tabular-nums; color: #7a807c; } .ds-diff-hard { color: #b54a44; border: 1px solid rgba(181,74,68,0.22); background: rgba(181,74,68,0.06); } .ds-diff-medium { color: #8f7c35; border: 1px solid rgba(196,168,67,0.22); background: rgba(196,168,67,0.06); } .ds-diff-easy { color: #3d7a5e; border: 1px solid rgba(61,122,94,0.18); background: rgba(61,122,94,0.05); }"
+    },
+    {
+      "name": "Answer-Choice Card (signature)",
+      "kind": "custom",
+      "refersTo": "card",
+      "description": "The centerpiece. Three-color semantic via a 3px left-border + matching tint: gold = correct answer the user missed, red = user's wrong pick, green = user's right pick.",
+      "html": "<div class=\"ds-choices\"><div class=\"ds-choice ds-choice-correct-only\"><strong>A</strong><span>The right answer you didn't pick</span></div><div class=\"ds-choice ds-choice-mine-wrong\"><strong>C</strong><span>Your pick — wrong</span></div><div class=\"ds-choice ds-choice-mine-correct\"><strong>B</strong><span>Your pick — right</span></div></div>",
+      "css": ".ds-choices { display: flex; flex-direction: column; gap: 8px; font-family: 'Space Grotesk', sans-serif; } .ds-choice { display: flex; align-items: baseline; gap: 12px; padding: 16px; border: 1px solid #dcd8d0; border-left-width: 3px; border-radius: 8px; background: #fdfcf8; color: #2a302c; font-size: 0.9rem; } .ds-choice strong { font-size: 1.05rem; font-weight: 700; } .ds-choice-correct-only { border-left-color: #c4a843; background: rgba(196,168,67,0.06); } .ds-choice-mine-wrong { border-left-color: #b54a44; background: rgba(181,74,68,0.05); } .ds-choice-mine-correct { border-left-color: #3d7a5e; background: rgba(61,122,94,0.06); }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Warm off-white surface on the cream page, 1px border, soft resting shadow. Never nest cards.",
+      "html": "<section class=\"ds-card\"><h3 class=\"ds-card-title\">Quant accuracy</h3><p class=\"ds-card-body\">You're up 6 points over the last 10 sessions. Number Properties is still the soft spot.</p></section>",
+      "css": ".ds-card { border: 1px solid #dcd8d0; border-radius: 14px; background: #fdfcf8; color: #2a302c; padding: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03), 0 3px 10px rgba(21,34,27,0.04); } .ds-card-title { margin: 0 0 8px; font-family: 'Manrope', sans-serif; font-size: 0.95rem; font-weight: 600; letter-spacing: -0.01em; } .ds-card-body { margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 0.9rem; line-height: 1.6; color: #4a524e; }"
+    },
+    {
+      "name": "Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Sits on the page background so it reads as a well recessed into a card. Green :focus ring, gold :focus-visible outline.",
+      "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"Search questions\">",
+      "css": ".ds-input { display: flex; width: 100%; height: 40px; padding: 8px 12px; border: 1px solid #dcd8d0; border-radius: 10px; background: #f5f4ef; color: #2a302c; font-family: 'Space Grotesk', sans-serif; font-size: 0.875rem; transition: border-color 160ms cubic-bezier(0.2,0,0,1), box-shadow 160ms cubic-bezier(0.2,0,0,1); } .ds-input::placeholder { color: #7a807c; } .ds-input:hover { border-color: #c8c3ba; } .ds-input:focus { outline: none; border-color: #3d7a5e; box-shadow: 0 0 0 3px rgba(47,109,79,0.14); } .ds-input:focus-visible { outline: 2px solid #c4a843; outline-offset: 2px; }"
+    },
+    {
+      "name": "Status Callout",
+      "kind": "custom",
+      "refersTo": "card",
+      "description": "Non-blocking system message bar; slate-info left edge + info tint, .error variant flips to brick-danger. The second sanctioned thick-left-border.",
+      "html": "<div class=\"ds-status\">Scrape finished — 42 new attempts saved.</div>",
+      "css": ".ds-status { padding: 10px 14px; border: 1px solid rgba(74,127,165,0.2); border-left: 3px solid #4a7fa5; border-radius: 0 5px 5px 0; background: rgba(74,127,165,0.08); color: #2a302c; font-family: 'Space Grotesk', sans-serif; font-size: 0.875rem; } .ds-status.ds-status-error { border-color: rgba(181,74,68,0.2); border-left-color: #b54a44; background: rgba(181,74,68,0.08); color: #b54a44; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Patient Coach",
+    "overview": "The interface of a coach who has read your entire practice record and tells you the truth, kindly — warm without being soft, honest without being harsh, calm under exam pressure. It reads like good notebook paper under a warm desk lamp: forest green carries the work you got right and the system's own voice, brass gold marks the answer you reached for and missed, all on warm off-whites that never glare. Motivation is earned — a shrinking error count and a climbing accuracy bar are the reward, not confetti. Density is two-speed: reading surfaces breathe (15px body, lh 1.6, 16-24px padding) while analytics surfaces are compact and information-dense (8-12px cells, 22px pills, 34px filters) because the data is the hero and the chrome disappears. Depth is near-flat: 1px warm borders and three tonal off-white steps do the structural work; shadow is dialed to a whisper, reserved for things that literally float.",
+    "keyCharacteristics": [
+      "Warm-paper light theme: forest-sage green primary + aged-brass gold accent on cream off-whites.",
+      "Flat-by-default depth — borders and tonal surface steps, not shadows.",
+      "A relentless uppercase micro-label idiom (0.7rem, tracked, weight 600-700) for every caption, eyebrow, table header, and chip.",
+      "A load-bearing three-color answer semantic: gold = the right answer you missed, red = your wrong pick, green = your right pick.",
+      "All numerics set tabular-nums so columns and metrics align."
+    ],
+    "rules": [
+      { "name": "The Two-Voice Rule", "body": "Green and gold are not interchangeable accents. Green speaks for the user's success and the system's own voice; gold speaks for attention — the thing to look at, the answer missed. Never swap them for visual variety.", "section": "colors" },
+      { "name": "The Earned-Saturation Rule", "body": "Saturated color appears only where it carries meaning — a metric, a status, a correctness flag, a data source. Decorative color washes are forbidden; warmth comes from the cream surfaces and the type, not from painting panels.", "section": "colors" },
+      { "name": "The Source-Color Rule", "body": "Each data source owns one fixed hue family outside the brand tokens, used only on its pill and dot: StartTest indigo, GMAT Club amber, TTP emerald, OPE purple, LSAT rose. A color key, not theme accents — never reuse a source hue for unrelated UI.", "section": "colors" },
+      { "name": "The Micro-Label Rule", "body": "Captions, eyebrows, table headers, and chip text are always the same atom: uppercase, ~0.7rem, weight 600-700, letter-spacing ~0.07em. One idiom, reused everywhere. Never set a caption as sentence-case lowercase gray.", "section": "typography" },
+      { "name": "The Two-Family Rule", "body": "Manrope is for titles and only titles (plus the editorial OPE overlines). Everything else is Space Grotesk. No third family; no body in Manrope, no titles in Space Grotesk.", "section": "typography" },
+      { "name": "The Tabular-Number Rule", "body": "Every metric, accuracy figure, count, time, and theta uses font-variant-numeric: tabular-nums. Numbers are data; they must align in columns and never jitter as they update.", "section": "typography" },
+      { "name": "The Flat-By-Default Rule", "body": "Surfaces are flat at rest. To separate two elements, try a tonal surface step or a 1px border first. A shadow is permitted only when the element genuinely floats above the page (modal, dropdown, FAB, drag preview).", "section": "elevation" },
+      { "name": "The Green-Ink Shadow Rule", "body": "Diffuse shadow layers use rgba(21,34,27,...), never pure black. Pure-black shadows on this cream surface read cold and cheap.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep saturated color rationed — green for the user's success and the system's voice, gold for attention/the missed answer, per The Two-Voice Rule.",
+      "Do build depth from 1px warm-border + the three tonal off-white steps first; add a shadow only for things that float (modal, dropdown, FAB).",
+      "Do set every caption, eyebrow, table header, and chip as the uppercase ~0.7rem tracked micro-label, and every number as tabular-nums.",
+      "Do keep Manrope for titles and Space Grotesk for everything else — two families, no more.",
+      "Do preserve the gold/red/green answer semantic exactly (gold = correct-missed, red = wrong-pick, green = right-pick) wherever correctness is shown.",
+      "Do use pine-ink-soft (#4a524e) for any text a reader must actually read; reserve stone-muted for bold uppercase micro-labels.",
+      "Do honor prefers-reduced-motion for new motion — the main dashboard's rise/pulse/coach animations are currently not covered by a global guard; close that gap rather than widen it."
+    ],
+    "donts": [
+      "Don't gamify. No mascots, no confetti-on-streak, no XP bars, no toy-bright cartoon energy. Progress is shown as honest data, never a slot-machine reward.",
+      "Don't drift toward enterprise BI. No dense chrome, no nested config panels, no toolbar thickets, no charts that bury the one insight under ten controls.",
+      "Don't set body or placeholder text in stone-muted (#7a807c) on the cream surfaces — it lands near 3.7:1, under the 4.5:1 floor. Bump to pine-ink-soft for anything readers read.",
+      "Don't add border-left/right greater than 1px as a decorative colored stripe. The only legal thick left-border is the established answer/status semantic (gold/red/green/info).",
+      "Don't use gradient text, decorative glassmorphism, the big-number hero-metric template, or identical icon+heading+text card grids.",
+      "Don't spread the Study Plan's indigo/violet, inline-styled palette into the main dashboard — it's a known inconsistency; bring new study-plan work back toward the sage/gold token system.",
+      "Don't reuse a data-source hue (indigo/amber/emerald/purple/rose) for unrelated UI — those colors are a source key, not theme accents."
+    ]
+  }
+}
