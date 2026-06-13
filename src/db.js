@@ -1,12 +1,12 @@
 const fs = require('fs');
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
+const { toPg, toTimestamptz } = require('./sql-util');
+const { runMigrations } = require('../scripts/migrate');
 const { deriveQuestionMetadata, enrichQuestionMetadata } = require('./question-metadata');
 
-const dbDir = path.resolve(__dirname, '..', 'data');
-// Default to the real DB; GMAT_DB_PATH lets tests/tools point at a throwaway
-// copy without touching production data.
-const dbPath = process.env.GMAT_DB_PATH || path.join(dbDir, 'gmat-error-log.db');
+// server.js imports dbPath purely to log the DB target on startup. Keep the export.
+const dbPath = process.env.DATABASE_URL || '(DATABASE_URL not set)';
 const QUESTION_ATTEMPT_INSERT_COLUMNS = [
   'run_id',
   'session_id',
@@ -39,46 +39,51 @@ const QUESTION_ATTEMPT_INSERT_COLUMNS = [
   'taxonomy_path',
 ];
 
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 10 });
+
+// The SQLite version never closed its connection; a pool must close on shutdown.
+let poolClosing = false;
+function closePool() {
+  if (poolClosing) return Promise.resolve();
+  poolClosing = true;
+  return pool.end();
+}
+process.on('SIGINT', () => closePool().finally(() => process.exit(0)));
+process.on('SIGTERM', () => closePool().finally(() => process.exit(0)));
+
+async function run(sql, params = []) {
+  const res = await pool.query(toPg(sql), params);
+  return { changes: res.rowCount };
 }
 
-const db = new sqlite3.Database(dbPath);
-
-function run(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function onRun(err) {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve({ lastID: this.lastID, changes: this.changes });
-    });
-  });
+async function all(sql, params = []) {
+  const res = await pool.query(toPg(sql), params);
+  return res.rows;
 }
 
-function all(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve(rows);
-    });
-  });
+async function get(sql, params = []) {
+  const res = await pool.query(toPg(sql), params);
+  return res.rows[0];
 }
 
-function get(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve(row);
-    });
-  });
+// Run fn inside a single pooled-client transaction. fn receives {run, get, all}
+// bound to that client so multi-statement writes are atomic on ONE connection.
+async function withTransaction(fn) {
+  const client = await pool.connect();
+  const crun = async (sql, p = []) => ({ changes: (await client.query(toPg(sql), p)).rowCount });
+  const call = async (sql, p = []) => (await client.query(toPg(sql), p)).rows;
+  const cget = async (sql, p = []) => (await client.query(toPg(sql), p)).rows[0];
+  try {
+    await client.query('BEGIN');
+    const result = await fn({ run: crun, all: call, get: cget });
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* surface original */ }
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 function buildInsertStatement(tableName, columns) {
@@ -96,127 +101,12 @@ function assertValueCount(label, columns, values) {
   }
 }
 
-async function ensureQuestionAttemptsColumn(columnName, definition) {
-  const columns = await all('PRAGMA table_info(question_attempts)');
-  if (columns.some((column) => column.name === columnName)) return;
-  await run(`ALTER TABLE question_attempts ADD COLUMN ${columnName} ${definition}`);
-}
-
 async function initDb() {
-  await run('PRAGMA foreign_keys = ON');
+  await runMigrations(pool);
 
-  await run(`
-    CREATE TABLE IF NOT EXISTS scrape_runs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      extracted_at TEXT NOT NULL,
-      since_value TEXT,
-      source TEXT,
-      review_category_id INTEGER,
-      total_sessions INTEGER NOT NULL,
-      total_questions INTEGER NOT NULL,
-      total_errors INTEGER NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-
-  await run(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      run_id INTEGER NOT NULL,
-      session_external_id INTEGER NOT NULL,
-      session_date TEXT,
-      source TEXT,
-      subject TEXT,
-      total_q_api INTEGER,
-      total_q_categories INTEGER,
-      correct_count INTEGER,
-      error_count INTEGER,
-      accuracy_pct REAL,
-      avg_time_sec INTEGER,
-      avg_correct_time_sec INTEGER,
-      avg_incorrect_time_sec INTEGER,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY (run_id) REFERENCES scrape_runs(id) ON DELETE CASCADE,
-      UNIQUE(run_id, session_external_id)
-    )
-  `);
-
-  // OPE scaled-score columns: GMAT total (205-805) + 3 section scores (60-90)
-  // and matching percentiles. Idempotent; safe to re-run.
-  for (const col of [
-    'total_score INTEGER',
-    'total_percentile INTEGER',
-    'quant_score INTEGER',
-    'quant_percentile INTEGER',
-    'verbal_score INTEGER',
-    'verbal_percentile INTEGER',
-    'di_score INTEGER',
-    'di_percentile INTEGER',
-  ]) {
-    try { await run(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch (_e) { /* exists */ }
-  }
-
-  await run(`
-    CREATE TABLE IF NOT EXISTS question_attempts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      run_id INTEGER NOT NULL,
-      session_id INTEGER NOT NULL,
-      q_code TEXT,
-      q_id TEXT,
-      cat_id INTEGER,
-      subject_code TEXT,
-      category_code TEXT,
-      subcategory TEXT,
-      subject_sub TEXT,
-      subject_sub_raw TEXT,
-      question_url TEXT,
-      question_stem TEXT,
-      answer_choices TEXT,
-      response_format TEXT,
-      response_details TEXT,
-      correct INTEGER NOT NULL,
-      difficulty TEXT,
-      confidence TEXT,
-      time_sec INTEGER,
-      my_answer TEXT,
-      correct_answer TEXT,
-      topic TEXT,
-      topic_source TEXT,
-      content_domain TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY (run_id) REFERENCES scrape_runs(id) ON DELETE CASCADE,
-      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-    )
-  `);
-
-  await ensureQuestionAttemptsColumn('q_id', 'TEXT');
-  await ensureQuestionAttemptsColumn('cat_id', 'INTEGER');
-  await ensureQuestionAttemptsColumn('subject_code', 'TEXT');
-  await ensureQuestionAttemptsColumn('category_code', 'TEXT');
-  await ensureQuestionAttemptsColumn('subcategory', 'TEXT');
-  await ensureQuestionAttemptsColumn('subject_sub', 'TEXT');
-  await ensureQuestionAttemptsColumn('subject_sub_raw', 'TEXT');
-  await ensureQuestionAttemptsColumn('question_url', 'TEXT');
-  await ensureQuestionAttemptsColumn('question_stem', 'TEXT');
-  await ensureQuestionAttemptsColumn('answer_choices', 'TEXT');
-  await ensureQuestionAttemptsColumn('response_format', 'TEXT');
-  await ensureQuestionAttemptsColumn('response_details', 'TEXT');
-  await ensureQuestionAttemptsColumn('mistake_type', 'TEXT');
-  await ensureQuestionAttemptsColumn('notes', 'TEXT');
-  await ensureQuestionAttemptsColumn('topic_source', 'TEXT');
-  await ensureQuestionAttemptsColumn('content_domain', 'TEXT');
-  await ensureQuestionAttemptsColumn('passage_text', 'TEXT');
-  await ensureQuestionAttemptsColumn('difficulty_theta', 'REAL');
-  // Raw StartTest taxonomy path (data-index, e.g. "Data.PAD.TRA") captured at
-  // scrape time. Kept for backfill + debugging the per-product type codes.
-  await ensureQuestionAttemptsColumn('taxonomy_path', 'TEXT');
-
-  // One-time backfill: older OPE Phase 3 writes stored the raw IRT theta as a
-  // numeric string in `difficulty` (e.g. "-0.647"), which the UI then rendered
-  // as a number instead of an Easy/Medium/Hard chip. Move those values into
-  // `difficulty_theta` and replace `difficulty` with the bucketed label. The
-  // WHERE clause makes this idempotent — rows already migrated have a
-  // non-null `difficulty_theta` and won't be touched again.
+  // One-time backfill: older OPE Phase 3 writes stored raw IRT theta as a numeric
+  // string in `difficulty`; move those into `difficulty_theta` and bucket the label.
+  // Idempotent via difficulty_theta IS NULL. (GLOB ported to regex in a later task.)
   await run(`
     UPDATE question_attempts
     SET difficulty_theta = CAST(difficulty AS REAL),
@@ -234,235 +124,8 @@ async function initDb() {
       )
   `);
 
-  await run('CREATE INDEX IF NOT EXISTS idx_sessions_run_id ON sessions(run_id)');
-  await run(
-    'CREATE INDEX IF NOT EXISTS idx_sessions_external_source ON sessions(session_external_id, source)'
-  );
-  await run('CREATE INDEX IF NOT EXISTS idx_questions_run_id ON question_attempts(run_id)');
-  await run('CREATE INDEX IF NOT EXISTS idx_questions_correct ON question_attempts(correct)');
-  await run('CREATE INDEX IF NOT EXISTS idx_questions_q_code ON question_attempts(q_code)');
-  await run('CREATE INDEX IF NOT EXISTS idx_questions_q_id ON question_attempts(q_id)');
-  await run('CREATE INDEX IF NOT EXISTS idx_questions_topic ON question_attempts(topic)');
-  await run('CREATE INDEX IF NOT EXISTS idx_questions_difficulty ON question_attempts(difficulty)');
-
-  // Empirical IRT difficulty cutoffs. Populated by recomputeIrtCutoffs()
-  // after each enrichment. The OPE bank's b-parameter scale differs by
-  // subject and even by DI subcategory (Quant tops out near 0.4 while DI's
-  // MSR Math items extend past 5), so a single global ±0.43 cutoff is wrong.
-  // Q and V key on subject_code alone (sub_key=''); DI splits by topic so
-  // MSR's wide right tail doesn't contaminate DS/GT/TPA buckets.
-  await run(`DROP TABLE IF EXISTS irt_cutoffs`);
-  await run(`
-    CREATE TABLE irt_cutoffs (
-      subject_code TEXT NOT NULL,
-      sub_key TEXT NOT NULL DEFAULT '',
-      p33 REAL NOT NULL,
-      p67 REAL NOT NULL,
-      n INTEGER NOT NULL,
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      PRIMARY KEY (subject_code, sub_key)
-    )
-  `);
-
-  await run(`
-    CREATE TABLE IF NOT EXISTS coach_sessions (
-      id TEXT PRIMARY KEY,
-      title TEXT DEFAULT '',
-      run_id INTEGER,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-
-  await run(`
-    CREATE TABLE IF NOT EXISTS coach_messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL REFERENCES coach_sessions(id) ON DELETE CASCADE,
-      role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
-      content TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-  await run('CREATE INDEX IF NOT EXISTS idx_coach_messages_session ON coach_messages(session_id)');
-
-  await run(`
-    CREATE TABLE IF NOT EXISTS coach_memories (
-      id TEXT PRIMARY KEY,
-      content TEXT NOT NULL,
-      embedding TEXT NOT NULL,
-      metadata TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-  await run('CREATE INDEX IF NOT EXISTS idx_coach_memories_created ON coach_memories(created_at DESC)');
-
-  await run(`
-    CREATE TABLE IF NOT EXISTS lsat_attempts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      test_num INTEGER NOT NULL,
-      section_roman TEXT NOT NULL,
-      section_kind TEXT NOT NULL,
-      question_number INTEGER NOT NULL,
-      user_answer TEXT NOT NULL,
-      correct_answer TEXT,
-      is_correct INTEGER,
-      confidence TEXT,
-      time_ms INTEGER,
-      session_id INTEGER,
-      attempted_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-  // Older versions had UNIQUE(test_num, section_roman, question_number) which made
-  // every retake overwrite history. Migrate to a session-scoped unique key so we
-  // keep a row per (question, session). Detect via PRAGMA, copy data, swap tables.
-  try {
-    const idxs = await all("PRAGMA index_list('lsat_attempts')");
-    const hasLegacyUnique = (idxs || []).some(
-      (i) => i.unique === 1 && /^sqlite_autoindex_lsat_attempts_/.test(i.name)
-    );
-    if (hasLegacyUnique) {
-      await run(`CREATE TABLE lsat_attempts_v2 (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        test_num INTEGER NOT NULL,
-        section_roman TEXT NOT NULL,
-        section_kind TEXT NOT NULL,
-        question_number INTEGER NOT NULL,
-        user_answer TEXT NOT NULL,
-        correct_answer TEXT,
-        is_correct INTEGER,
-        confidence TEXT,
-        time_ms INTEGER,
-        session_id INTEGER,
-        attempted_at TEXT NOT NULL DEFAULT (datetime('now'))
-      )`);
-      // Copy preserving every column we know about.
-      await run(`INSERT INTO lsat_attempts_v2
-        (id, test_num, section_roman, section_kind, question_number, user_answer, correct_answer, is_correct, confidence, time_ms, session_id, attempted_at)
-        SELECT id, test_num, section_roman, section_kind, question_number, user_answer, correct_answer, is_correct, confidence, time_ms, session_id, attempted_at
-        FROM lsat_attempts`);
-      await run('DROP TABLE lsat_attempts');
-      await run('ALTER TABLE lsat_attempts_v2 RENAME TO lsat_attempts');
-    }
-  } catch (e) {
-    // If introspection / migration fails on a fresh DB it's fine — the new
-    // CREATE TABLE above already used the new shape.
-  }
-  // ALTERs are no-ops if columns already present.
-  try { await run('ALTER TABLE lsat_attempts ADD COLUMN confidence TEXT'); } catch (e) { /* exists */ }
-  try { await run('ALTER TABLE lsat_attempts ADD COLUMN time_ms INTEGER'); } catch (e) { /* exists */ }
-  try { await run('ALTER TABLE lsat_attempts ADD COLUMN session_id INTEGER'); } catch (e) { /* exists */ }
-  // User annotations (mirrors question_attempts.mistake_type / notes) so LSAT errors
-  // are annotatable from the dashboard's review modal just like GMAT rows.
-  try { await run('ALTER TABLE lsat_attempts ADD COLUMN mistake_type TEXT'); } catch (e) { /* exists */ }
-  try { await run('ALTER TABLE lsat_attempts ADD COLUMN notes TEXT'); } catch (e) { /* exists */ }
-  await run('CREATE INDEX IF NOT EXISTS idx_lsat_attempts_test ON lsat_attempts(test_num, section_roman)');
-  await run('CREATE INDEX IF NOT EXISTS idx_lsat_attempts_session ON lsat_attempts(session_id)');
-  // Within one session, each question can only have one attempt row (we UPDATE on retry).
-  // Across sessions, attempts accumulate as history.
-  await run('CREATE UNIQUE INDEX IF NOT EXISTS uq_lsat_attempts_session_q ON lsat_attempts(test_num, section_roman, question_number, session_id)');
-
-  await run(`
-    CREATE TABLE IF NOT EXISTS lsat_sessions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      test_num INTEGER NOT NULL,
-      section_roman TEXT NOT NULL,
-      section_kind TEXT NOT NULL,
-      set_key TEXT NOT NULL,
-      set_label TEXT,
-      first_question INTEGER NOT NULL,
-      last_question INTEGER NOT NULL,
-      mode TEXT,
-      started_at TEXT NOT NULL DEFAULT (datetime('now')),
-      completed_at TEXT
-    )
-  `);
-  try { await run('ALTER TABLE lsat_sessions ADD COLUMN mode TEXT'); } catch (e) { /* exists */ }
-  try { await run('ALTER TABLE lsat_sessions ADD COLUMN question_numbers TEXT'); } catch (e) { /* exists */ }
-  await run('CREATE INDEX IF NOT EXISTS idx_lsat_sessions_test ON lsat_sessions(test_num, section_roman)');
-  await run('CREATE INDEX IF NOT EXISTS idx_lsat_sessions_started ON lsat_sessions(started_at DESC)');
-
-  // ─── Study Plan ──────────────────────────────────────────────────────────
-  // Holds the 4-week final-sprint plan and its sub-task checklist. Each row
-  // is one actionable item ("warm-up", "DI Tables timed set", "review"). One
-  // day can have multiple rows ordered by `position`. `status` is the
-  // checkbox state; user edits live in `title`/`description`/`notes`.
-  await run(`
-    CREATE TABLE IF NOT EXISTS study_plan_tasks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      day_date TEXT NOT NULL,
-      week_number INTEGER NOT NULL,
-      day_label TEXT,
-      day_theme TEXT,
-      position INTEGER NOT NULL DEFAULT 0,
-      title TEXT NOT NULL,
-      description TEXT,
-      est_minutes INTEGER,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','done','skipped')),
-      completed_at TEXT,
-      notes TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-  await run('CREATE INDEX IF NOT EXISTS idx_study_plan_day ON study_plan_tasks(day_date)');
-  await run('CREATE INDEX IF NOT EXISTS idx_study_plan_week ON study_plan_tasks(week_number)');
-  await run('CREATE INDEX IF NOT EXISTS idx_study_plan_status ON study_plan_tasks(status)');
-
-  // First-class plan days. Days used to be derived purely from task rows, so an
-  // emptied or brand-new day could not exist. Persisting them here lets the user
-  // add days, delete days, reschedule a day to another date, and reorder whole
-  // days, while keeping `study_plan_tasks.day_date` as the (unique) join key.
-  await run(`
-    CREATE TABLE IF NOT EXISTS study_plan_days (
-      date TEXT PRIMARY KEY,
-      week_number INTEGER NOT NULL DEFAULT 1,
-      day_label TEXT,
-      day_theme TEXT,
-      sort_order INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-  await run('CREATE INDEX IF NOT EXISTS idx_study_plan_days_order ON study_plan_days(sort_order)');
-  // Backfill for existing installs: populate the day table once from the seed
-  // skeleton plus any day a task currently lives on.
   await backfillStudyPlanDays();
-
-  // Plan-level metadata (test date, target score, seeded flag).
-  await run(`
-    CREATE TABLE IF NOT EXISTS study_plan_meta (
-      key TEXT PRIMARY KEY,
-      value TEXT,
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-
-  // One-time: shift existing plan weeks from Sun–Sat to Monday-start (idempotent).
   await rebucketWeeksMonSunOnce();
-
-  // Full-length mock exam results. One row per mock attempt. Section scores
-  // are GMAT Focus scale (60-90); total is 205-805. Percentiles are 0-100.
-  // `source_label` is free-form (e.g., "OPE3", "GMAT Club CAT", "OPE4").
-  await run(`
-    CREATE TABLE IF NOT EXISTS mock_results (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      mock_date TEXT NOT NULL,
-      source_label TEXT NOT NULL,
-      total_score INTEGER,
-      total_percentile INTEGER,
-      quant_score INTEGER,
-      quant_percentile INTEGER,
-      di_score INTEGER,
-      di_percentile INTEGER,
-      verbal_score INTEGER,
-      verbal_percentile INTEGER,
-      notes TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-  await run('CREATE INDEX IF NOT EXISTS idx_mock_results_date ON mock_results(mock_date)');
-
   await backfillSparseQuestionAttempts();
 }
 
@@ -4854,6 +4517,8 @@ module.exports = {
   run,
   all,
   get,
+  withTransaction,
+  closePool,
   initDb,
   backfillSparseQuestionAttempts,
   saveScrapeResult,
