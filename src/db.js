@@ -104,7 +104,7 @@ async function initDb() {
 
   // One-time backfill: older OPE Phase 3 writes stored raw IRT theta as a numeric
   // string in `difficulty`; move those into `difficulty_theta` and bucket the label.
-  // Idempotent via difficulty_theta IS NULL. (GLOB ported to regex in a later task.)
+  // Idempotent via difficulty_theta IS NULL.
   await run(`
     UPDATE question_attempts
     SET difficulty_theta = CAST(difficulty AS REAL),
@@ -114,12 +114,7 @@ async function initDb() {
           ELSE 'Medium'
         END
     WHERE difficulty_theta IS NULL
-      AND (
-        difficulty GLOB '-[0-9]*'
-        OR difficulty GLOB '[0-9]*'
-        OR difficulty GLOB '.[0-9]*'
-        OR difficulty GLOB '-.[0-9]*'
-      )
+      AND difficulty ~ '^-{0,1}\.{0,1}[0-9]'
   `);
 
   await backfillStudyPlanDays();
@@ -142,14 +137,14 @@ async function saveLsatAttempt({ testNum, sectionRoman, sectionKind, questionNum
   // same session updates the row; a NEW session creates a fresh history entry.
   await run(
     `INSERT INTO lsat_attempts (test_num, section_roman, section_kind, question_number, user_answer, correct_answer, is_correct, confidence, time_ms, session_id, attempted_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
      ON CONFLICT(test_num, section_roman, question_number, session_id) DO UPDATE SET
        user_answer = excluded.user_answer,
        correct_answer = excluded.correct_answer,
        is_correct = excluded.is_correct,
        confidence = excluded.confidence,
        time_ms = excluded.time_ms,
-       attempted_at = datetime('now')`,
+       attempted_at = now()`,
     [testNum, sectionRoman, sectionKind, questionNumber, String(userAnswer).toUpperCase(), corr, isCorrect, conf, tMs, sId]
   );
   return { isCorrect };
@@ -177,7 +172,7 @@ async function completeLsatSession(id) {
   );
   const numbers = rows.map((r) => r.question_number);
   await run(
-    `UPDATE lsat_sessions SET completed_at = datetime('now'), question_numbers = ? WHERE id = ?`,
+    `UPDATE lsat_sessions SET completed_at = now(), question_numbers = ? WHERE id = ?`,
     [JSON.stringify(numbers), id]
   );
   return { answeredCount: numbers.length };
@@ -1065,7 +1060,7 @@ function difficultyBucketExpr(alias = 'q') {
   const col = `${alias}.difficulty`;
   return `CASE
     WHEN COALESCE(NULLIF(${col}, ''), '') = '' THEN 'Unknown'
-    WHEN ${col} GLOB '-[0-9]*' OR ${col} GLOB '[0-9]*' OR ${col} GLOB '.[0-9]*' OR ${col} GLOB '-.[0-9]*' THEN
+    WHEN ${col} ~ '^-{0,1}\\.{0,1}[0-9]' THEN
       CASE
         WHEN CAST(${col} AS REAL) < -0.43 THEN 'Easy'
         WHEN CAST(${col} AS REAL) > 0.43 THEN 'Hard'
@@ -1101,11 +1096,11 @@ async function listSessions(runId, { limit, offset, platform, subject, startDate
     params.push(String(subject).toUpperCase());
   }
   if (startDate) {
-    conditions.push('DATE(s.session_date) >= DATE(?)');
+    conditions.push('s.session_date >= ?::date');
     params.push(startDate);
   }
   if (endDate) {
-    conditions.push('DATE(s.session_date) <= DATE(?)');
+    conditions.push('s.session_date <= ?::date');
     params.push(endDate);
   }
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -1113,9 +1108,9 @@ async function listSessions(runId, { limit, offset, platform, subject, startDate
   const answeredCountExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) THEN 1 ELSE 0 END)`;
   const answeredCorrectExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN 1 ELSE 0 END)`;
   const answeredWrongExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN 1 ELSE 0 END)`;
-  const answeredAvgTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) THEN q.time_sec END), 0)`;
-  const answeredAvgCorrectTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN q.time_sec END), 0)`;
-  const answeredAvgWrongTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN q.time_sec END), 0)`;
+  const answeredAvgTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) THEN q.time_sec END)::numeric, 0)`;
+  const answeredAvgCorrectTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN q.time_sec END)::numeric, 0)`;
+  const answeredAvgWrongTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN q.time_sec END)::numeric, 0)`;
 
   let limitClause = '';
   if (limit !== undefined && offset !== undefined) {
@@ -1148,7 +1143,7 @@ async function listSessions(runId, { limit, offset, platform, subject, startDate
         COALESCE(${answeredCorrectExpr}, 0) AS attempt_correct,
         COALESCE(${answeredWrongExpr}, 0) AS attempt_wrong,
         ROUND(
-          CASE
+          (CASE
             WHEN ${answeredCountExpr} > 0
               THEN
                 100.0
@@ -1160,7 +1155,7 @@ async function listSessions(runId, { limit, offset, platform, subject, startDate
                 * COALESCE(s.correct_count, 0)
                 / (COALESCE(s.correct_count, 0) + COALESCE(s.error_count, 0))
             ELSE s.accuracy_pct
-          END,
+          END)::numeric,
           1
         ) AS accuracy_pct,
         COALESCE(${answeredAvgTimeExpr}, s.avg_time_sec) AS avg_time_sec,
@@ -1190,7 +1185,7 @@ async function listSessions(runId, { limit, offset, platform, subject, startDate
           1
         ) AS hard_accuracy_pct,
         ROUND(
-          AVG(CASE WHEN LOWER(COALESCE(q.difficulty, '')) = 'hard' THEN q.time_sec END),
+          AVG(CASE WHEN LOWER(COALESCE(q.difficulty, '')) = 'hard' THEN q.time_sec END)::numeric,
           0
         ) AS hard_avg_time_sec,
         SUM(CASE WHEN LOWER(COALESCE(q.difficulty, '')) = 'medium' THEN 1 ELSE 0 END) AS medium_total,
@@ -1217,7 +1212,7 @@ async function listSessions(runId, { limit, offset, platform, subject, startDate
           1
         ) AS medium_accuracy_pct,
         ROUND(
-          AVG(CASE WHEN LOWER(COALESCE(q.difficulty, '')) = 'medium' THEN q.time_sec END),
+          AVG(CASE WHEN LOWER(COALESCE(q.difficulty, '')) = 'medium' THEN q.time_sec END)::numeric,
           0
         ) AS medium_avg_time_sec,
         SUM(CASE WHEN LOWER(COALESCE(q.difficulty, '')) = 'easy' THEN 1 ELSE 0 END) AS easy_total,
@@ -1244,7 +1239,7 @@ async function listSessions(runId, { limit, offset, platform, subject, startDate
           1
         ) AS easy_accuracy_pct,
         ROUND(
-          AVG(CASE WHEN LOWER(COALESCE(q.difficulty, '')) = 'easy' THEN q.time_sec END),
+          AVG(CASE WHEN LOWER(COALESCE(q.difficulty, '')) = 'easy' THEN q.time_sec END)::numeric,
           0
         ) AS easy_avg_time_sec
       FROM sessions s
@@ -1280,11 +1275,11 @@ async function countSessions(runId, { platform, subject, startDate, endDate } = 
     params.push(String(subject).toUpperCase());
   }
   if (startDate) {
-    conditions.push('DATE(session_date) >= DATE(?)');
+    conditions.push('session_date >= ?::date');
     params.push(startDate);
   }
   if (endDate) {
-    conditions.push('DATE(session_date) <= DATE(?)');
+    conditions.push('session_date <= ?::date');
     params.push(endDate);
   }
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -1572,7 +1567,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
         -- equals the latest (session_date, id) pair -- matching the old (date,id)
         -- correlated comparison without the per-row table scan.
         SELECT TRIM(q2.q_code) AS code,
-               MAX(COALESCE(s2.session_date, '') || ' ' || printf('%07d', q2.id)) AS maxkey
+               MAX(COALESCE(s2.session_date::text, '') || ' ' || lpad(q2.id::text, 7, '0')) AS maxkey
         FROM question_attempts q2
         INNER JOIN sessions s2 ON s2.id = q2.session_id
         WHERE q2.correct = 1 AND TRIM(COALESCE(q2.q_code, '')) <> ''
@@ -1581,7 +1576,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
       corr_id AS (
         -- Same as corr_code but keyed on q_id, for rows that lack a q_code.
         SELECT TRIM(q2.q_id) AS qid,
-               MAX(COALESCE(s2.session_date, '') || ' ' || printf('%07d', q2.id)) AS maxkey
+               MAX(COALESCE(s2.session_date::text, '') || ' ' || lpad(q2.id::text, 7, '0')) AS maxkey
         FROM question_attempts q2
         INNER JOIN sessions s2 ON s2.id = q2.session_id
         WHERE q2.correct = 1 AND TRIM(COALESCE(q2.q_id, '')) <> ''
@@ -1621,11 +1616,11 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
         CASE
           WHEN COALESCE(NULLIF(TRIM(q.q_code), ''), '') <> ''
                AND cc.maxkey IS NOT NULL
-               AND cc.maxkey > (COALESCE(s.session_date, '') || ' ' || printf('%07d', q.id)) THEN 1
+               AND cc.maxkey > (COALESCE(s.session_date::text, '') || ' ' || lpad(q.id::text, 7, '0')) THEN 1
           WHEN COALESCE(NULLIF(TRIM(q.q_code), ''), '') = ''
                AND COALESCE(NULLIF(TRIM(q.q_id), ''), '') <> ''
                AND ci.maxkey IS NOT NULL
-               AND ci.maxkey > (COALESCE(s.session_date, '') || ' ' || printf('%07d', q.id)) THEN 1
+               AND ci.maxkey > (COALESCE(s.session_date::text, '') || ' ' || lpad(q.id::text, 7, '0')) THEN 1
           ELSE 0
         END AS corrected_later,
         q.mistake_type,
@@ -2160,7 +2155,7 @@ async function getPatterns(runId) {
         COUNT(*) AS total,
         SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) AS correct,
         SUM(CASE WHEN q.correct = 0 THEN 1 ELSE 0 END) AS wrong,
-        ROUND(AVG(q.time_sec), 0) AS avg_time_sec,
+        ROUND(AVG(q.time_sec)::numeric, 0) AS avg_time_sec,
         ROUND(
           100.0 * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
           1
@@ -2227,7 +2222,7 @@ async function getPatterns(runId) {
           100.0 * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
           1
         ) AS accuracy_pct,
-        ROUND(AVG(q.time_sec), 0) AS avg_time_sec
+        ROUND(AVG(q.time_sec)::numeric, 0) AS avg_time_sec
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
       WHERE ${runJoinClause}${answeredWhere}
@@ -2249,7 +2244,7 @@ async function getPatterns(runId) {
           100.0 * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
           1
         ) AS accuracy_pct,
-        ROUND(AVG(q.time_sec), 0) AS avg_time_sec,
+        ROUND(AVG(q.time_sec)::numeric, 0) AS avg_time_sec,
         SUM(CASE WHEN (${difficultyExpr}) = 'Hard' THEN 1 ELSE 0 END) AS hard_total,
         ROUND(
           CASE
@@ -2261,7 +2256,7 @@ async function getPatterns(runId) {
           END,
           1
         ) AS hard_accuracy_pct,
-        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Hard' THEN q.time_sec END), 0) AS hard_avg_time_sec,
+        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Hard' THEN q.time_sec END)::numeric, 0) AS hard_avg_time_sec,
         SUM(CASE WHEN (${difficultyExpr}) = 'Medium' THEN 1 ELSE 0 END) AS medium_total,
         ROUND(
           CASE
@@ -2273,7 +2268,7 @@ async function getPatterns(runId) {
           END,
           1
         ) AS medium_accuracy_pct,
-        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Medium' THEN q.time_sec END), 0) AS medium_avg_time_sec,
+        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Medium' THEN q.time_sec END)::numeric, 0) AS medium_avg_time_sec,
         SUM(CASE WHEN (${difficultyExpr}) = 'Easy' THEN 1 ELSE 0 END) AS easy_total,
         ROUND(
           CASE
@@ -2285,7 +2280,7 @@ async function getPatterns(runId) {
           END,
           1
         ) AS easy_accuracy_pct,
-        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Easy' THEN q.time_sec END), 0) AS easy_avg_time_sec
+        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Easy' THEN q.time_sec END)::numeric, 0) AS easy_avg_time_sec
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
       WHERE ${runJoinClause}${answeredWhere}
@@ -2308,7 +2303,7 @@ async function getPatterns(runId) {
           100.0 * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
           1
         ) AS accuracy_pct,
-        ROUND(AVG(q.time_sec), 0) AS avg_time_sec,
+        ROUND(AVG(q.time_sec)::numeric, 0) AS avg_time_sec,
         SUM(CASE WHEN (${difficultyExpr}) = 'Hard' THEN 1 ELSE 0 END) AS hard_total,
         ROUND(
           CASE
@@ -2320,7 +2315,7 @@ async function getPatterns(runId) {
           END,
           1
         ) AS hard_accuracy_pct,
-        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Hard' THEN q.time_sec END), 0) AS hard_avg_time_sec,
+        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Hard' THEN q.time_sec END)::numeric, 0) AS hard_avg_time_sec,
         SUM(CASE WHEN (${difficultyExpr}) = 'Medium' THEN 1 ELSE 0 END) AS medium_total,
         ROUND(
           CASE
@@ -2332,7 +2327,7 @@ async function getPatterns(runId) {
           END,
           1
         ) AS medium_accuracy_pct,
-        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Medium' THEN q.time_sec END), 0) AS medium_avg_time_sec,
+        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Medium' THEN q.time_sec END)::numeric, 0) AS medium_avg_time_sec,
         SUM(CASE WHEN (${difficultyExpr}) = 'Easy' THEN 1 ELSE 0 END) AS easy_total,
         ROUND(
           CASE
@@ -2344,7 +2339,7 @@ async function getPatterns(runId) {
           END,
           1
         ) AS easy_accuracy_pct,
-        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Easy' THEN q.time_sec END), 0) AS easy_avg_time_sec
+        ROUND(AVG(CASE WHEN (${difficultyExpr}) = 'Easy' THEN q.time_sec END)::numeric, 0) AS easy_avg_time_sec
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
       WHERE ${runJoinClause}${answeredWhere}
@@ -2374,9 +2369,9 @@ async function getSessionAnalysis(sessionId) {
   const answeredCountExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) THEN 1 ELSE 0 END)`;
   const answeredCorrectExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN 1 ELSE 0 END)`;
   const answeredWrongExpr = `SUM(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN 1 ELSE 0 END)`;
-  const answeredAvgTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) THEN q.time_sec END), 0)`;
-  const answeredAvgCorrectTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN q.time_sec END), 0)`;
-  const answeredAvgWrongTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN q.time_sec END), 0)`;
+  const answeredAvgTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) THEN q.time_sec END)::numeric, 0)`;
+  const answeredAvgCorrectTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN q.time_sec END)::numeric, 0)`;
+  const answeredAvgWrongTimeExpr = `ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN q.time_sec END)::numeric, 0)`;
 
   const session = await get(
     `
@@ -2403,7 +2398,7 @@ async function getSessionAnalysis(sessionId) {
         COALESCE(${answeredCorrectExpr}, 0) AS attempt_correct,
         COALESCE(${answeredWrongExpr}, 0) AS attempt_wrong,
         ROUND(
-          CASE
+          (CASE
             WHEN ${answeredCountExpr} > 0
               THEN
                 100.0
@@ -2415,7 +2410,7 @@ async function getSessionAnalysis(sessionId) {
                 * COALESCE(s.correct_count, 0)
                 / (COALESCE(s.correct_count, 0) + COALESCE(s.error_count, 0))
             ELSE s.accuracy_pct
-          END,
+          END)::numeric,
           1
         ) AS accuracy_pct,
         COALESCE(${answeredAvgTimeExpr}, s.avg_time_sec) AS avg_time_sec,
@@ -2490,9 +2485,9 @@ async function getSessionAnalysis(sessionId) {
           100.0 * SUM(CASE WHEN q.correct = 1 THEN 1 ELSE 0 END) / COUNT(*),
           1
         ) AS accuracy_pct,
-        ROUND(AVG(q.time_sec), 0) AS avg_time_sec,
-        ROUND(AVG(CASE WHEN q.correct = 1 THEN q.time_sec END), 0) AS avg_correct_time_sec,
-        ROUND(AVG(CASE WHEN q.correct = 0 THEN q.time_sec END), 0) AS avg_incorrect_time_sec
+        ROUND(AVG(q.time_sec)::numeric, 0) AS avg_time_sec,
+        ROUND(AVG(CASE WHEN q.correct = 1 THEN q.time_sec END)::numeric, 0) AS avg_correct_time_sec,
+        ROUND(AVG(CASE WHEN q.correct = 0 THEN q.time_sec END)::numeric, 0) AS avg_incorrect_time_sec
       FROM question_attempts q
       WHERE q.session_id = ? AND NOT (${unansweredExpr})
       GROUP BY ${difficultyBucketExpr('q')}
@@ -2987,15 +2982,15 @@ async function refreshSessionTimingAggregates(sessionDbId) {
       UPDATE sessions
       SET
         avg_time_sec = COALESCE((
-          SELECT ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) THEN q.time_sec END), 0)
+          SELECT ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) THEN q.time_sec END)::numeric, 0)
           FROM question_attempts q WHERE q.session_id = ?
         ), avg_time_sec),
         avg_correct_time_sec = COALESCE((
-          SELECT ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN q.time_sec END), 0)
+          SELECT ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 1 THEN q.time_sec END)::numeric, 0)
           FROM question_attempts q WHERE q.session_id = ?
         ), avg_correct_time_sec),
         avg_incorrect_time_sec = COALESCE((
-          SELECT ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN q.time_sec END), 0)
+          SELECT ROUND(AVG(CASE WHEN NOT (${unansweredExpr}) AND q.correct = 0 THEN q.time_sec END)::numeric, 0)
           FROM question_attempts q WHERE q.session_id = ?
         ), avg_incorrect_time_sec)
       WHERE id = ?
@@ -3273,7 +3268,7 @@ async function recomputeIrtCutoffs() {
     if (r.p33 == null || r.p67 == null) continue;
     await run(
       `INSERT INTO irt_cutoffs(subject_code, sub_key, p33, p67, n, updated_at)
-       VALUES (?, ?, ?, ?, ?, datetime('now'))
+       VALUES (?, ?, ?, ?, ?, now())
        ON CONFLICT(subject_code, sub_key) DO UPDATE SET
          p33 = excluded.p33,
          p67 = excluded.p67,
@@ -3456,7 +3451,7 @@ async function updateStudyPlanTask(id, patch) {
     }
   }
   if (!fields.length) return existing;
-  fields.push("updated_at = datetime('now')");
+  fields.push("updated_at = now()");
   params.push(id);
   await run(`UPDATE study_plan_tasks SET ${fields.join(', ')} WHERE id = ?`, params);
   return await getStudyPlanTask(id);
@@ -3504,7 +3499,7 @@ async function reorderStudyPlanTasks(updates) {
       await run(
         `UPDATE study_plan_tasks
             SET day_date = ?, week_number = ?, day_label = ?, day_theme = ?, position = ?,
-                updated_at = datetime('now')
+                updated_at = now()
           WHERE id = ?`,
         [u.day_date, u.week_number, u.day_label, u.day_theme, u.position, u.id],
       );
@@ -3527,8 +3522,8 @@ async function getStudyPlanMeta() {
 async function setStudyPlanMeta(key, value) {
   await run(
     `INSERT INTO study_plan_meta (key, value, updated_at)
-     VALUES (?, ?, datetime('now'))
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+     VALUES (?, ?, now())
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = now()`,
     [String(key), value == null ? null : String(value)]
   );
 }
@@ -3573,7 +3568,7 @@ async function rebucketWeeksMonSunOnce() {
     try {
       for (const [date, week] of wk) {
         await run(
-          "UPDATE study_plan_days SET week_number = ?, updated_at = datetime('now') WHERE date = ?",
+          "UPDATE study_plan_days SET week_number = ?, updated_at = now() WHERE date = ?",
           [week, date],
         );
         await run('UPDATE study_plan_tasks SET week_number = ? WHERE day_date = ?', [week, date]);
@@ -3685,7 +3680,7 @@ async function updateStudyPlanDay(date, patch) {
   try {
     const upd = await run(
       `UPDATE study_plan_days
-          SET date = ?, week_number = ?, day_label = ?, day_theme = ?, updated_at = datetime('now')
+          SET date = ?, week_number = ?, day_label = ?, day_theme = ?, updated_at = now()
         WHERE date = ?`,
       [next.date, next.week_number, next.day_label, next.day_theme, oldDate],
     );
@@ -3694,7 +3689,7 @@ async function updateStudyPlanDay(date, patch) {
     if (upd.changes === 0) throw new Error('Day was modified or deleted during the update.');
     await run(
       `UPDATE study_plan_tasks
-          SET day_date = ?, week_number = ?, day_label = ?, day_theme = ?, updated_at = datetime('now')
+          SET day_date = ?, week_number = ?, day_label = ?, day_theme = ?, updated_at = now()
         WHERE day_date = ?`,
       [next.date, next.week_number, next.day_label, next.day_theme, oldDate],
     );
@@ -3745,12 +3740,12 @@ async function reorderStudyPlanDays(updates) {
     for (const u of clean) {
       await run(
         `UPDATE study_plan_days
-            SET sort_order = ?, week_number = ?, updated_at = datetime('now')
+            SET sort_order = ?, week_number = ?, updated_at = now()
           WHERE date = ?`,
         [u.sort_order, u.week_number, u.date],
       );
       await run(
-        `UPDATE study_plan_tasks SET week_number = ?, updated_at = datetime('now') WHERE day_date = ?`,
+        `UPDATE study_plan_tasks SET week_number = ?, updated_at = now() WHERE day_date = ?`,
         [u.week_number, u.date],
       );
     }
@@ -3799,7 +3794,7 @@ async function restoreStudyPlanSnapshot(snapshot) {
            day_label   = excluded.day_label,
            day_theme   = excluded.day_theme,
            sort_order  = excluded.sort_order,
-           updated_at  = datetime('now')`,
+           updated_at  = now()`,
         [d.date, Number(d.week_number) || 1, d.day_label ?? null, d.day_theme ?? null, Number(d.sort_order) || 0],
       );
     }
@@ -3831,7 +3826,7 @@ async function restoreStudyPlanSnapshot(snapshot) {
            status       = excluded.status,
            completed_at = excluded.completed_at,
            notes        = excluded.notes,
-           updated_at   = datetime('now')`,
+           updated_at   = now()`,
         [Number(t.id), t.day_date, Number(t.week_number) || 1, t.day_label ?? null,
           t.day_theme ?? null, Number(t.position) || 0, String(t.title || ''),
           t.description ?? null, t.est_minutes == null ? null : Number(t.est_minutes),
@@ -3844,8 +3839,8 @@ async function restoreStudyPlanSnapshot(snapshot) {
       for (const k of Object.keys(meta)) {
         await run(
           `INSERT INTO study_plan_meta (key, value, updated_at)
-           VALUES (?, ?, datetime('now'))
-           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+           VALUES (?, ?, now())
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = now()`,
           [String(k), meta[k] == null ? null : String(meta[k])],
         );
       }
@@ -3949,7 +3944,7 @@ async function updateMockResult(id, patch) {
             di_score = ?, di_percentile = ?,
             verbal_score = ?, verbal_percentile = ?,
             notes = ?,
-            updated_at = datetime('now')
+            updated_at = now()
       WHERE id = ?`,
     [v.mock_date, v.source_label, v.total_score, v.total_percentile,
      v.quant_score, v.quant_percentile, v.di_score, v.di_percentile,
@@ -4065,7 +4060,7 @@ async function syncStudyPlanFromSeed() {
           await run(
             `UPDATE study_plan_tasks
                SET day_theme = ?, day_label = ?, week_number = ?,
-                   updated_at = datetime('now')
+                   updated_at = now()
              WHERE id = ?`,
             [day.theme, day.label, day.week, ex.id]
           );
@@ -4076,7 +4071,7 @@ async function syncStudyPlanFromSeed() {
             `UPDATE study_plan_tasks
                SET day_theme = ?, day_label = ?, week_number = ?,
                    title = ?, description = ?, est_minutes = ?,
-                   updated_at = datetime('now')
+                   updated_at = now()
              WHERE id = ?`,
             [day.theme, day.label, day.week, task.title,
              task.description || null, task.minutes || null, ex.id]
