@@ -12,7 +12,7 @@ Local analytics app for GMAT Official Practice sessions.
 
 ![Session Analysis](image%20copy.png)
 
-It connects to an already logged-in GMAT tab via Chrome CDP, runs the in-page scraper, stores results in SQLite, and provides:
+It connects to an already logged-in GMAT tab via Chrome CDP, runs the in-page scraper, stores results in a local PostgreSQL database, and provides:
 
 - Session-level performance tracking
 - Error log with annotation and sorting
@@ -26,7 +26,7 @@ It connects to an already logged-in GMAT tab via Chrome CDP, runs the in-page sc
 - Backend: Node.js + Express (`src/server.js`)
 - Scraper runtime: Playwright CDP bridge (`src/scraper-runner.js`)
 - In-browser scraper: `src/scrapers/gmat_scraper.js`
-- Database: SQLite (`data/gmat-error-log.db`)
+- Database: PostgreSQL 16 (local Docker, `pgvector/pgvector:pg16`); accessed via `pg` with raw SQL in `src/db.js`
 - Frontend: React + Vite (`client/`)
 
 ## Repository Layout
@@ -37,17 +37,24 @@ client/
   src/styles.css              Global styles
 src/
   server.js                   API routes + source presets + scrape windows
-  db.js                       SQLite schema + analytics queries
+  db.js                       pg.Pool wrapper + analytics queries (raw SQL)
+  sql-util.js                 ?→$n placeholder rewrite + query helpers
   scraper-runner.js           CDP connection + scraper injection
   scrapers/gmat_scraper.js    GMAT in-page scraping logic
+migrations/
+  0001_init.sql               Postgres schema (applied by scripts/migrate.js)
+scripts/
+  migrate.js                  Apply pending SQL migrations
+  migrate-sqlite-to-pg.js     One-time SQLite → Postgres data import (ETL)
 data/
-  gmat-error-log.db           Local SQLite database
+  gmat-error-log.db           Legacy SQLite database (retained as rollback)
   chrome-cdp-profile/         Chrome profile used for CDP launch
 ```
 
 ## Requirements
 
 - Node.js 20+ (LangChain/OpenAI package requirement)
+- Docker (runs the local PostgreSQL database)
 - macOS if you want auto-launch via `Open Chrome (CDP)` button
 - Google Chrome installed and able to log in to GMAT Official Practice
 
@@ -56,6 +63,32 @@ data/
 ```bash
 npm install
 ```
+
+## Database (PostgreSQL)
+
+The app stores everything in a local PostgreSQL 16 instance run via Docker (image `pgvector/pgvector:pg16`, container `gmat-pg`). Docker must be running first.
+
+1. **Start the database** (brings the container up and waits until it's ready):
+
+   ```bash
+   npm run db:up
+   ```
+
+2. **Apply the schema** (runs the numbered migrations in `migrations/`):
+
+   ```bash
+   npm run db:migrate
+   ```
+
+3. **(First-time / migrating existing data)** import the existing rows from the old SQLite DB:
+
+   ```bash
+   npm run db:etl
+   ```
+
+4. **Point the app at the database.** Set `DATABASE_URL` in `.env` to the local Docker instance (see `.env.example`). To use a hosted Postgres later, change only this one line.
+
+Other DB scripts: `npm run db:verify` (check schema + data parity), `npm run db:reset` (drop the volume and re-migrate — destroys data), `npm run db:down` (stop the container).
 
 ## Run
 
@@ -155,7 +188,7 @@ Each preset includes:
 
 ## Database Model
 
-Defined and migrated in `src/db.js`.
+Schema is defined in the numbered migrations under `migrations/` (applied by `scripts/migrate.js`); analytics queries live in `src/db.js`.
 
 - `scrape_runs`
   - one row per scrape execution
@@ -195,6 +228,7 @@ Upsert behavior:
 
 ## Environment Variables
 
+- `DATABASE_URL` (required; Postgres connection string, e.g. `postgres://postgres:gmat@localhost:5432/gmat` for the local Docker instance — see `.env.example`)
 - `PORT` (default `4310`)
 - `HOST` (default `127.0.0.1`)
 - `CHROME_CDP_URL` (default `http://localhost:9222`)
@@ -247,4 +281,4 @@ open -na "Google Chrome" --args --remote-debugging-port=9222
 ## Notes
 
 - `public/` files are legacy static assets; active UI is the Vite React app in `client/`.
-- No automated test suite is configured in current scripts.
+- `node:test` unit tests for the SQL helpers run via `npm test` (`test/unit/`); most coverage is still manual.

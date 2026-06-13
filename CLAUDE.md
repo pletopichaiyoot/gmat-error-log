@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Local GMAT analytics app: scrapes GMAT Official Practice, GMAT Club, and Target Test Prep sessions via Chrome CDP, stores in SQLite, provides dashboards + LLM-powered coaching. Single user, macOS-focused.
+Local GMAT analytics app: scrapes GMAT Official Practice, GMAT Club, and Target Test Prep sessions via Chrome CDP, stores in PostgreSQL (local Docker), provides dashboards + LLM-powered coaching. Single user, macOS-focused.
 
 ## Design Context
 
@@ -36,8 +36,14 @@ For design work run `/impeccable <command>` (e.g. `critique`, `audit`, `polish`,
 | Production start | `npm run build:web && npm start` |
 | Lint (report) | `npm run lint` |
 | Lint (auto-fix) | `npm run lint:fix` |
+| Start Postgres | `npm run db:up` |
+| Apply migrations | `npm run db:migrate` |
+| One-time data import | `npm run db:etl` |
+| Verify schema+data | `npm run db:verify` |
+| Reset DB (drops data) | `npm run db:reset` |
+| Run unit tests | `npm test` |
 
-No test suite is configured.
+There are now `node:test` unit tests for the SQL helpers (`npm test`), but most coverage is still manual — there is no broad automated suite.
 
 ### Linter
 
@@ -59,7 +65,7 @@ Gotchas worth knowing before changing the config:
 
 ### Backend (`src/`)
 - **`server.js`** — Express API on port 4310. Defines source presets (8 total: 7 GMAT Official Practice books on `platform: 'starttest'`, plus 1 GMAT Club error log on `platform: 'gmatclub'`), date window logic (Thai timezone, Asia/Bangkok), and all REST endpoints. The `/api/sessions/:sessionId/enrich` endpoint dispatches by `preset.platform` to either `runStartTestPhase2FromOpenBrowser` or `runGmatClubPhase2FromOpenBrowser`. List endpoints (`/api/sessions`, `/api/errors`) accept a `platform` query param (`gmatclub` | `starttest`) for source filtering.
-- **`db.js`** — Raw SQLite3 queries (no ORM). Three core tables: `scrape_runs`, `sessions`, `question_attempts`. Schema migrations via `ALTER TABLE ADD COLUMN` with existence checks. Upsert: sessions matched by `(session_external_id, source)`, question attempts deleted+reinserted per session, but user annotations (`mistake_type`, `notes`) are preserved across re-scrapes. Exposes `enrichSessionAttempts` (StartTest Phase 2 writer), `enrichGmatClubSessionAttempts` (GMAT Club Phase 2 writer, matches on `q_id`), and `listGmatClubEnrichTargets` (returns the per-question URL list for one session). Both list functions (`listSessions`, `listErrors`) and their counts accept a `platform` filter that becomes a `source LIKE '%gmat club%'` SQL clause.
+- **`db.js`** — Raw SQL over a `pg.Pool` (no ORM). Schema is **not** created imperatively; it lives in `migrations/*.sql` (e.g. `migrations/0001_init.sql`) applied by `scripts/migrate.js` and tracked in a `schema_migrations` table. `initDb()` now just runs migrations + idempotent seed backfills. The `run`/`all`/`get` wrappers call `pool.query`; the `toPg` helper in `src/sql-util.js` auto-rewrites SQLite-style `?` placeholders to Postgres `$1,$2,…`; multi-statement writers run inside `withTransaction(fn)` (one pooled client); inserts use `RETURNING id`. Global pg type parsers coerce int8/numeric back to JS numbers. Three core tables: `scrape_runs`, `sessions`, `question_attempts`. Upsert: sessions matched by `(session_external_id, source)`, question attempts deleted+reinserted per session, but user annotations (`mistake_type`, `notes`) are preserved across re-scrapes. Exposes `enrichSessionAttempts` (StartTest Phase 2 writer), `enrichGmatClubSessionAttempts` (GMAT Club Phase 2 writer, matches on `q_id`), and `listGmatClubEnrichTargets` (returns the per-question URL list for one session). Both list functions (`listSessions`, `listErrors`) and their counts accept a `platform` filter that becomes a `source LIKE '%gmat club%'` SQL clause.
 - **`scraper-runner.js`** — Playwright CDP bridge. Connects to user's Chrome on port 9222. Exposes `runScrapeFromOpenBrowser` (legacy injected-script flow, used by gmatclub Phase 1), `runStartTestScrapeFromOpenBrowser` (StartTest Phase 1), `runStartTestPhase2FromOpenBrowser` (StartTest Phase 2), `runGmatClubPhase2FromOpenBrowser` (GMAT Club Phase 2 — visits each topic URL with human-like jitter, re-injects the scraper after each navigation, aborts on too-many errors), `openStartTestProductInOpenBrowser` (just navigates to a book without scraping).
 - **`scrapers/starttest_scraper.js`** — **Active scraper for the 7 GMAT Official Practice sources**. Node-side module (not page-injected); navigates via Playwright and parses classic HTML. Two-phase design: Phase 1 lists sessions + question metadata via `GetQuestionHistoryPage` (one URL per session — fast, low scrape footprint, default for `/api/scrape`); Phase 2 walks each item's `ITDReview` frame to extract stems/choices/answers/correct keys (per-session opt-in via `/api/sessions/:sessionId/enrich` to avoid bot-pattern bans).
 - **`scrapers/gmat_club_scraper.js`** — Page-injected scraper for the GMAT Club Error Log analytics table. Verified column map (cells 0-8: checkbox, Question, Result svg, Attempts, Category, Difficulty band, Time, Date, Mistakes/Notes). Uses `data-row="phpbb_topics_timer_history-{N}"` from the Mistakes-cell button as the stable per-attempt id (`q_id = "gc-att-{N}"`) and `data-analytics-question-id` as the per-question id (`q_code = "gc-q-{N}"`). Pagination is scoped to the `<div class="px-6">` ancestor that contains "Showing N-N of M" so it doesn't collide with row-level Attempts buttons. Bumps page size to 100 via the entries-per-page `<select>`. Sessions are synthesized one-per-day (`session_id = hash("${source}|${dateKey}")`).
@@ -118,8 +124,9 @@ The GMAT Club source mirrors StartTest's two-phase split:
 
 ## Key Patterns
 
-- **Date handling**: All scrape timestamps use Thai timezone (Asia/Bangkok, UTC+7). The `since` parameter format is `YYYYMMDDHHmmss`. "Today" window applies a 36-hour safety buffer (`SCRAPE_TODAY_BUFFER_HOURS`). The GMAT Club scraper compares `since` at day granularity (the analytics table only renders dates as `D MMM YYYY`).
-- **DB upserts**: Sessions are matched by `(session_external_id, source)`. Question attempts are fully replaced (delete + reinsert) per Phase 1 scrape, but user annotations (`mistake_type`, `notes`) are preserved. Phase 2 enrichment is an `UPDATE` against existing rows (matched by `q_id` / item name) so it never wipes annotations either.
+- **Database (PostgreSQL)**: Local PostgreSQL 16 in Docker (`pgvector/pgvector:pg16`, container `gmat-pg`, `docker-compose.yml`). Connection is env-driven via `DATABASE_URL`; bring the DB up with `npm run db:up` before starting the app. Schema lives in numbered SQL migrations (`migrations/*.sql`) applied by `npm run db:migrate` and tracked in `schema_migrations`. The original SQLite data was copied over once via the `scripts/migrate-sqlite-to-pg.js` ETL (`npm run db:etl`); the old `data/gmat-error-log.db` is retained as the rollback. Types modernized: timestamps are `timestamptz`, `session_external_id` is `bigint`, `session_date` is `date`; booleans kept as integer; JSON kept as text (jsonb deferred). Deferred follow-ups (not yet done): jsonb conversion, pgvector for coach embeddings, full-text search.
+- **Date handling**: All scrape timestamps use Thai timezone (Asia/Bangkok, UTC+7) and are stored as `timestamptz`. The `since` parameter format is `YYYYMMDDHHmmss`. "Today" window applies a 36-hour safety buffer (`SCRAPE_TODAY_BUFFER_HOURS`). The GMAT Club scraper compares `since` at day granularity (the analytics table only renders dates as `D MMM YYYY`).
+- **DB upserts**: Sessions are matched by `(session_external_id, source)` — written via `INSERT … ON CONFLICT … DO UPDATE` (no more SQLite `INSERT OR REPLACE`). Question attempts are fully replaced (delete + reinsert) per Phase 1 scrape inside a single `withTransaction`, but user annotations (`mistake_type`, `notes`) are preserved. Phase 2 enrichment is an `UPDATE` against existing rows (matched by `q_id` / item name) so it never wipes annotations either.
 - **Answer-choice storage shape**: `question_attempts.answer_choices` is a flat JSON array. StartTest single-choice/DI rows include `{label, text, value, color, isCorrect, isUserSelected}` per option; matrix/dropdown items carry a nested `options[]` (with the same flags) inside each row/blank entry. GMAT Club Phase 2 writes the simpler `{label, text}` shape (per-choice flags don't exist on the GMAT Club page; the picked/correct letters are stored on the row's `my_answer`/`correct_answer` columns).
 - **Review-modal color coding**: The question-review JSX evaluates per-choice flags independently — `anyMine = choices.some(c => c.isUserSelected === true)` and `anyCorrectFlagged = choices.some(c => c.isCorrect === true)`. Each flag falls back to a label comparison against row-level `my_answer`/`correct_answer` when no option is `true`. This handles StartTest rows that capture user-pick but not correct-answer per-option, plus GMAT Club rows that have no per-choice flags at all.
 - **Scraper safety**: Never call `browser.close()` in the StartTest or GMAT Club paths — the browser is the user's logged-in Chrome, and closing it kills their session. Cleanup is best-effort (console/pageerror listeners removed in `finally`). StartTest Phase 2 navigates with `processAction('Next')` rather than `seq=N+1` URLs because rotating `code` tokens are single-use; GMAT Club Phase 2 navigates by URL with jitter.
@@ -128,13 +135,13 @@ The GMAT Club source mirrors StartTest's two-phase split:
 - **Source-platform identification**: The frontend's `getSourcePlatform(label)` heuristic is `if (/gmat\s*club/i.test(label)) return 'gmatclub'; if (/target\s*test\s*prep/i.test(label)) return 'ttp'; else return 'starttest'`. Backend SQL uses the same shape via `platformWhereClause`: `'%gmat club%'` for gmatclub, `'%target test prep%'` for ttp, NOT LIKE either for starttest. This label-substring check is the only string the badge component, the platform query param, and the SQL filter all rely on.
 - **TTP mistake_type is authoritative**: The TTP scraper writes a non-empty `mistake_type` on every question, which the DB upsert prefers over the preserved value. This is the only source where the scraper overwrites user annotations — all other sources fall through to preserve whatever the user wrote in the dashboard. The reason: TTP itself prompts the user to tag each error from a fixed taxonomy, so re-scraping pulls the most-recent taxonomy answer.
 - **LLM provider switching**: Controlled by `LLM_PROVIDER` env var (`openai` | `zai`). Coach and classifier share provider/key/base but can use different models. Classifier is skipped entirely for `topic_source !== 'llm'` rows AND for `topic_source==='llm'` rows whose topic is already in `ALL_TOPIC_LABELS` (idempotency on re-scrapes).
-- **No tests**: The project has no automated test suite.
+- **Tests**: `node:test` unit tests for the SQL helpers live under `test/unit/` (`npm test`). There is no broad automated suite — most coverage is still manual.
 
 ## Querying the error log & analyzing performance
 
 For schema, conventions (unanswered-row filter, subject normalization, topic canonicalization), ad-hoc SQL recipes, and REST API parameter reference, see [ANALYSIS.md](ANALYSIS.md). Reach for it whenever the user asks "what did I get wrong", "where am I weakest", "show me my accuracy on X", or anything that involves running a query against `data/gmat-error-log.db` or hitting `/api/sessions`, `/api/errors`, `/api/patterns`, or `/api/sessions/:id/analysis`.
 
-When the user wants to **review or be coached on his practice** ("review today's/this week's practice", "how did I do", "where am I weak", "dissect my misses", "review my timing", "re-summarize my performance", "what should I drill"), read **COACHING.md** first (a local, untracked file — personal playbook, deliberately not published in this public repo; skip gracefully if absent). It's the playbook: the diagnostic checklist (DS sufficiency C/E-trap, TPA placement slips, timing-allocation reads, end-of-set collapse), the **MSR-skip rule** (exclude MSR from weakness reads — it's strategic, not a skill gap), the Phase-2 enrichment workflow for sessions that lack answer detail, and the "Patient Coach" voice. ANALYSIS.md is the reference; COACHING.md is how to use it for him.
+When the user wants to **review or be coached on his practice** ("review today's/this week's practice", "how did I do", "where am I weak", "dissect my misses", "review my timing", "re-summarize my performance", "what should I drill"), read **COACHING.md** first — the personal coaching playbook (diagnostic checklist, current DI triage rule, Phase-2 enrichment workflow, "Patient Coach" voice). It lives in the **MBA2027-GMAT** study folder (`/Users/pletopichaiyoot/Desktop/mba2027/MBA2027-GMAT/COACHING.md`), **not in this public repo** — per the study-materials save convention; skip gracefully if that folder isn't mounted. ANALYSIS.md (here) is the reference; COACHING.md is how to use it for him.
 
 ## REST endpoints (selected)
 
@@ -150,7 +157,7 @@ When the user wants to **review or be coached on his practice** ("review today's
 
 ## Environment
 
-Requires Node.js 20+. Copy `.env.example` to `.env` and set `OPENAI_API_KEY`. See `README.md` for full env var reference.
+Requires Node.js 20+ and Docker (for PostgreSQL). Copy `.env.example` to `.env` and set `DATABASE_URL` (points at the local Docker Postgres) and `OPENAI_API_KEY`. Bring the DB up with `npm run db:up` and apply migrations (`npm run db:migrate`) before starting the app. See `README.md` for full env var reference.
 
 ## Skills
 
