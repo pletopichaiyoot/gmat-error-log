@@ -11,7 +11,14 @@
     "build:web": "vite build --config client/vite.config.js",
     "preview:web": "vite preview --config client/vite.config.js",
     "lint": "eslint .",
-    "lint:fix": "eslint . --fix"
+    "lint:fix": "eslint . --fix",
+    "db:up": "docker compose up -d && until docker exec gmat-pg pg_isready -U postgres -d gmat; do sleep 1; done",
+    "db:down": "docker compose down",
+    "db:reset": "docker compose down -v && npm run db:up && npm run db:migrate",
+    "db:migrate": "node scripts/migrate.js",
+    "db:etl": "node scripts/migrate-sqlite-to-pg.js",
+    "db:verify": "node scripts/verify-schema-parity.js && node scripts/verify-migration.js",
+    "test": "node --test test/unit/"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -26,6 +33,7 @@
     "dotenv": "^17.3.1",
     "express": "^4.21.2",
     "lucide-react": "^0.577.0",
+    "pg": "^8.21.0",
     "playwright": "^1.53.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
