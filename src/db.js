@@ -1,7 +1,15 @@
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
 const { toPg } = require('./sql-util');
 const { runMigrations } = require('../scripts/migrate');
 const { deriveQuestionMetadata, enrichQuestionMetadata } = require('./question-metadata');
+
+// node-postgres returns int8/bigint (COUNT, SUM(int), session_external_id) and
+// numeric (ROUND results, computed percentages) as STRINGS to preserve precision.
+// SQLite returned JS numbers, and the frontend + analytics are built around numbers,
+// so parse them back. Safe here: counts/ids are < 2^53 and numerics are low-precision
+// percentages/averages (no money / high-precision values in this schema).
+types.setTypeParser(20, (v) => (v === null ? null : parseInt(v, 10)));   // int8 / bigint
+types.setTypeParser(1700, (v) => (v === null ? null : parseFloat(v)));   // numeric
 
 // server.js imports dbPath purely to log the DB target on startup. Keep the export.
 const dbPath = process.env.DATABASE_URL || '(DATABASE_URL not set)';
