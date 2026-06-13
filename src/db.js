@@ -752,7 +752,13 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
   const totalQuestions = sessions.reduce((sum, session) => sum + (session.stats?.total_q_api || 0), 0);
   const totalErrors = sessions.reduce((sum, session) => sum + (session.stats?.errors || 0), 0);
 
-  const runInsert = await all(
+  // Wrap the whole write sequence (scrape_runs INSERT → per-session UPDATE/INSERT
+  // → DELETE question_attempts → re-INSERT attempts) in ONE transaction so the
+  // per-session delete+reinsert is atomic: a concurrent reader can never observe
+  // a session whose attempts have been deleted but not yet reinserted.
+  const touchedSessionIds = [];
+  const runId = await withTransaction(async (tx) => {
+  const runInsert = await tx.all(
     `
       INSERT INTO scrape_runs (
         extracted_at,
@@ -776,7 +782,6 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
   );
 
   const runId = runInsert[0].id;
-  const touchedSessionIds = [];
 
   for (const session of sessions) {
     const stats = session.stats || {};
@@ -784,7 +789,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     let preservedAnnotationIndex = null;
     let preservedSnapshotIndex = null;
 
-    const existing = await get(
+    const existing = await tx.get(
       `
         SELECT id
         FROM sessions
@@ -797,7 +802,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     );
 
     if (existing?.id) {
-      const existingAttempts = await all(
+      const existingAttempts = await tx.all(
         `
           SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta, taxonomy_path
           FROM question_attempts
@@ -808,7 +813,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
       preservedAnnotationIndex = buildAnnotationIndex(existingAttempts);
       preservedSnapshotIndex = buildAttemptSnapshotIndex(existingAttempts);
 
-      await run(
+      await tx.run(
         `
           UPDATE sessions
           SET
@@ -859,9 +864,9 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
         ]
       );
       sessionId = existing.id;
-      await run('DELETE FROM question_attempts WHERE session_id = ?', [sessionId]);
+      await tx.run('DELETE FROM question_attempts WHERE session_id = ?', [sessionId]);
     } else {
-      const sessionInsert = await all(
+      const sessionInsert = await tx.all(
         `
           INSERT INTO sessions (
             run_id,
@@ -1009,13 +1014,19 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
       ];
       assertValueCount('question_attempts insert', QUESTION_ATTEMPT_INSERT_COLUMNS, attemptValues);
 
-      await run(
+      await tx.run(
         buildInsertStatement('question_attempts', QUESTION_ATTEMPT_INSERT_COLUMNS),
         attemptValues
       );
     }
   }
+    return runId;
+  });
 
+  // Post-commit: the sparse-attempt backfill is a separate, idempotent
+  // cross-session donor pass (shared with initDb and other callers), not part of
+  // the per-session delete+reinsert that must stay atomic — so it runs after the
+  // transaction commits. The final fetch is likewise a post-commit read.
   await backfillSparseQuestionAttempts({ sessionIds: touchedSessionIds });
 
   return get('SELECT * FROM scrape_runs WHERE id = ?', [runId]);
@@ -2656,6 +2667,9 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
   let skipped = 0;
   const errors = [];
 
+  // One transaction for the whole per-session enrichment: all targetRow lookups,
+  // per-item UPDATEs, and the timing-aggregate refresh commit together.
+  await withTransaction(async (tx) => {
   for (const item of (Array.isArray(enrichedItems) ? enrichedItems : [])) {
     const seq = Number.isInteger(item?.seq) ? item.seq : null;
     if (seq === null) {
@@ -2671,7 +2685,7 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
         : null;
 
     // Match on EITHER the Phase 1 composite OR a previously-enriched ItemName.
-    const targetRow = await get(
+    const targetRow = await tx.get(
       `
         SELECT id, mistake_type, notes, correct, q_id
         FROM question_attempts
@@ -2929,7 +2943,7 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
       // answer_choices, passage_text, mistake_type, notes — silently.
       // The Phase 2 lookup above already accepts either composite OR
       // itemName, so leaving q_id alone is sufficient.
-      await run(
+      await tx.run(
         `
           UPDATE question_attempts
           SET q_code = COALESCE(?, q_code),
@@ -2962,7 +2976,8 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
     }
   }
 
-  await refreshSessionTimingAggregates(sessionDbId);
+  await refreshSessionTimingAggregates(sessionDbId, tx.run);
+  });
 
   return { sessionDbId, matched: enrichedItems.length, updated, skipped, errors };
 }
@@ -2973,11 +2988,14 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
 // over stored, so the discrepancy is invisible in the UI for sessions that
 // have any answered question; but other consumers (and the dashboard's
 // pre-aggregated cards) read s.avg_time_sec directly. Keep them in sync.
-async function refreshSessionTimingAggregates(sessionDbId) {
+// Accepts an optional executor (the `tx` handle from withTransaction) so the
+// enrichers can fold this aggregate refresh into their per-session transaction;
+// defaults to the module-level `run` for any standalone caller.
+async function refreshSessionTimingAggregates(sessionDbId, exec = run) {
   const id = Number(sessionDbId);
   if (!Number.isInteger(id) || id <= 0) return;
   const unansweredExpr = unansweredPlaceholderExpr('q');
-  await run(
+  await exec(
     `
       UPDATE sessions
       SET
@@ -3023,6 +3041,8 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
   let skipped = 0;
   const errors = [];
 
+  // One transaction for the whole per-session enrichment.
+  await withTransaction(async (tx) => {
   for (const item of (Array.isArray(enrichedItems) ? enrichedItems : [])) {
     const qId = String(item?.q_id || '').trim();
     if (!qId) {
@@ -3030,7 +3050,7 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
       continue;
     }
 
-    const targetRow = await get(
+    const targetRow = await tx.get(
       `
         SELECT id, question_stem, answer_choices, correct_answer
         FROM question_attempts
@@ -3054,7 +3074,7 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
       .filter((c) => c.label || c.text);
 
     try {
-      await run(
+      await tx.run(
         `
           UPDATE question_attempts
           SET question_stem = COALESCE(NULLIF(?, ''), question_stem),
@@ -3082,7 +3102,8 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
     }
   }
 
-  await refreshSessionTimingAggregates(sessionDbId);
+  await refreshSessionTimingAggregates(sessionDbId, tx.run);
+  });
 
   return { sessionDbId, matched: enrichedItems.length, updated, skipped, errors };
 }
@@ -3111,6 +3132,10 @@ async function enrichOpeSessionAttempts({ sessionExternalId, source, enrichedIte
   let skipped = 0;
   const errors = [];
 
+  // One transaction for the whole per-session enrichment. recomputeIrtCutoffs()
+  // is a global, idempotent rebucket pass over all theta rows — it runs AFTER
+  // commit, not inside this session's transaction.
+  await withTransaction(async (tx) => {
   for (const item of (Array.isArray(enrichedItems) ? enrichedItems : [])) {
     const itemName = String(item?.itemName || '').trim();
     const position = Number(item?.positionInSection);
@@ -3119,7 +3144,7 @@ async function enrichOpeSessionAttempts({ sessionExternalId, source, enrichedIte
       continue;
     }
     const qId = `ope-${itemName}-p${position}`;
-    const targetRow = await get(
+    const targetRow = await tx.get(
       `SELECT id FROM question_attempts WHERE session_id = ? AND q_id = ? LIMIT 1`,
       [sessionDbId, qId]
     );
@@ -3166,7 +3191,7 @@ async function enrichOpeSessionAttempts({ sessionExternalId, source, enrichedIte
       : thetaNum < -0.43 ? 'Easy' : thetaNum > 0.43 ? 'Hard' : 'Medium';
 
     try {
-      await run(
+      await tx.run(
         `
           UPDATE question_attempts
           SET question_stem = COALESCE(NULLIF(?, ''), question_stem),
@@ -3196,7 +3221,11 @@ async function enrichOpeSessionAttempts({ sessionExternalId, source, enrichedIte
     }
   }
 
-  await refreshSessionTimingAggregates(sessionDbId);
+  await refreshSessionTimingAggregates(sessionDbId, tx.run);
+  });
+
+  // Post-commit: recomputeIrtCutoffs rebuckets every theta-bearing row across
+  // the whole DB, so it runs after this session's enrichment has committed.
   await recomputeIrtCutoffs();
 
   return { sessionDbId, matched: enrichedItems.length, updated, skipped, errors };
@@ -3493,10 +3522,9 @@ async function reorderStudyPlanTasks(updates) {
     };
   });
 
-  await run('BEGIN');
-  try {
+  await withTransaction(async (tx) => {
     for (const u of clean) {
-      await run(
+      await tx.run(
         `UPDATE study_plan_tasks
             SET day_date = ?, week_number = ?, day_label = ?, day_theme = ?, position = ?,
                 updated_at = now()
@@ -3504,11 +3532,7 @@ async function reorderStudyPlanTasks(updates) {
         [u.day_date, u.week_number, u.day_label, u.day_theme, u.position, u.id],
       );
     }
-    await run('COMMIT');
-  } catch (err) {
-    try { await run('ROLLBACK'); } catch { /* ignore: surface the original error */ }
-    throw err;
-  }
+  });
   return await listStudyPlanTasks();
 }
 
@@ -3564,20 +3588,15 @@ async function rebucketWeeksMonSunOnce() {
   const dayRows = await all('SELECT date FROM study_plan_days');
   if (dayRows.length) {
     const wk = mondayWeekNumbers(dayRows.map((r) => r.date));
-    await run('BEGIN');
-    try {
+    await withTransaction(async (tx) => {
       for (const [date, week] of wk) {
-        await run(
+        await tx.run(
           "UPDATE study_plan_days SET week_number = ?, updated_at = now() WHERE date = ?",
           [week, date],
         );
-        await run('UPDATE study_plan_tasks SET week_number = ? WHERE day_date = ?', [week, date]);
+        await tx.run('UPDATE study_plan_tasks SET week_number = ? WHERE day_date = ?', [week, date]);
       }
-      await run('COMMIT');
-    } catch (err) {
-      try { await run('ROLLBACK'); } catch { /* surface the original error */ }
-      throw err;
-    }
+    });
   }
   await setStudyPlanMeta('week_scheme', 'mon-sun');
 }
@@ -3591,7 +3610,13 @@ async function backfillStudyPlanDays() {
   const byDate = new Map();
   for (const d of buildStudyPlanDaySkeleton()) byDate.set(d.date, { ...d });
   const taskDays = await all(
-    `SELECT day_date AS date, MIN(week_number) AS week_number, day_label, day_theme
+    // Postgres requires non-aggregated SELECT columns to appear in GROUP BY;
+    // SQLite tolerated the bare day_label/day_theme. Each date carries one
+    // consistent label/theme (the dashboard keeps them denormalized in lockstep),
+    // so MIN() is a deterministic one-row-per-date pick equivalent to the old
+    // bare-column behavior.
+    `SELECT day_date AS date, MIN(week_number) AS week_number,
+            MIN(day_label) AS day_label, MIN(day_theme) AS day_theme
        FROM study_plan_tasks GROUP BY day_date`
   );
   for (const t of taskDays) {
@@ -3676,9 +3701,8 @@ async function updateStudyPlanDay(date, patch) {
   if (Object.prototype.hasOwnProperty.call(patch, 'day_theme')) {
     next.day_theme = patch.day_theme == null ? null : String(patch.day_theme);
   }
-  await run('BEGIN');
-  try {
-    const upd = await run(
+  await withTransaction(async (tx) => {
+    const upd = await tx.run(
       `UPDATE study_plan_days
           SET date = ?, week_number = ?, day_label = ?, day_theme = ?, updated_at = now()
         WHERE date = ?`,
@@ -3687,17 +3711,13 @@ async function updateStudyPlanDay(date, patch) {
     // Guard the read-then-write window: if the day vanished after the existence
     // check (concurrent delete), surface it rather than silently no-op.
     if (upd.changes === 0) throw new Error('Day was modified or deleted during the update.');
-    await run(
+    await tx.run(
       `UPDATE study_plan_tasks
           SET day_date = ?, week_number = ?, day_label = ?, day_theme = ?, updated_at = now()
         WHERE day_date = ?`,
       [next.date, next.week_number, next.day_label, next.day_theme, oldDate],
     );
-    await run('COMMIT');
-  } catch (err) {
-    try { await run('ROLLBACK'); } catch { /* surface the original error */ }
-    throw err;
-  }
+  });
   return await get(
     'SELECT date, week_number, day_label, day_theme, sort_order FROM study_plan_days WHERE date = ?',
     [next.date],
@@ -3708,16 +3728,11 @@ async function updateStudyPlanDay(date, patch) {
 // (the client snapshots before calling this).
 async function deleteStudyPlanDay(date) {
   const d = validateStudyPlanDate(date);
-  await run('BEGIN');
-  try {
-    await run('DELETE FROM study_plan_tasks WHERE day_date = ?', [d]);
-    const res = await run('DELETE FROM study_plan_days WHERE date = ?', [d]);
-    await run('COMMIT');
+  return await withTransaction(async (tx) => {
+    await tx.run('DELETE FROM study_plan_tasks WHERE day_date = ?', [d]);
+    const res = await tx.run('DELETE FROM study_plan_days WHERE date = ?', [d]);
     return res.changes > 0;
-  } catch (err) {
-    try { await run('ROLLBACK'); } catch { /* surface the original error */ }
-    throw err;
-  }
+  });
 }
 
 // Batch-reorder days (drag a whole day). `updates` is the full ordering of each
@@ -3735,25 +3750,20 @@ async function reorderStudyPlanDays(updates) {
     if (!Number.isFinite(weekNumber)) throw new Error('week_number must be a finite number');
     return { date, sort_order: sortOrder, week_number: weekNumber };
   });
-  await run('BEGIN');
-  try {
+  await withTransaction(async (tx) => {
     for (const u of clean) {
-      await run(
+      await tx.run(
         `UPDATE study_plan_days
             SET sort_order = ?, week_number = ?, updated_at = now()
           WHERE date = ?`,
         [u.sort_order, u.week_number, u.date],
       );
-      await run(
+      await tx.run(
         `UPDATE study_plan_tasks SET week_number = ?, updated_at = now() WHERE day_date = ?`,
         [u.week_number, u.date],
       );
     }
-    await run('COMMIT');
-  } catch (err) {
-    try { await run('ROLLBACK'); } catch { /* surface the original error */ }
-    throw err;
-  }
+  });
   return await listStudyPlanDays();
 }
 
@@ -3775,18 +3785,17 @@ async function restoreStudyPlanSnapshot(snapshot) {
     validateStudyPlanDate(t.day_date);
   }
 
-  await run('BEGIN');
-  try {
+  await withTransaction(async (tx) => {
     // Days: drop rows absent from the snapshot, then upsert each snapshot row.
     const dayDates = days.map((d) => d.date);
     if (dayDates.length) {
       const ph = dayDates.map(() => '?').join(',');
-      await run(`DELETE FROM study_plan_days WHERE date NOT IN (${ph})`, dayDates);
+      await tx.run(`DELETE FROM study_plan_days WHERE date NOT IN (${ph})`, dayDates);
     } else {
-      await run('DELETE FROM study_plan_days');
+      await tx.run('DELETE FROM study_plan_days');
     }
     for (const d of days) {
-      await run(
+      await tx.run(
         `INSERT INTO study_plan_days (date, week_number, day_label, day_theme, sort_order)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(date) DO UPDATE SET
@@ -3804,12 +3813,12 @@ async function restoreStudyPlanSnapshot(snapshot) {
     const ids = tasks.map((t) => Number(t.id));
     if (ids.length) {
       const ph = ids.map(() => '?').join(',');
-      await run(`DELETE FROM study_plan_tasks WHERE id NOT IN (${ph})`, ids);
+      await tx.run(`DELETE FROM study_plan_tasks WHERE id NOT IN (${ph})`, ids);
     } else {
-      await run('DELETE FROM study_plan_tasks');
+      await tx.run('DELETE FROM study_plan_tasks');
     }
     for (const t of tasks) {
-      await run(
+      await tx.run(
         `INSERT INTO study_plan_tasks
            (id, day_date, week_number, day_label, day_theme, position, title,
             description, est_minutes, status, completed_at, notes)
@@ -3837,7 +3846,7 @@ async function restoreStudyPlanSnapshot(snapshot) {
     // Meta: upsert each snapshot key (never deletes meta keys).
     if (meta) {
       for (const k of Object.keys(meta)) {
-        await run(
+        await tx.run(
           `INSERT INTO study_plan_meta (key, value, updated_at)
            VALUES (?, ?, now())
            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = now()`,
@@ -3845,11 +3854,7 @@ async function restoreStudyPlanSnapshot(snapshot) {
         );
       }
     }
-    await run('COMMIT');
-  } catch (err) {
-    try { await run('ROLLBACK'); } catch { /* surface the original error */ }
-    throw err;
-  }
+  });
   const [outTasks, outDays, outMeta] = await Promise.all([
     listStudyPlanTasks(), listStudyPlanDays(), getStudyPlanMeta(),
   ]);
@@ -3860,16 +3865,11 @@ async function restoreStudyPlanSnapshot(snapshot) {
 // run. seedStudyPlanIfEmpty re-seeds days afterward via backfillStudyPlanDays.
 // Returns the number of deleted task rows.
 async function resetStudyPlanTasks() {
-  await run('BEGIN');
-  try {
-    const result = await run('DELETE FROM study_plan_tasks');
-    await run('DELETE FROM study_plan_days');
-    await run('COMMIT');
+  return await withTransaction(async (tx) => {
+    const result = await tx.run('DELETE FROM study_plan_tasks');
+    await tx.run('DELETE FROM study_plan_days');
     return { deleted: result.changes };
-  } catch (err) {
-    try { await run('ROLLBACK'); } catch { /* surface the original error */ }
-    throw err;
-  }
+  });
 }
 
 // ─── Mock Results helpers ───────────────────────────────────────────────────
