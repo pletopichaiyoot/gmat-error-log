@@ -4527,6 +4527,7 @@ module.exports = {
   enrichGmatClubSessionAttempts,
   enrichOpeSessionAttempts,
   listGmatClubEnrichTargets,
+  recomputeIrtCutoffs,
   listRuns,
   listSessions,
   countSessions,
