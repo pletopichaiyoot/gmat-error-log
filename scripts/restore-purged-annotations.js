@@ -3,28 +3,38 @@
 // happened after Phase 2 enrichment (the q_id mutation bug). q_code is stable
 // across scrapers, so we use it as the recovery key.
 //
-// Sources: any DB backup file. Defaults to the most recent .bak file.
+// POST-MIGRATION NOTE: the live DB is now Postgres (writes go through a pg Pool,
+// connection from DATABASE_URL). The backup SOURCE is still a SQLite snapshot
+// file (`data/gmat-error-log.db.bak-*`) opened read-only — those snapshots were
+// taken before the Postgres cutover, so we read them with sqlite3.
+//
+// Sources: any SQLite DB backup file. Defaults to the most recent .bak file.
 //
 // Usage:
 //   node scripts/restore-purged-annotations.js [path-to-backup.db] [--apply]
 
+require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
 const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
 
-const DB_PATH = path.resolve(__dirname, '..', 'data', 'gmat-error-log.db');
+if (!process.env.DATABASE_URL) {
+  console.error('DATABASE_URL is not set (check .env). The live DB is Postgres; cannot continue.');
+  process.exit(1);
+}
+
+const DATA_DIR = path.resolve(__dirname, '..', 'data');
 const args = process.argv.slice(2);
 const APPLY = args.includes('--apply');
 const explicit = args.find((a) => !a.startsWith('--'));
 
 function pickBackup() {
   if (explicit) return path.resolve(explicit);
-  const dataDir = path.dirname(DB_PATH);
   const baks = fs
-    .readdirSync(dataDir)
+    .readdirSync(DATA_DIR)
     .filter((f) => f.startsWith('gmat-error-log.db.bak'))
-    .map((f) => path.join(dataDir, f))
-    .filter((p) => p !== DB_PATH);
+    .map((f) => path.join(DATA_DIR, f));
   baks.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
   return baks[0];
 }
@@ -35,14 +45,15 @@ if (!BAK_PATH || !fs.existsSync(BAK_PATH)) {
   process.exit(1);
 }
 
-const liveDb = new sqlite3.Database(DB_PATH);
+// SOURCE: SQLite backup snapshot, read-only.
 const bakDb = new sqlite3.Database(BAK_PATH, sqlite3.OPEN_READONLY);
+// DESTINATION: live Postgres DB.
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-const all = (db, sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => (e ? rej(e) : res(r))));
-const run = (db, sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
+const sqliteAll = (db, sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => (e ? rej(e) : res(r))));
 
 (async () => {
-  const bakRows = await all(
+  const bakRows = await sqliteAll(
     bakDb,
     `SELECT q_id, q_code, time_sec, mistake_type, notes
      FROM question_attempts
@@ -64,17 +75,17 @@ const run = (db, sql, p = []) => new Promise((res, rej) => db.run(sql, p, functi
   for (const b of bakRows) {
     let curRows;
     if (b.q_id && b.q_id.startsWith('gc-att-')) {
-      curRows = await all(
-        liveDb,
-        `SELECT id, mistake_type, notes FROM question_attempts WHERE q_id = ?`,
+      const { rows } = await pool.query(
+        `SELECT id, mistake_type, notes FROM question_attempts WHERE q_id = $1`,
         [b.q_id]
       );
+      curRows = rows;
     } else if (b.q_code) {
-      curRows = await all(
-        liveDb,
-        `SELECT id, mistake_type, notes FROM question_attempts WHERE q_code = ? AND COALESCE(time_sec, -1) = COALESCE(?, -1)`,
+      const { rows } = await pool.query(
+        `SELECT id, mistake_type, notes FROM question_attempts WHERE q_code = $1 AND COALESCE(time_sec, -1) = COALESCE($2, -1)`,
         [b.q_code, b.time_sec]
       );
+      curRows = rows;
     } else {
       continue;
     }
@@ -115,30 +126,40 @@ const run = (db, sql, p = []) => new Promise((res, rej) => db.run(sql, p, functi
 
   if (!APPLY) {
     console.log('\n[dry run] pass --apply to write changes');
-    liveDb.close(); bakDb.close();
+    bakDb.close();
+    await pool.end();
     return;
   }
 
   console.log('\nApplying...');
-  await run(liveDb, 'BEGIN');
+  const client = await pool.connect();
   try {
+    await client.query('BEGIN');
+    let applied = 0;
     for (const r of restores) {
+      let result;
       if (r.new_mistake && r.new_notes) {
-        await run(liveDb, 'UPDATE question_attempts SET mistake_type = ?, notes = ? WHERE id = ?', [r.new_mistake, r.new_notes, r.id]);
+        result = await client.query('UPDATE question_attempts SET mistake_type = $1, notes = $2 WHERE id = $3', [r.new_mistake, r.new_notes, r.id]);
       } else if (r.new_mistake) {
-        await run(liveDb, 'UPDATE question_attempts SET mistake_type = ? WHERE id = ?', [r.new_mistake, r.id]);
+        result = await client.query('UPDATE question_attempts SET mistake_type = $1 WHERE id = $2', [r.new_mistake, r.id]);
       } else if (r.new_notes) {
-        await run(liveDb, 'UPDATE question_attempts SET notes = ? WHERE id = ?', [r.new_notes, r.id]);
+        result = await client.query('UPDATE question_attempts SET notes = $1 WHERE id = $2', [r.new_notes, r.id]);
       }
+      if (result) applied += result.rowCount;
     }
-    await run(liveDb, 'COMMIT');
-    console.log(`Restored ${restores.length} row(s).`);
+    await client.query('COMMIT');
+    console.log(`Restored ${applied} row(s).`);
   } catch (err) {
-    await run(liveDb, 'ROLLBACK');
+    await client.query('ROLLBACK');
     console.error('Failed, rolled back:', err.message);
+    client.release();
+    bakDb.close();
+    await pool.end();
     process.exit(1);
   }
-  liveDb.close(); bakDb.close();
+  client.release();
+  bakDb.close();
+  await pool.end();
 })().catch((err) => {
   console.error(err);
   process.exit(1);
