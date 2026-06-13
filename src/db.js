@@ -114,7 +114,7 @@ async function initDb() {
           ELSE 'Medium'
         END
     WHERE difficulty_theta IS NULL
-      AND difficulty ~ '^-{0,1}\.{0,1}[0-9]'
+      AND difficulty ~ '^-{0,1}\\.{0,1}[0-9]'
   `);
 
   await backfillStudyPlanDays();
