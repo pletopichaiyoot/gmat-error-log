@@ -75,8 +75,9 @@ Add these to the `"scripts"` block (keep existing scripts):
 "db:migrate": "node scripts/migrate.js",
 "db:etl": "node scripts/migrate-sqlite-to-pg.js",
 "db:verify": "node scripts/verify-schema-parity.js && node scripts/verify-migration.js",
-"test": "node --test test/unit/"
+"test": "node --test \"test/unit/*.test.js\""
 ```
+(Node 24 treats `node --test test/unit/` as a module path and crashes; the quoted glob is robust across shells.)
 
 - [ ] **Step 5: Update `.env.example`**
 
