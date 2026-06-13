@@ -1,0 +1,218 @@
+-- migrations/0001_init.sql
+-- Target schema for the SQLite -> Postgres migration. Runtime ALTERs folded in.
+-- Type rules: AUTOINCREMENT -> IDENTITY; timestamps -> timestamptz DEFAULT now();
+-- session_date -> date; session_external_id -> bigint; booleans kept as integer;
+-- JSON kept as text (jsonb deferred). date-string PKs (study_plan_days.date,
+-- day_date, mock_date) kept text to preserve join/PK semantics.
+-- NOTE: schema_migrations is created by scripts/migrate.js, not here.
+
+CREATE TABLE scrape_runs (
+  id                 integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  extracted_at       timestamptz NOT NULL,
+  since_value        text,
+  source             text,
+  review_category_id integer,
+  total_sessions     integer NOT NULL,
+  total_questions    integer NOT NULL,
+  total_errors       integer NOT NULL,
+  created_at         timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE sessions (
+  id                     integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  run_id                 integer NOT NULL REFERENCES scrape_runs(id) ON DELETE CASCADE,
+  session_external_id    bigint  NOT NULL,
+  session_date           date,
+  source                 text,
+  subject                text,
+  total_q_api            integer,
+  total_q_categories     integer,
+  correct_count          integer,
+  error_count            integer,
+  accuracy_pct           real,
+  avg_time_sec           integer,
+  avg_correct_time_sec   integer,
+  avg_incorrect_time_sec integer,
+  created_at             timestamptz NOT NULL DEFAULT now(),
+  total_score            integer,
+  total_percentile       integer,
+  quant_score            integer,
+  quant_percentile       integer,
+  verbal_score           integer,
+  verbal_percentile      integer,
+  di_score               integer,
+  di_percentile          integer,
+  UNIQUE (run_id, session_external_id)
+);
+
+CREATE TABLE question_attempts (
+  id               integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  run_id           integer NOT NULL REFERENCES scrape_runs(id) ON DELETE CASCADE,
+  session_id       integer NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  q_code           text,
+  q_id             text,
+  cat_id           integer,
+  subject_code     text,
+  category_code    text,
+  subcategory      text,
+  subject_sub      text,
+  subject_sub_raw  text,
+  question_url     text,
+  question_stem    text,
+  answer_choices   text,
+  response_format  text,
+  response_details text,
+  correct          integer NOT NULL,
+  difficulty       text,
+  confidence       text,
+  time_sec         integer,
+  my_answer        text,
+  correct_answer   text,
+  topic            text,
+  topic_source     text,
+  content_domain   text,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  mistake_type     text,
+  notes            text,
+  passage_text     text,
+  difficulty_theta real,
+  taxonomy_path    text
+);
+
+CREATE TABLE irt_cutoffs (
+  subject_code text NOT NULL,
+  sub_key      text NOT NULL DEFAULT '',
+  p33          real NOT NULL,
+  p67          real NOT NULL,
+  n            integer NOT NULL,
+  updated_at   timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (subject_code, sub_key)
+);
+
+CREATE TABLE coach_sessions (
+  id         text PRIMARY KEY,
+  title      text DEFAULT '',
+  run_id     integer,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE coach_messages (
+  id         integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  session_id text NOT NULL REFERENCES coach_sessions(id) ON DELETE CASCADE,
+  role       text NOT NULL CHECK (role IN ('user','assistant','system')),
+  content    text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE coach_memories (
+  id         text PRIMARY KEY,
+  content    text NOT NULL,
+  embedding  text NOT NULL,
+  metadata   text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE lsat_attempts (
+  id              integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  test_num        integer NOT NULL,
+  section_roman   text NOT NULL,
+  section_kind    text NOT NULL,
+  question_number integer NOT NULL,
+  user_answer     text NOT NULL,
+  correct_answer  text,
+  is_correct      integer,
+  confidence      text,
+  time_ms         integer,
+  session_id      integer,
+  attempted_at    timestamptz NOT NULL DEFAULT now(),
+  mistake_type    text,
+  notes           text
+);
+
+CREATE TABLE lsat_sessions (
+  id               integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  test_num         integer NOT NULL,
+  section_roman    text NOT NULL,
+  section_kind     text NOT NULL,
+  set_key          text NOT NULL,
+  set_label        text,
+  first_question   integer NOT NULL,
+  last_question    integer NOT NULL,
+  mode             text,
+  started_at       timestamptz NOT NULL DEFAULT now(),
+  completed_at     timestamptz,
+  question_numbers text
+);
+
+CREATE TABLE study_plan_tasks (
+  id           integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  day_date     text NOT NULL,
+  week_number  integer NOT NULL,
+  day_label    text,
+  day_theme    text,
+  position     integer NOT NULL DEFAULT 0,
+  title        text NOT NULL,
+  description  text,
+  est_minutes  integer,
+  status       text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','skipped')),
+  completed_at timestamptz,
+  notes        text,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE study_plan_days (
+  date        text PRIMARY KEY,
+  week_number integer NOT NULL DEFAULT 1,
+  day_label   text,
+  day_theme   text,
+  sort_order  integer NOT NULL DEFAULT 0,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE study_plan_meta (
+  key        text PRIMARY KEY,
+  value      text,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE mock_results (
+  id                integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  mock_date         text NOT NULL,
+  source_label      text NOT NULL,
+  total_score       integer,
+  total_percentile  integer,
+  quant_score       integer,
+  quant_percentile  integer,
+  di_score          integer,
+  di_percentile     integer,
+  verbal_score      integer,
+  verbal_percentile integer,
+  notes             text,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_sessions_run_id ON sessions(run_id);
+CREATE INDEX idx_sessions_external_source ON sessions(session_external_id, source);
+CREATE INDEX idx_questions_run_id ON question_attempts(run_id);
+CREATE INDEX idx_questions_correct ON question_attempts(correct);
+CREATE INDEX idx_questions_q_code ON question_attempts(q_code);
+CREATE INDEX idx_questions_q_id ON question_attempts(q_id);
+CREATE INDEX idx_questions_topic ON question_attempts(topic);
+CREATE INDEX idx_questions_difficulty ON question_attempts(difficulty);
+CREATE INDEX idx_coach_messages_session ON coach_messages(session_id);
+CREATE INDEX idx_coach_memories_created ON coach_memories(created_at DESC);
+CREATE INDEX idx_lsat_attempts_test ON lsat_attempts(test_num, section_roman);
+CREATE INDEX idx_lsat_attempts_session ON lsat_attempts(session_id);
+CREATE UNIQUE INDEX uq_lsat_attempts_session_q
+  ON lsat_attempts(test_num, section_roman, question_number, session_id);
+CREATE INDEX idx_lsat_sessions_test ON lsat_sessions(test_num, section_roman);
+CREATE INDEX idx_lsat_sessions_started ON lsat_sessions(started_at DESC);
+CREATE INDEX idx_study_plan_day ON study_plan_tasks(day_date);
+CREATE INDEX idx_study_plan_week ON study_plan_tasks(week_number);
+CREATE INDEX idx_study_plan_status ON study_plan_tasks(status);
+CREATE INDEX idx_study_plan_days_order ON study_plan_days(sort_order);
+CREATE INDEX idx_mock_results_date ON mock_results(mock_date);
