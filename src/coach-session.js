@@ -29,15 +29,15 @@ async function listSessions({ limit = 20, offset = 0 } = {}) {
 }
 
 async function addMessage(sessionId, { role, content }) {
-  const result = await run(
-    `INSERT INTO coach_messages (session_id, role, content) VALUES (?, ?, ?)`,
+  const result = await all(
+    `INSERT INTO coach_messages (session_id, role, content) VALUES (?, ?, ?) RETURNING id`,
     [sessionId, role, content]
   );
   await run(
     `UPDATE coach_sessions SET updated_at = datetime('now') WHERE id = ?`,
     [sessionId]
   );
-  return get('SELECT * FROM coach_messages WHERE id = ?', [result.lastID]);
+  return get('SELECT * FROM coach_messages WHERE id = ?', [result[0].id]);
 }
 
 async function getMessages(sessionId, { limit = 50 } = {}) {

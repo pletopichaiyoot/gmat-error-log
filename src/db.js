@@ -1,7 +1,5 @@
-const fs = require('fs');
-const path = require('path');
 const { Pool } = require('pg');
-const { toPg, toTimestamptz } = require('./sql-util');
+const { toPg } = require('./sql-util');
 const { runMigrations } = require('../scripts/migrate');
 const { deriveQuestionMetadata, enrichQuestionMetadata } = require('./question-metadata');
 
@@ -161,12 +159,12 @@ async function createLsatSession({ testNum, sectionRoman, sectionKind, setKey, s
   const qn = Array.isArray(questionNumbers) && questionNumbers.length
     ? JSON.stringify([...questionNumbers].sort((a, b) => a - b))
     : null;
-  const result = await run(
+  const result = await all(
     `INSERT INTO lsat_sessions (test_num, section_roman, section_kind, set_key, set_label, first_question, last_question, mode, question_numbers)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
     [testNum, sectionRoman, sectionKind, setKey, setLabel || null, firstQuestion, lastQuestion, mode || null, qn]
   );
-  return { id: result.lastID };
+  return { id: result[0].id };
 }
 
 async function completeLsatSession(id) {
@@ -759,7 +757,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
   const totalQuestions = sessions.reduce((sum, session) => sum + (session.stats?.total_q_api || 0), 0);
   const totalErrors = sessions.reduce((sum, session) => sum + (session.stats?.errors || 0), 0);
 
-  const runInsert = await run(
+  const runInsert = await all(
     `
       INSERT INTO scrape_runs (
         extracted_at,
@@ -769,7 +767,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
         total_sessions,
         total_questions,
         total_errors
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id
     `,
     [
       data.extracted_at || new Date().toISOString(),
@@ -782,7 +780,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     ]
   );
 
-  const runId = runInsert.lastID;
+  const runId = runInsert[0].id;
   const touchedSessionIds = [];
 
   for (const session of sessions) {
@@ -868,7 +866,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
       sessionId = existing.id;
       await run('DELETE FROM question_attempts WHERE session_id = ?', [sessionId]);
     } else {
-      const sessionInsert = await run(
+      const sessionInsert = await all(
         `
           INSERT INTO sessions (
             run_id,
@@ -892,7 +890,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
             verbal_percentile,
             di_score,
             di_percentile
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
         `,
         [
           runId,
@@ -918,7 +916,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           safeIntInRange(session.scoreSummary?.di?.percentile, 0, 100),
         ]
       );
-      sessionId = sessionInsert.lastID;
+      sessionId = sessionInsert[0].id;
     }
     if (Number.isInteger(sessionId) && sessionId > 0) touchedSessionIds.push(sessionId);
     const attempts = Array.isArray(session.questions) ? session.questions : [];
@@ -3399,15 +3397,15 @@ async function createStudyPlanTask(input) {
     );
     position = (row?.maxpos ?? -1) + 1;
   }
-  const result = await run(
+  const result = await all(
     `INSERT INTO study_plan_tasks
        (day_date, week_number, day_label, day_theme, position, title, description,
         est_minutes, status, completed_at, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
     [dayDate, weekNumber, dayLabel, dayTheme, position, title, description,
      estMinutes, status, status === 'done' ? new Date().toISOString() : null, notes]
   );
-  return await getStudyPlanTask(result.lastID);
+  return await getStudyPlanTask(result[0].id);
 }
 
 async function updateStudyPlanTask(id, patch) {
@@ -3924,17 +3922,17 @@ async function getMockResult(id) {
 
 async function createMockResult(input) {
   const v = normalizeMockInput(input);
-  const result = await run(
+  const result = await all(
     `INSERT INTO mock_results
        (mock_date, source_label, total_score, total_percentile,
         quant_score, quant_percentile, di_score, di_percentile,
         verbal_score, verbal_percentile, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
     [v.mock_date, v.source_label, v.total_score, v.total_percentile,
      v.quant_score, v.quant_percentile, v.di_score, v.di_percentile,
      v.verbal_score, v.verbal_percentile, v.notes]
   );
-  return await getMockResult(result.lastID);
+  return await getMockResult(result[0].id);
 }
 
 async function updateMockResult(id, patch) {
