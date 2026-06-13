@@ -34,7 +34,7 @@ async function addMessage(sessionId, { role, content }) {
     [sessionId, role, content]
   );
   await run(
-    `UPDATE coach_sessions SET updated_at = datetime('now') WHERE id = ?`,
+    `UPDATE coach_sessions SET updated_at = now() WHERE id = ?`,
     [sessionId]
   );
   return get('SELECT * FROM coach_messages WHERE id = ?', [result[0].id]);
@@ -53,7 +53,7 @@ async function getMessages(sessionId, { limit = 50 } = {}) {
 
 async function updateSessionTitle(sessionId, title) {
   const result = await run(
-    `UPDATE coach_sessions SET title = ?, updated_at = datetime('now') WHERE id = ?`,
+    `UPDATE coach_sessions SET title = ?, updated_at = now() WHERE id = ?`,
     [String(title || '').slice(0, 120), sessionId]
   );
   return result.changes > 0;
