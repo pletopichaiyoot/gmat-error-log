@@ -1,3 +1,4 @@
+/* global require */
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { toPg, toTimestamptz } = require('../../src/sql-util');
