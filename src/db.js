@@ -1564,7 +1564,9 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
     params.push(`%${search}%`, `%${search}%`, `%${search}%`);
   }
   if (mistakeTag) {
-    where.push(`COALESCE(q.mistake_type, '') LIKE ?`);
+    // SQLite LIKE is case-insensitive for ASCII; Postgres LIKE is case-sensitive.
+    // Wrap both sides in LOWER() to preserve the pre-migration matching behavior.
+    where.push(`LOWER(COALESCE(q.mistake_type, '')) LIKE LOWER(?)`);
     params.push(`%${mistakeTag}%`);
   }
 
@@ -1897,7 +1899,9 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
     params.push(`%${search}%`, `%${search}%`, `%${search}%`);
   }
   if (mistakeTag) {
-    where.push(`COALESCE(q.mistake_type, '') LIKE ?`);
+    // SQLite LIKE is case-insensitive for ASCII; Postgres LIKE is case-sensitive.
+    // Wrap both sides in LOWER() to preserve the pre-migration matching behavior.
+    where.push(`LOWER(COALESCE(q.mistake_type, '')) LIKE LOWER(?)`);
     params.push(`%${mistakeTag}%`);
   }
 
