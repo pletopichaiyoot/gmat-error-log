@@ -9,6 +9,9 @@
 //   Phase 2 (opt-in, paced): per-item iframe src swap into ITDReview.aspx to pull
 //     full stem/passage/choices/user-answer/precise time_ms. Human-like delays.
 
+const { htmlToReadableText } = require('./mathml-text');
+const { splitStemAndPassage } = require('./question-stem-split');
+
 const STARTTEST_HOST_RE = /starttest\.com/i;
 const BOOK_SESSION_TABLE_SEL = 'table.PracticeSessionsTable-tbl tbody tr';
 
@@ -1073,13 +1076,24 @@ async function waitForReviewFrame(page, expectedItemName, timeoutMs = 25000) {
 //      has style "background-image: URL('ITD/radiochecked.gif')". The USER's
 //      selected cell contains <div style="background-color:yellow">.
 async function readReviewFrame(frame) {
-  return frame.evaluate(() => {
+  const data = await frame.evaluate(() => {
     const text = (sel) => {
       const el = document.querySelector(sel);
       if (!el) return null;
       return (el.innerText || '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
     };
     const safeJson = (v) => { try { return JSON.parse(JSON.stringify(v)); } catch { return null; } };
+    // Math-bearing elements render as native MathML, which innerText collapses
+    // (1/24 -> "124"). Return UI-stripped innerHTML for any element containing
+    // <math> so the Node side can convert it to readable text. Returns null when
+    // there is no <math>, so plain-text stems/choices are left completely untouched.
+    const pickEl = (sels) => { for (const s of sels) { const el = document.querySelector(s); if (el) return el; } return null; };
+    const cleanMathHtml = (el) => {
+      if (!el || !el.querySelector('math')) return null;
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll('img, button, [role="button"], [aria-hidden="true"], input, [class*="trikeout" i], [class*="Marker" i], script, style').forEach((n) => n.remove());
+      return clone.innerHTML;
+    };
 
     // --- Correct answer key (works for both MC and Matrix) ---
     let correctKey = null;
@@ -1255,6 +1269,7 @@ async function readReviewFrame(frame) {
           return {
             value: el.value,
             label: labelText,
+            contentHtml: cleanMathHtml(container),                  // non-null only if the row has MathML
             color,                                                  // yellow|red|green|null
             checked: el.checked || pickByColor || inUserSelectedRow,
             isCorrect: color === 'yellow' || color === 'green' || inCorrectRow,
@@ -1289,10 +1304,47 @@ async function readReviewFrame(frame) {
       keyPoint: text('.sol-key-point-content'),
       rationale: text('.ItemRationaleText'),
       yourScoreText: text('.sol-your-score-container'),
+      stemHtml: cleanMathHtml(pickEl(['.ITSStemText', '.stem-container-inner', '.stem-block-inner'])),
+      passageHtml: cleanMathHtml(pickEl(['.passage-block-inner', '.passage-block'])),
+      keyPointHtml: cleanMathHtml(pickEl(['.sol-key-point-content'])),
+      rationaleHtml: cleanMathHtml(pickEl(['.ItemRationaleText'])),
       choicesType,
       choices,
     };
   });
+
+  // Node-side: convert any returned math-bearing innerHTML to readable inline text
+  // (MathML -> 1/24, 1/(n(n + 1)), x^2, √3). Only overrides fields that contained
+  // <math>; everything else keeps the original innerText extraction unchanged.
+  if (data.stemHtml) data.stem = htmlToReadableText(data.stemHtml);
+  if (data.passageHtml) data.passage = htmlToReadableText(data.passageHtml);
+  if (data.keyPointHtml) data.keyPoint = htmlToReadableText(data.keyPointHtml);
+  if (data.rationaleHtml) data.rationale = htmlToReadableText(data.rationaleHtml);
+  if (data.choicesType === 'single' && Array.isArray(data.choices)) {
+    for (const c of data.choices) {
+      if (c.contentHtml) {
+        const t = htmlToReadableText(c.contentHtml);
+        if (t) c.label = t;
+      }
+      delete c.contentHtml;
+    }
+  }
+  for (const k of ['stemHtml', 'passageHtml', 'keyPointHtml', 'rationaleHtml']) delete data[k];
+
+  // StartTest's `.ITSStemText` is the whole item body, so single-choice stems
+  // arrive as: boilerplate + prompt + (CR) argument + every choice text. Split
+  // out the prompt, lift any CR argument into `passage`, and drop the duplicated
+  // choices (already captured in `data.choices`). Matrix/dropdown items don't
+  // have this shape, so we only touch choicesType==='single'. We never clobber a
+  // passage StartTest gave us via `.passage-block`.
+  if (data.choicesType === 'single' && data.stem && Array.isArray(data.choices)) {
+    const choiceTexts = data.choices.map((c) => c && c.label).filter(Boolean);
+    const split = splitStemAndPassage(data.stem, choiceTexts);
+    if (split.stem) data.stem = split.stem;
+    if (split.passage && !data.passage) data.passage = split.passage;
+  }
+
+  return data;
 }
 
 // Click the Next button inside the ITDStart harness frame to advance to the

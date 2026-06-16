@@ -61,7 +61,10 @@ const DEFAULT_CDP_URL = 'http://localhost:9222';
 // Old/legacy rows that didn't get migrated still render in the chips list
 // (free-text); they just won't appear pre-selected in the picker.
 const MISTAKE_TYPES = {
-  'Cognitive Cause': [
+  // "Why I Missed It" = the on-the-merits cause (drives the fix). NOTE: 'Wrong Setup'
+  // and 'Calc/Casework Slip' are Quant/DI execution tags — hidden on Verbal questions
+  // via TAG_SUBJECTS below.
+  'Why I Missed It': [
     'Misread',
     'Modifier/Connective Miss',
     'Concept Gap',
@@ -69,21 +72,32 @@ const MISTAKE_TYPES = {
     'Logic Slip',
     'Calc/Casework Slip',
   ],
+  // Trap Type = what the wrong answer was doing (a descriptor, not a fix). Verbal/
+  // verbal-DI only via TAG_SUBJECTS.
   'Trap Type': [
     'Trap: Scope/Strength',
     'Trap: Half-Right',
     'Trap: Reversed',
     'Trap: Plausible-but-Unstated',
+    'Trap: True-but-Irrelevant',
+    'Trap: Distortion/Familiar-Language',
+    'Trap: Premise Repeat',
   ],
-  'Process / Fix-it': [
+  // Timing & Process — the clock decision or workflow failure. 'Time Trap' was split
+  // into three actionable modes (its biggest weakness: it lumped opposite fixes).
+  // Legacy 'Time Trap' rows still render as free-text pills (TAG_DESCRIPTIONS keeps
+  // its tooltip) but it's no longer offered as a fresh pick.
+  'Timing & Process': [
     'No Plan / Stuck',
-    'Time Trap',
+    'Chose Too Early / Rushed-Guess',
+    'Overinvested (>2× median)',
+    'Ran Out of Time',
   ],
 };
 
 // When-to-use hints shown on hover (native title attribute).
 const TAG_DESCRIPTIONS = {
-  // Cognitive Cause
+  // Why I Missed It
   'Misread':
     'Missed or misinterpreted a content word, condition, chart value, or part of the stem ("each", "ensure", "at least", a number). Fix: slow down on key words and restate the question in your own words before solving.',
   'Modifier/Connective Miss':
@@ -105,9 +119,22 @@ const TAG_DESCRIPTIONS = {
     'Wrong direction, polarity, or causation — answer flipped cause/effect, increased vs. decreased, supports vs. weakens. Fix: explicitly note the direction of the relationship before reading choices.',
   'Trap: Plausible-but-Unstated':
     "The wrong answer sounded right from real-world intuition or general knowledge but wasn't supported by the passage/stem. Fix: ask 'where does the text say this?' for every candidate answer.",
-  // Process / Fix-it
+  'Trap: True-but-Irrelevant':
+    'The choice is accurate per the passage but doesn\'t answer the question asked — a real detail offered for an inference or main-idea question. Distinct from Half-Right (on-task but partly wrong) and Plausible-but-Unstated (unsupported): this one IS supported, just off-task. Fix: after confirming a choice is true, ask "does it answer THIS stem?"',
+  'Trap: Distortion/Familiar-Language':
+    'Reuses the passage\'s exact words but recombines or subtly twists their meaning so it rings a bell. Fix: don\'t reward familiar wording — re-check that the relationship the choice asserts is the one the text actually states.',
+  'Trap: Premise Repeat':
+    'A CR choice that restates a premise you were already given instead of supplying the assumption, new support, or inference the question needs — true, straight from the argument, but does no work. Fix: ask "does this ADD something, or just echo a given?"',
+  // Timing & Process
   'No Plan / Stuck':
     "Couldn't start, no setup move (no matrix, no passage map, no equation), or got stuck mid-problem. Also: messy scratchwork that confused you. Fix: build the standard setup for that problem type before solving.",
+  'Chose Too Early / Rushed-Guess':
+    'Committed before fully working the question — fast + wrong. Took the first plausible choice, or guessed to keep moving. Fix: force one verification pass before locking; don\'t answer on first instinct.',
+  'Overinvested (>2× median)':
+    'Spent far longer than the question was worth (>2× your median for the type), regardless of outcome — the clock leak that starves later questions. Fix: set a per-question cap; at the limit, make your best choice, mark it, and move.',
+  'Ran Out of Time':
+    'End-of-section clock pressure — a ≤10s blind guess or a question skipped because time ran out. A pacing failure, not a skill gap. Fix: pacing checkpoints (question N by time T) so you never arrive at the end starved.',
+  // Legacy (split into the three modes above; kept so old rows keep a tooltip).
   'Time Trap':
     'Any timing failure mode: chose too early, overinvested time (>2× median), rushed-guess, or ran out of time. Fix: enforce a per-question budget; bail and mark for review at the budget limit.',
 };
@@ -117,10 +144,32 @@ const ALL_MISTAKE_TAGS = Object.values(MISTAKE_TYPES).flat();
 const MISTAKE_CATEGORY_ORDER = Object.keys(MISTAKE_TYPES);
 
 const SUBJECT_TAG_PRIORITY = {
-  Q: ['Cognitive Cause', 'Process / Fix-it', 'Trap Type'],
-  V: ['Trap Type', 'Cognitive Cause', 'Process / Fix-it'],
-  DI: ['Cognitive Cause', 'Trap Type', 'Process / Fix-it'],
+  Q: ['Why I Missed It', 'Timing & Process', 'Trap Type'],
+  V: ['Trap Type', 'Why I Missed It', 'Timing & Process'],
+  DI: ['Why I Missed It', 'Trap Type', 'Timing & Process'],
 };
+
+// Subject-scoping for the annotation picker: a tag listed here renders ONLY for the
+// given subjects (Verbal questions don't show Quant execution tags; Quant questions
+// don't show Verbal trap types). Tags not listed are universal. An active tag search
+// overrides this, so a hidden tag is still reachable by typing its name.
+const TAG_SUBJECTS = {
+  'Wrong Setup': ['Q', 'DI'],
+  'Calc/Casework Slip': ['Q', 'DI'],
+  'Trap: Scope/Strength': ['V', 'DI'],
+  'Trap: Half-Right': ['V', 'DI'],
+  'Trap: Reversed': ['V', 'DI'],
+  'Trap: Plausible-but-Unstated': ['V', 'DI'],
+  'Trap: True-but-Irrelevant': ['V', 'DI'],
+  'Trap: Distortion/Familiar-Language': ['V', 'DI'],
+  'Trap: Premise Repeat': ['V', 'DI'],
+};
+
+function tagAllowedForSubject(tag, subjCode) {
+  if (!['Q', 'V', 'DI'].includes(subjCode)) return true;
+  const allowed = TAG_SUBJECTS[tag];
+  return !allowed || allowed.includes(subjCode);
+}
 
 function parseMistakeTags(value) {
   if (!value) return [];
@@ -1338,7 +1387,12 @@ function App() {
   }, [aiScopeLabel]);
 
   useEffect(() => {
-    aiChatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    // Scroll only the coach chat log to its newest message — NOT the whole document.
+    // scrollIntoView() bubbles to every scrollable ancestor (incl. the window), so on
+    // dashboard load (when coach messages arrive) it yanked the page down. Scrolling the
+    // container's own scrollTop keeps the chat pinned to the bottom without moving the page.
+    const log = aiChatEndRef.current?.closest('.coach-chat-log');
+    if (log) log.scrollTo({ top: log.scrollHeight, behavior: 'smooth' });
   }, [aiMessages, isAskingAi]);
 
   // Auto-apply error log filters on change (debounced for search input)
@@ -4771,7 +4825,7 @@ function App() {
                         const tags = MISTAKE_TYPES[category] || [];
                         const filtered = search
                           ? tags.filter((t) => t.toLowerCase().includes(search))
-                          : tags;
+                          : tags.filter((t) => tagAllowedForSubject(t, subjCode));
                         return { category, filtered };
                       })
                       .filter(({ filtered }) => filtered.length > 0);
