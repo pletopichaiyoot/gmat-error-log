@@ -1110,6 +1110,9 @@ function App() {
   const [sessionPlatformFilter, setSessionPlatformFilter] = useState('');
   const [sessionSort, setSessionSort] = useState({ key: 'session_date', order: 'desc' });
   const [sessionAnalysisSort, setSessionAnalysisSort] = useState({ key: 'correct', order: 'asc' });
+  const [sessionAnalysisSubjectFilter, setSessionAnalysisSubjectFilter] = useState('');
+  const [sessionAnalysisCategoryFilter, setSessionAnalysisCategoryFilter] = useState('');
+  const [sessionAnalysisResultFilter, setSessionAnalysisResultFilter] = useState('');
   const [errorSort, setErrorSort] = useState({ key: 'session_date', order: 'desc' });
   const [categoryBreakdownSort, setCategoryBreakdownSort] = useState({ key: 'subject_family', order: 'asc' });
   const [subcategoryBreakdownSort, setSubcategoryBreakdownSort] = useState({ key: 'total_questions', order: 'desc' });
@@ -2086,8 +2089,56 @@ function App() {
     return { examNumber, sections, suggestions };
   }, [isOpeSession, sessionAnalysis.data]);
 
+  // Distinct subjects present in this session's questions, used to populate the
+  // subject filter dropdown (only offer subjects that actually appear, with counts).
+  const sessionAnalysisSubjectOptions = useMemo(() => {
+    const counts = new Map();
+    for (const row of sessionAnalysis.data?.slowWrongQuestions || []) {
+      const code = normalizedSubjectCode(row);
+      if (!code || code === '-') continue;
+      counts.set(code, (counts.get(code) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([code, count]) => ({ code, label: normalizeSubjectFamilyDisplay(code), count }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [sessionAnalysis.data?.slowWrongQuestions]);
+
+  // Distinct categories (PS/CR/RC/DS/MSR/TA/GI/TPA) present, for the category filter.
+  const sessionAnalysisCategoryOptions = useMemo(() => {
+    const counts = new Map();
+    for (const row of sessionAnalysis.data?.slowWrongQuestions || []) {
+      const code = normalizedCategoryCode(row);
+      if (!code || code === '-') continue;
+      counts.set(code, (counts.get(code) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([code, count]) => ({ code, count }))
+      .sort((a, b) => a.code.localeCompare(b.code));
+  }, [sessionAnalysis.data?.slowWrongQuestions]);
+
+  // Correct/wrong tallies, so the result filter only appears when both exist.
+  const sessionAnalysisResultCounts = useMemo(() => {
+    let correct = 0;
+    let wrong = 0;
+    for (const row of sessionAnalysis.data?.slowWrongQuestions || []) {
+      if (Number(row?.correct) === 1) correct += 1;
+      else wrong += 1;
+    }
+    return { correct, wrong };
+  }, [sessionAnalysis.data?.slowWrongQuestions]);
+
   const sortedSessionAnalysisWrongQuestions = useMemo(() => {
-    const rows = [...(sessionAnalysis.data?.slowWrongQuestions || [])];
+    let rows = [...(sessionAnalysis.data?.slowWrongQuestions || [])];
+    if (sessionAnalysisSubjectFilter) {
+      rows = rows.filter((row) => normalizedSubjectCode(row) === sessionAnalysisSubjectFilter);
+    }
+    if (sessionAnalysisCategoryFilter) {
+      rows = rows.filter((row) => normalizedCategoryCode(row) === sessionAnalysisCategoryFilter);
+    }
+    if (sessionAnalysisResultFilter) {
+      const wantCorrect = sessionAnalysisResultFilter === 'correct' ? 1 : 0;
+      rows = rows.filter((row) => (Number(row?.correct) === 1 ? 1 : 0) === wantCorrect);
+    }
     const { key, order } = sessionAnalysisSort;
     const difficultyRank = {
       unknown: 0,
@@ -2129,7 +2180,7 @@ function App() {
     });
 
     return rows;
-  }, [sessionAnalysis.data?.slowWrongQuestions, sessionAnalysisSort]);
+  }, [sessionAnalysis.data?.slowWrongQuestions, sessionAnalysisSort, sessionAnalysisSubjectFilter, sessionAnalysisCategoryFilter, sessionAnalysisResultFilter]);
 
   const questionReviewNav = useMemo(() => {
     const empty = { index: -1, total: 0, prev: null, next: null };
@@ -2313,6 +2364,9 @@ function App() {
 
   async function handleOpenSessionAnalysis(row) {
     if (!row?.id) return;
+    setSessionAnalysisSubjectFilter('');
+    setSessionAnalysisCategoryFilter('');
+    setSessionAnalysisResultFilter('');
     setSessionAnalysis({
       open: true,
       loading: true,
@@ -2360,6 +2414,9 @@ function App() {
       error: '',
       data: null,
     });
+    setSessionAnalysisSubjectFilter('');
+    setSessionAnalysisCategoryFilter('');
+    setSessionAnalysisResultFilter('');
     // Drop any prior enrich outcome / pending confirm so neither resurfaces on
     // the next session opened (the status block renders on lastEnrichResult alone).
     setLastEnrichResult(null);
@@ -4245,7 +4302,49 @@ function App() {
                 </div>
 
                 <div className="analysis-block">
-                  <h3>{`All Questions (${sortedSessionAnalysisWrongQuestions.length})`}</h3>
+                  <div className="analysis-block__head">
+                    <h3>{`All Questions (${sortedSessionAnalysisWrongQuestions.length})`}</h3>
+                    <div className="analysis-block__filters">
+                      {sessionAnalysisResultCounts.correct > 0 && sessionAnalysisResultCounts.wrong > 0 && (
+                        <Select
+                          className="filter-select"
+                          value={sessionAnalysisResultFilter}
+                          onChange={(event) => setSessionAnalysisResultFilter(event.target.value)}
+                          aria-label="Filter questions by result"
+                        >
+                          <option value="">All results</option>
+                          <option value="correct">{`Correct (${sessionAnalysisResultCounts.correct})`}</option>
+                          <option value="wrong">{`Wrong (${sessionAnalysisResultCounts.wrong})`}</option>
+                        </Select>
+                      )}
+                      {sessionAnalysisSubjectOptions.length > 1 && (
+                        <Select
+                          className="filter-select"
+                          value={sessionAnalysisSubjectFilter}
+                          onChange={(event) => setSessionAnalysisSubjectFilter(event.target.value)}
+                          aria-label="Filter questions by subject"
+                        >
+                          <option value="">All subjects</option>
+                          {sessionAnalysisSubjectOptions.map((opt) => (
+                            <option key={opt.code} value={opt.code}>{`${opt.label} (${opt.count})`}</option>
+                          ))}
+                        </Select>
+                      )}
+                      {sessionAnalysisCategoryOptions.length > 1 && (
+                        <Select
+                          className="filter-select"
+                          value={sessionAnalysisCategoryFilter}
+                          onChange={(event) => setSessionAnalysisCategoryFilter(event.target.value)}
+                          aria-label="Filter questions by category"
+                        >
+                          <option value="">All categories</option>
+                          {sessionAnalysisCategoryOptions.map((opt) => (
+                            <option key={opt.code} value={opt.code}>{`${opt.code} (${opt.count})`}</option>
+                          ))}
+                        </Select>
+                      )}
+                    </div>
+                  </div>
                   <div className="table-wrap session-analysis-questions-wrap">
                     <table className="review-table session-analysis-questions-table">
                       <thead>
