@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
+import PassageLines from './PassageLines';
 
 function fetchJson(url, opts) {
   return fetch(url, opts).then(async (r) => {
@@ -933,7 +934,7 @@ function SessionView({
                 Passage {passageNumber} of {passageTotal}
               </div>
             )}
-            <div className="lsat-st-passage-text">{passage.text}</div>
+            <PassageLines lines={passage.lines} text={passage.text} className="lsat-st-passage-body" />
           </section>
         )}
 

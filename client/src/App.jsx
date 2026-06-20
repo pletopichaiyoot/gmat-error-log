@@ -5,6 +5,7 @@ import { Input } from './components/ui/input';
 import { Textarea } from './components/ui/textarea';
 import { Select } from './components/ui/select';
 import TodayPlan from './TodayPlan';
+import PassageLines from './PassageLines';
 // Heavy route-level views — lazy-loaded so they don't bloat the initial bundle.
 // The dashboard (default route) loads without them; they fetch on demand when
 // the user navigates to #lsat or #study-plan.
@@ -333,6 +334,15 @@ function splitPassageParagraphs(value) {
     .split(/\n{2,}/)
     .map((para) => para.replace(/\s+/g, ' ').trim())
     .filter(Boolean);
+}
+
+// True when a review row has passage content to render — either the structured
+// LSAT lines[] or a flat passage_text. Drives the two-column review layout (passage
+// on the left, stem + choices on the right); falls back to a single column when there's
+// no passage (CR / LR / most Quant & DI).
+function rowHasPassage(row) {
+  if (Array.isArray(row?.passage_lines) && row.passage_lines.length > 0) return true;
+  return splitPassageParagraphs(row?.passage_text).length > 0;
 }
 
 function parseAnswerChoices(value) {
@@ -4621,27 +4631,30 @@ function App() {
                 </div>
               </section>
 
-              <section className="question-review-layout">
-                <div className="question-review-col">
-                  {splitPassageParagraphs(questionReview.row.passage_text).length > 0 && (
+              <section className={`question-review-layout${rowHasPassage(questionReview.row) ? ' has-passage' : ''}`}>
+                {rowHasPassage(questionReview.row) && (
+                  <div className="question-review-col question-review-passage-col">
                     <div className="question-review-section">
                       <h3>Passage</h3>
                       <div className="question-passage-card">
-                        {splitPassageParagraphs(questionReview.row.passage_text).map((para, idx) => (
-                          <p key={`passage-${idx}`}>{para}</p>
-                        ))}
+                        <PassageLines
+                          lines={questionReview.row.passage_lines}
+                          text={questionReview.row.passage_text}
+                        />
                       </div>
                     </div>
-                  )}
+                  </div>
+                )}
+
+                <div className="question-review-col question-review-main-col">
                   <div className="question-review-section">
                     <h3>Question Stem</h3>
                     <div className="question-stem-card">
                       <p>{normalizeQuestionText(questionReview.row.question_stem) || 'No locally scraped stem yet.'}</p>
                     </div>
                   </div>
-                </div>
 
-                <div className="question-review-section">
+                  <div className="question-review-section">
                   <h3>
                     {getResponseSlots(questionReview.row).length
                       ? 'Response Structure'
@@ -4854,6 +4867,7 @@ function App() {
                   ) : (
                     <p className="muted">No answer choices were scraped for this question.</p>
                   )}
+                  </div>
                 </div>
               </section>
             </div>

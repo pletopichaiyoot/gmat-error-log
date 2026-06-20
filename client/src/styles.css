@@ -2060,6 +2060,11 @@ th.sortable:hover {
   gap: var(--s3);
   max-height: 320px;
   overflow-y: auto;
+  /* Skin the shared <PassageLines> gutter: --ink-2 (#4a524e) clears AA on this surface. */
+  font-size: 0.95rem;
+  line-height: 1.7;
+  color: var(--ink-dim, var(--ink));
+  --passage-gutter-color: var(--ink-2);
 }
 
 .question-passage-card p {
@@ -3323,9 +3328,17 @@ html {
     align-items: end;
   }
 
-  .question-review-layout {
+  /* Two columns only when there's a passage: passage left, stem + choices right.
+     No passage (CR / LR / most Quant & DI) stays single-column, stem over choices. */
+  .question-review-layout.has-passage {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     align-items: start;
+  }
+
+  /* Let the passage fill most of the fullscreen modal instead of a cramped 320px box,
+     so long RC passages are visible with minimal internal scrolling. */
+  .question-review-layout.has-passage .question-passage-card {
+    max-height: calc(100vh - 300px);
   }
 
   .question-annotation-grid {
@@ -3651,13 +3664,54 @@ html {
   color: var(--st-teal);
   margin-bottom: var(--s4);
 }
-.lsat-st-passage-text {
+/* LSAT player skin for the shared <PassageLines> component. */
+.lsat-st-passage-body {
   font-size: 14px;
   line-height: 1.65;
   color: var(--st-text);
-  white-space: pre-line;
-  hyphens: auto;
-  max-width: 60ch;
+  max-width: 62ch;
+  --passage-gutter-color: var(--st-text-muted);
+}
+
+/* ── Shared LSAT-style passage with left-gutter line numbers ──
+   Layout-only and skin-neutral: text color/size inherit from the container; the
+   gutter number color comes from --passage-gutter-color, which each skin sets.
+   One row per source line so question references ("lines 15-20") map exactly. */
+.passage-line {
+  display: flex;
+  align-items: baseline;
+  column-gap: 0.85rem;
+}
+/* Paragraph starts: inter-paragraph gap (not before the very first line) + the
+   real LSAT booklet's first-line indent. `para` flags the first line of each paragraph. */
+.passage-line.is-para:not(:first-child) {
+  margin-top: 0.8em;
+}
+.passage-line.is-para .passage-line-text {
+  text-indent: 1.5em;
+}
+.passage-line-num {
+  flex: 0 0 2.25ch;
+  text-align: right;
+  font-size: 0.78em;
+  font-variant-numeric: tabular-nums;
+  color: var(--passage-gutter-color, currentColor);
+  -webkit-user-select: none;
+  user-select: none;
+}
+.passage-line-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* Fallback when a passage carries no structured lines (legacy data, gaps). */
+.passage-lines-flow {
+  display: grid;
+  gap: 0.7em;
+}
+.passage-lines-flow > p {
+  margin: 0;
+  white-space: pre-wrap;
+  text-indent: 1.5em;
 }
 
 /* Question pane */

@@ -30,10 +30,12 @@ function loadLsatData() {
   return _dataCache;
 }
 
-// Resolve the passage text for one question within a section. RC sections carry a
-// `passages` array of { firstQuestion, text } — a question belongs to the passage
+// Resolve the passage for one question within a section. RC sections carry a
+// `passages` array of { firstQuestion, text, lines } — a question belongs to the passage
 // with the largest firstQuestion <= its number. LR sections have an empty passages
 // array (the stimulus lives inline in the stem), so this returns null for them.
+// Returns the matched passage object (with `.text` and the structured `.lines[]` the
+// PDF-geometry extractor writes for gutter line numbering), or null.
 function passageForQuestion(section, questionNumber) {
   const passages = (Array.isArray(section.passages) ? section.passages : [])
     .filter((p) => p && typeof p.text === 'string' && p.text.trim());
@@ -43,13 +45,15 @@ function passageForQuestion(section, questionNumber) {
     for (const p of sorted) {
       if ((p.firstQuestion || 0) <= questionNumber) match = p;
     }
-    return (match || sorted[0]).text;
+    return match || sorted[0];
   }
-  if (typeof section.passage === 'string' && section.passage.trim()) return section.passage;
+  if (typeof section.passage === 'string' && section.passage.trim()) {
+    return { text: section.passage, lines: null };
+  }
   return null;
 }
 
-// `${testNum}|${roman}|${number}` -> { stem, choices:[{label,text}], correct, kind, passage }
+// `${testNum}|${roman}|${number}` -> { stem, choices:[{label,text}], correct, kind, passage, passageLines }
 let _qIndexCache = null;
 function questionIndex() {
   if (_qIndexCache) return _qIndexCache;
@@ -58,12 +62,14 @@ function questionIndex() {
   for (const t of data.tests || []) {
     for (const s of t.sections || []) {
       for (const q of s.questions || []) {
+        const passage = passageForQuestion(s, q.number);
         idx.set(`${t.num}|${s.roman}|${q.number}`, {
           stem: q.stem || '',
           choices: Array.isArray(q.choices) ? q.choices : [],
           correct: q.correct || null,
           kind: s.kind,
-          passage: passageForQuestion(s, q.number),
+          passage: passage ? passage.text : null,
+          passageLines: passage && Array.isArray(passage.lines) ? passage.lines : null,
           difficulty: q.difficulty || null,
           difficulty_source: q.difficulty_source || null,
         });
@@ -169,6 +175,7 @@ function buildQuestionRow(s, a) {
     question_url: null,
     question_stem: q.stem || '',
     passage_text: q.passage || null,
+    passage_lines: q.passageLines || null,
     answer_choices: JSON.stringify(q.choices || []),
     response_format: 'mcq',
     response_details: null,
