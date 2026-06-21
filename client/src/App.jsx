@@ -744,6 +744,7 @@ function getSourcePlatform(sourceLabel) {
   const raw = String(sourceLabel || '').trim();
   if (!raw) return null;
   if (/lsat/i.test(raw)) return 'lsat';
+  if (/gmat\s*club\s*cat/i.test(raw)) return 'gmatclub-cat';
   if (/gmat\s*club/i.test(raw)) return 'gmatclub';
   if (/target\s*test\s*prep/i.test(raw)) return 'ttp';
   if (/official\s*practice\s*exam/i.test(raw)) return 'ope-mock';
@@ -755,6 +756,7 @@ function SourceBadge({ source }) {
   if (!platform) return <span className="muted">-</span>;
   const label =
     platform === 'lsat' ? 'LSAT' :
+    platform === 'gmatclub-cat' ? 'GMAT Club CAT' :
     platform === 'gmatclub' ? 'GMAT Club' :
     platform === 'ttp' ? 'Target Test Prep' :
     platform === 'ope-mock' ? 'Practice Exam' :
@@ -4030,7 +4032,7 @@ function App() {
                 )}
               </div>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                {sessionAnalysis.data?.session && sources.some((s) => s.label === sessionAnalysis.data.session.source && (s.platform === 'starttest' || s.platform === 'gmatclub')) && (
+                {sessionAnalysis.data?.session && sources.some((s) => s.label === sessionAnalysis.data.session.source && (s.platform === 'starttest' || s.platform === 'gmatclub' || s.platform === 'gmatclub-cat')) && (
                   <Button
                     variant="outline"
                     type="button"
