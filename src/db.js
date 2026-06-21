@@ -1158,6 +1158,7 @@ async function listSessions(runId, { limit, offset, platform, subject, startDate
         s.verbal_percentile,
         s.di_score,
         s.di_percentile,
+        s.created_at,
         ${answeredCountExpr} AS attempt_total,
         COALESCE(${answeredCorrectExpr}, 0) AS attempt_correct,
         COALESCE(${answeredWrongExpr}, 0) AS attempt_wrong,
@@ -1265,7 +1266,9 @@ async function listSessions(runId, { limit, offset, platform, subject, startDate
       LEFT JOIN question_attempts q ON q.session_id = s.id
       ${whereClause}
       GROUP BY s.id
-      ORDER BY s.session_date DESC, s.session_external_id DESC
+      -- Date is the primary key; within a day, created_at (scrape/record time, the
+      -- only real timestamp we capture — platforms give date-only) then id break ties.
+      ORDER BY s.session_date DESC NULLS LAST, s.created_at DESC, s.id DESC
       ${limitClause}
     `,
     params
@@ -2417,6 +2420,7 @@ async function getSessionAnalysis(sessionId) {
         s.verbal_percentile,
         s.di_score,
         s.di_percentile,
+        s.created_at,
         ${answeredCountExpr} AS attempt_total,
         COALESCE(${answeredCorrectExpr}, 0) AS attempt_correct,
         COALESCE(${answeredWrongExpr}, 0) AS attempt_wrong,
