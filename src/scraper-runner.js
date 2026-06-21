@@ -1361,7 +1361,28 @@ async function runGmatClubCatPhase2FromOpenBrowser(options = {}) {
       try {
         await sleepMs(jit());
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForSelector('.option', { timeout: 10000 }).catch(() => null);
+        const hasOptions = await page.waitForSelector('.option', { timeout: 10000 }).catch(() => null);
+        // The official answer letter lives in a `.correctAnswer` span that is
+        // EMPTY until the explanation is expanded. On MC pages, expand it (click
+        // the "Show Explanation"/"Show Answer" control) if no letter is present
+        // yet, then wait for the letter to populate. Non-MC DI formats
+        // (TPA/MSR/TA/GI) have no `.option` and are skipped — they'd just burn
+        // the timeout.
+        if (hasOptions) {
+          await page.evaluate(() => {
+            const hasLetter = Array.from(document.querySelectorAll('.correctAnswer'))
+              .some((e) => /^[A-H]$/.test((e.textContent || '').trim()));
+            if (!hasLetter) {
+              const btn = Array.from(document.querySelectorAll('button,a,div,span'))
+                .find((e) => /^\s*(show explanation|show answer)\s*$/i.test((e.textContent || '').trim()));
+              if (btn) btn.click();
+            }
+          }).catch(() => null);
+          await page.waitForFunction(
+            () => Array.from(document.querySelectorAll('.correctAnswer')).some((e) => /^[A-H]$/.test((e.textContent || '').trim())),
+            { timeout: 5000 }
+          ).catch(() => null);
+        }
         await page.addScriptTag({ content: scraperSource });
         const result = await page.evaluate(() => (typeof window.gmatClubCatEnrichCurrentPage === 'function'
           ? window.gmatClubCatEnrichCurrentPage() : { ok: false, reason: 'scraper-not-loaded' }));

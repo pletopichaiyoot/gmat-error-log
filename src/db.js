@@ -3140,19 +3140,33 @@ async function enrichGmatClubCatSessionAttempts({ sessionExternalId, source, enr
       const qId = String(item?.q_id || '').trim();
       if (!qId) { errors.push({ message: 'item missing q_id', url: item?.final_url }); continue; }
       const targetRow = await tx.get(
-        `SELECT id FROM question_attempts WHERE session_id = ? AND q_id = ? LIMIT 1`,
+        `SELECT id, correct FROM question_attempts WHERE session_id = ? AND q_id = ? LIMIT 1`,
         [sessionDbId, qId]
       );
       if (!targetRow) { skipped += 1; continue; }
 
+      // The view page never carries the user's pick on a direct navigation, but
+      // Phase 1 already recorded correct/wrong per question. For correctly
+      // answered questions the pick equals the correct answer, so backfill it
+      // (and flag the matching choice). Wrong picks stay unknown.
+      const letterOf = (raw) => (String(raw || '').trim().toUpperCase().match(/[A-H]/) || [null])[0];
+      const scrapedMine = letterOf(item.my_answer);
+      const correctLetter = letterOf(item.correct_answer);
+      const effectiveMine = scrapedMine
+        || (Number(targetRow.correct) === 1 ? correctLetter : null)
+        || '';
+
       const choices = Array.isArray(item.choices) ? item.choices : [];
       const answerChoicesArr = choices
-        .map((c) => ({
-          label: String(c?.label || '').trim() || null,
-          text: String(c?.text || '').trim() || null,
-          isCorrect: !!c?.isCorrect,
-          isUserSelected: !!c?.isUserSelected,
-        }))
+        .map((c) => {
+          const label = String(c?.label || '').trim() || null;
+          return {
+            label,
+            text: String(c?.text || '').trim() || null,
+            isCorrect: !!c?.isCorrect,
+            isUserSelected: !!c?.isUserSelected || (!!effectiveMine && label === effectiveMine),
+          };
+        })
         .filter((c) => c.label || c.text);
 
       try {
@@ -3170,7 +3184,7 @@ async function enrichGmatClubCatSessionAttempts({ sessionExternalId, source, enr
             answerChoicesArr.length,
             answerChoicesArr.length ? JSON.stringify(answerChoicesArr) : null,
             item.correct_answer || '',
-            item.my_answer || '',
+            effectiveMine,
             item.final_url || '',
             item.explanation || '',
             targetRow.id,
