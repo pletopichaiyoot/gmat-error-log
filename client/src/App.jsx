@@ -3252,6 +3252,7 @@ function App() {
               <option value="starttest">Official Guide</option>
               <option value="ope-mock">Practice Exam</option>
               <option value="gmatclub">GMAT Club</option>
+              <option value="gmatclub-cat">GMAT Club CAT</option>
               <option value="ttp">Target Test Prep</option>
               <option value="lsat">LSAT</option>
             </Select>
@@ -3451,6 +3452,7 @@ function App() {
                       <option value="">All sources</option>
                       <option value="starttest">Official Guide</option>
                       <option value="gmatclub">GMAT Club</option>
+                      <option value="gmatclub-cat">GMAT Club CAT</option>
                       <option value="ttp">Target Test Prep</option>
                       <option value="lsat">LSAT</option>
                     </Select>
