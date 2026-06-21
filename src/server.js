@@ -70,6 +70,7 @@ const {
   runGmatClubPhase2FromOpenBrowser,
   openStartTestProductInOpenBrowser,
   runTtpScrapeFromOpenBrowser,
+  runGmatClubCatScrapeFromOpenBrowser,
   runOpeListAttemptsFromOpenBrowser,
   runOpeMockScrapeFromOpenBrowser,
   runOpePhase3FromOpenBrowser,
@@ -215,6 +216,17 @@ const SOURCE_PRESETS = [
     reviewCategoryId: null,
     defaultSince: '20250101000000',
     scraperFile: 'gmat_club_scraper.js',
+    tabPattern: 'gmatclub\\.com',
+  },
+  {
+    id: 'gmat-club-cat',
+    label: 'GMAT Club CAT',
+    platform: 'gmatclub-cat',
+    appUrl: 'https://gmatclub.com/gmat-focus-tests/?page=tests',
+    clientId: null,
+    reviewCategoryId: null,
+    defaultSince: '20250101000000',
+    scraperFile: 'gmat_club_cat_scraper.js',
     tabPattern: 'gmatclub\\.com',
   },
   {
@@ -531,7 +543,7 @@ app.get('/api/sessions', async (req, res) => {
     const page = Math.max(1, Number(req.query.page || 1));
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
     const offset = (page - 1) * pageSize;
-    const platform = ['gmatclub', 'starttest', 'ttp', 'ope-mock', 'lsat'].includes(req.query.platform) ? req.query.platform : null;
+    const platform = ['gmatclub', 'gmatclub-cat', 'starttest', 'ttp', 'ope-mock', 'lsat'].includes(req.query.platform) ? req.query.platform : null;
     const subject = ['Q', 'V', 'DI', 'RC', 'CR'].includes(String(req.query.subject || '').toUpperCase())
       ? String(req.query.subject).toUpperCase()
       : null;
@@ -615,7 +627,7 @@ app.get('/api/errors', async (req, res) => {
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
     const offset = (page - 1) * pageSize;
 
-    const platform = ['gmatclub', 'starttest', 'ttp', 'ope-mock', 'lsat'].includes(req.query.platform) ? req.query.platform : null;
+    const platform = ['gmatclub', 'gmatclub-cat', 'starttest', 'ttp', 'ope-mock', 'lsat'].includes(req.query.platform) ? req.query.platform : null;
     const subjectRaw = String(req.query.subject || '').toUpperCase();
     const sortKey = req.query.sortKey || 'session_date';
     const sortOrder = req.query.sortOrder === 'asc' ? 'asc' : 'desc';
@@ -1304,6 +1316,15 @@ app.post('/api/scrape', async (req, res) => {
       const result = await runTtpScrapeFromOpenBrowser({
         sourceId: preset.id,
         cdpUrl: validatedCdpUrl,
+      });
+      data = result.data;
+      tabUrl = result.tabUrl;
+      debug = result.debug;
+    } else if (preset.platform === 'gmatclub-cat') {
+      const result = await runGmatClubCatScrapeFromOpenBrowser({
+        cdpUrl: validatedCdpUrl,
+        since: sinceValue,
+        source: preset.label,
       });
       data = result.data;
       tabUrl = result.tabUrl;

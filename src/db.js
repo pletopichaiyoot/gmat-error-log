@@ -1059,11 +1059,11 @@ async function getLatestRunId() {
 
 function platformWhereClause(platform) {
   // Heuristic match — matches the frontend's getSourcePlatform().
-  if (platform === 'gmatclub') return "LOWER(COALESCE(s.source, '')) LIKE '%gmat club%'";
+  if (platform === 'gmatclub-cat') return "LOWER(COALESCE(s.source, '')) LIKE '%gmat club cat%'";
+  if (platform === 'gmatclub') return "LOWER(COALESCE(s.source, '')) LIKE '%gmat club%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%gmat club cat%'";
   if (platform === 'ttp') return "LOWER(COALESCE(s.source, '')) LIKE '%target test prep%'";
   if (platform === 'ope-mock') return "LOWER(COALESCE(s.source, '')) LIKE '%practice exam%'";
   if (platform === 'starttest') {
-    // Official Guide books: anything that's not gmatclub, ttp, or an OPE mock.
     return "LOWER(COALESCE(s.source, '')) NOT LIKE '%gmat club%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%target test prep%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%practice exam%'";
   }
   return null;
@@ -4578,4 +4578,5 @@ module.exports = {
   updateMockResult,
   deleteMockResult,
   seedMockResultsIfEmpty,
+  _sqlInternals: { platformWhereClause },
 };
