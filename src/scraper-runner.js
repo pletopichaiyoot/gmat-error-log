@@ -1321,6 +1321,78 @@ async function runGmatClubCatScrapeFromOpenBrowser(options = {}) {
   }
 }
 
+async function runGmatClubCatPhase2FromOpenBrowser(options = {}) {
+  const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
+  const targets = Array.isArray(options.targets) ? options.targets : [];
+  if (!targets.length) {
+    const err = new Error('Phase 2 requires at least one target { url, q_id }.');
+    err.statusCode = 400; throw err;
+  }
+  const minDelayMs = Number.isFinite(Number(options.minDelayMs)) ? Number(options.minDelayMs) : 1500;
+  const maxDelayMs = Number.isFinite(Number(options.maxDelayMs)) ? Number(options.maxDelayMs) : 3000;
+  const sleepMs = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms | 0)));
+  const jit = () => Math.round(minDelayMs + Math.random() * (maxDelayMs - minDelayMs));
+
+  const startedAt = new Date().toISOString();
+  const consoleLogs = []; const pageErrors = []; const progressEvents = [];
+  const pushLog = (t, e, limit = 800) => { t.push(e); if (t.length > limit) t.shift(); };
+
+  let browser = null; let page = null; let onConsole = null; let onPageError = null;
+  const scraperSource = await loadScraperSource(path.resolve(__dirname, 'scrapers', 'gmat_club_cat_question_scraper.js'));
+  try {
+    const cdp = await connectBrowserOverCdp(requestedCdpUrl);
+    browser = cdp.browser;
+    const pages = browser.contexts().flatMap((ctx) => ctx.pages());
+    page = pages.find((p) => /gmatclub\.com/i.test(p.url())) || pages.find((p) => p.url() === 'about:blank') || pages[0];
+    if (!page) throw new Error('No gmatclub.com tab found. Open GMAT Club in your logged-in tab first.');
+    page.setDefaultTimeout(0);
+    await page.bringToFront();
+    onConsole = (msg) => pushLog(consoleLogs, { at: new Date().toISOString(), type: msg.type(), text: clipText(msg.text(), 1200) });
+    onPageError = (e) => pushLog(pageErrors, { at: new Date().toISOString(), text: clipText(e?.stack || e?.message || String(e), 2000) }, 50);
+    page.on('console', onConsole); page.on('pageerror', onPageError);
+
+    const items = []; const errors = [];
+    const maxErrors = Math.max(5, Math.ceil(targets.length / 4));
+    for (let i = 0; i < targets.length; i += 1) {
+      const t = targets[i];
+      const url = String(t?.url || '').trim();
+      if (!/^https?:\/\/(?:www\.)?gmatclub\.com\//i.test(url)) { errors.push({ q_id: t?.q_id || null, url, reason: 'invalid-url' }); continue; }
+      pushLog(progressEvents, { at: new Date().toISOString(), kind: 'navigate', i, total: targets.length, url });
+      try {
+        await sleepMs(jit());
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForSelector('.option', { timeout: 10000 }).catch(() => null);
+        await page.addScriptTag({ content: scraperSource });
+        const result = await page.evaluate(() => (typeof window.gmatClubCatEnrichCurrentPage === 'function'
+          ? window.gmatClubCatEnrichCurrentPage() : { ok: false, reason: 'scraper-not-loaded' }));
+        if (!result?.ok) { errors.push({ q_id: t.q_id || null, url, reason: result?.reason || 'unknown' });
+          if (errors.length > maxErrors) throw new Error(`Too many Phase 2 errors (${errors.length}); aborting.`);
+          continue; }
+        items.push({
+          q_id: t.q_id || null,
+          stem: result.stem || '',
+          choices: Array.isArray(result.choices) ? result.choices : [],
+          correct_answer: result.correct_answer || '',
+          my_answer: result.my_answer || '',
+          explanation: result.explanation || '',
+          final_url: result.url || page.url(),
+        });
+      } catch (err) {
+        errors.push({ q_id: t.q_id || null, url, reason: err.message });
+        if (errors.length > maxErrors) throw err;
+      }
+    }
+    return {
+      result: { items, errors },
+      debug: { startedAt, finishedAt: new Date().toISOString(), cdpUrl: cdp.connectedUrl, targets: targets.length, progressEvents, consoleLogs, pageErrors },
+    };
+  } finally {
+    if (page && onConsole) page.off('console', onConsole);
+    if (page && onPageError) page.off('pageerror', onPageError);
+    // No browser.close().
+  }
+}
+
 // ─── OPE Mock scraper runners ──────────────────────────────────────────────
 // Two-step UX: (1) list takes for the chosen OPE so the user picks one,
 // (2) scrape that take's Score Report. The user must have the OPE landing
@@ -1669,6 +1741,7 @@ module.exports = {
   openStartTestProductInOpenBrowser,
   runTtpScrapeFromOpenBrowser,
   runGmatClubCatScrapeFromOpenBrowser,
+  runGmatClubCatPhase2FromOpenBrowser,
   runOpeListAttemptsFromOpenBrowser,
   runOpeMockScrapeFromOpenBrowser,
   runOpePhase3FromOpenBrowser,

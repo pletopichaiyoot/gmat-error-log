@@ -3120,6 +3120,73 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
   return { sessionDbId, matched: enrichedItems.length, updated, skipped, errors };
 }
 
+// GMAT Club CAT Phase 2 writer. Matches rows by q_id ("gcc-att-{instanceId}").
+// Unlike enrichGmatClubSessionAttempts, this PRESERVES per-choice flags
+// (isCorrect/isUserSelected) so the review-modal color coding works, and stores
+// the explanation in response_details.
+async function enrichGmatClubCatSessionAttempts({ sessionExternalId, source, enrichedItems }) {
+  const sessionRow = await get(
+    `SELECT id FROM sessions WHERE session_external_id = ? AND COALESCE(source, '') = COALESCE(?, '') ORDER BY id DESC LIMIT 1`,
+    [Number(sessionExternalId) || sessionExternalId, source || null]
+  );
+  if (!sessionRow?.id) {
+    return { matched: 0, updated: 0, skipped: 0, errors: [{ message: 'session-not-found', sessionExternalId, source }] };
+  }
+  const sessionDbId = sessionRow.id;
+  let updated = 0; let skipped = 0; const errors = [];
+
+  await withTransaction(async (tx) => {
+    for (const item of (Array.isArray(enrichedItems) ? enrichedItems : [])) {
+      const qId = String(item?.q_id || '').trim();
+      if (!qId) { errors.push({ message: 'item missing q_id', url: item?.final_url }); continue; }
+      const targetRow = await tx.get(
+        `SELECT id FROM question_attempts WHERE session_id = ? AND q_id = ? LIMIT 1`,
+        [sessionDbId, qId]
+      );
+      if (!targetRow) { skipped += 1; continue; }
+
+      const choices = Array.isArray(item.choices) ? item.choices : [];
+      const answerChoicesArr = choices
+        .map((c) => ({
+          label: String(c?.label || '').trim() || null,
+          text: String(c?.text || '').trim() || null,
+          isCorrect: !!c?.isCorrect,
+          isUserSelected: !!c?.isUserSelected,
+        }))
+        .filter((c) => c.label || c.text);
+
+      try {
+        await tx.run(
+          `UPDATE question_attempts
+             SET question_stem = COALESCE(NULLIF(?, ''), question_stem),
+                 answer_choices = CASE WHEN ? > 0 THEN ? ELSE answer_choices END,
+                 correct_answer = COALESCE(NULLIF(?, ''), correct_answer),
+                 my_answer = COALESCE(NULLIF(?, ''), my_answer),
+                 question_url = COALESCE(NULLIF(?, ''), question_url),
+                 response_details = COALESCE(NULLIF(?, ''), response_details)
+           WHERE id = ?`,
+          [
+            item.stem || '',
+            answerChoicesArr.length,
+            answerChoicesArr.length ? JSON.stringify(answerChoicesArr) : null,
+            item.correct_answer || '',
+            item.my_answer || '',
+            item.final_url || '',
+            item.explanation || '',
+            targetRow.id,
+          ]
+        );
+        updated += 1;
+      } catch (err) {
+        errors.push({ q_id: qId, message: err.message });
+      }
+    }
+    await refreshSessionTimingAggregates(sessionDbId, tx.run);
+  });
+
+  return { sessionDbId, matched: (enrichedItems || []).length, updated, skipped, errors };
+}
+
 // OPE Phase 3 enrichment writer. Matches rows by q_id = "ope-${itemName}-p${positionInSection}"
 // (the composite Phase 2 wrote). Updates stem, choices, my_answer, correct_answer,
 // difficulty, and replaces time_sec with the precise ms-based vPreviousTimeSpent.
@@ -4529,6 +4596,7 @@ module.exports = {
   saveScrapeResult,
   enrichSessionAttempts,
   enrichGmatClubSessionAttempts,
+  enrichGmatClubCatSessionAttempts,
   enrichOpeSessionAttempts,
   listGmatClubEnrichTargets,
   recomputeIrtCutoffs,

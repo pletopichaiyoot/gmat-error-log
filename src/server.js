@@ -10,6 +10,7 @@ const {
   saveScrapeResult,
   enrichSessionAttempts,
   enrichGmatClubSessionAttempts,
+  enrichGmatClubCatSessionAttempts,
   enrichOpeSessionAttempts,
   listGmatClubEnrichTargets,
   listRuns,
@@ -71,6 +72,7 @@ const {
   openStartTestProductInOpenBrowser,
   runTtpScrapeFromOpenBrowser,
   runGmatClubCatScrapeFromOpenBrowser,
+  runGmatClubCatPhase2FromOpenBrowser,
   runOpeListAttemptsFromOpenBrowser,
   runOpeMockScrapeFromOpenBrowser,
   runOpePhase3FromOpenBrowser,
@@ -1114,6 +1116,21 @@ app.post('/api/sessions/:sessionId/enrich', async (req, res) => {
         targets: targets.map((t) => ({ q_id: t.q_id, q_code: t.q_code, url: t.question_url })),
       });
       dbResult = await enrichGmatClubSessionAttempts({
+        sessionExternalId: sessionRow.session_external_id,
+        source: sessionRow.source,
+        enrichedItems: phase2.result?.items || [],
+      });
+    } else if (preset.platform === 'gmatclub-cat') {
+      const targets = await listGmatClubEnrichTargets(sessionRow.id);
+      if (!targets.length) {
+        res.status(400).json({ ok: false, error: 'No questions in this session have a question_url to enrich.' });
+        return;
+      }
+      phase2 = await runGmatClubCatPhase2FromOpenBrowser({
+        cdpUrl: validatedCdpUrl,
+        targets: targets.map((t) => ({ q_id: t.q_id, q_code: t.q_code, url: t.question_url })),
+      });
+      dbResult = await enrichGmatClubCatSessionAttempts({
         sessionExternalId: sessionRow.session_external_id,
         source: sessionRow.source,
         enrichedItems: phase2.result?.items || [],
