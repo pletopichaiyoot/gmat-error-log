@@ -1361,7 +1361,7 @@ th.sortable:hover {
 .source-chip.source-gmatclub-cat {
   background: rgba(13, 148, 136, 0.12);
   color: #0f766e;
-  border-color: rgba(13, 148, 136, 0.30);
+  border: 1px solid rgba(13, 148, 136, 0.30);
 }
 
 .source-chip.source-ttp {
