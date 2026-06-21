@@ -25,6 +25,19 @@ test('parseTypeCell tolerates missing topic / blank', () => {
     { subjectCode: null, categoryCode: null, topic: null });
 });
 
+test('parseTypeCell preserves topics that contain slashes', () => {
+  // The Section / Code / Topic delimiter is " / ", but topics use it internally
+  // too (and sometimes an unspaced "/"). The whole topic must survive.
+  assert.deepEqual(parseTypeCell('Data Insights / DS / Distance / Rate Problems'),
+    { subjectCode: 'DI', categoryCode: 'DS', topic: 'Distance / Rate Problems' });
+  assert.deepEqual(parseTypeCell('Quantitative / PS / Fractions / Ratios / Decimals'),
+    { subjectCode: 'Q', categoryCode: 'PS', topic: 'Fractions / Ratios / Decimals' });
+  assert.deepEqual(parseTypeCell('Quantitative / PS / Work / Rate problems'),
+    { subjectCode: 'Q', categoryCode: 'PS', topic: 'Work / Rate problems' });
+  assert.deepEqual(parseTypeCell('Data Insights / DS / Properties of Sets/Statistics'),
+    { subjectCode: 'DI', categoryCode: 'DS', topic: 'Properties of Sets/Statistics' });
+});
+
 test('mapSectionToSubject', () => {
   assert.equal(mapSectionToSubject('Quant'), 'Q');
   assert.equal(mapSectionToSubject('Quantitative Reasoning'), 'Q');

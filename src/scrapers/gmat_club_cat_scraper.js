@@ -46,11 +46,19 @@ function mapSectionToSubject(section) {
 }
 
 function parseTypeCell(text) {
-  const parts = String(text || '').split('/').map((p) => p.replace(/\s+/g, ' ').trim()).filter(Boolean);
-  if (!parts.length) return { subjectCode: null, categoryCode: null, topic: null };
+  // Type cell shape: "Section / Code / Topic" delimited by " / ". The TOPIC
+  // frequently contains the same delimiter ("Distance / Rate Problems",
+  // "Fractions / Ratios / Decimals", "Work / Rate problems") and sometimes an
+  // unspaced slash ("Properties of Sets/Statistics"). So split ONLY on the
+  // spaced delimiter and rejoin everything after the code back into the topic —
+  // section/code are always single slash-free tokens, so parts[0]/parts[1] are
+  // safe and the remainder reconstructs the full topic losslessly.
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return { subjectCode: null, categoryCode: null, topic: null };
+  const parts = raw.split(/\s+\/\s+/);
   const subjectCode = mapSectionToSubject(parts[0]);
   const categoryCode = parts[1] ? parts[1].toUpperCase() : null;
-  const topic = parts[2] || null;
+  const topic = parts.length > 2 ? parts.slice(2).join(' / ') : null;
   return { subjectCode, categoryCode, topic };
 }
 
