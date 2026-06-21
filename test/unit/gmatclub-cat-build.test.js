@@ -3,6 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { buildSession } = require('../../src/scrapers/gmat_club_cat_scraper')._internals;
+const { deriveQuestionMetadata } = require('../../src/question-metadata');
 
 const gridRows = [
   { num: 1, qcode: 'I02-10', instanceId: '43972530', viewUrl: 'https://gmatclub.com/gmat-focus-tests/view-43972530.html',
@@ -36,4 +37,23 @@ test('buildSession builds a Mixed session with scoreSummary + questions', () => 
   assert.equal(q1.question_url, 'https://gmatclub.com/gmat-focus-tests/view-43972530.html');
   assert.equal(s.wrong_q_ids.length, 1);
   assert.equal(s.wrong_q_ids[0].q_id, 'gcc-att-43972530');
+});
+
+test('buildSession sets authoritative category_code from the grid Type code', () => {
+  const s = buildSession({ testId: '1', source: 'GMAT Club CAT', scoreSummary,
+    gridRows: [{ num: 1, qcode: 'M27-04', instanceId: '43973474', viewUrl: 'u',
+      typeText: 'Data Insights / DS / Overlapping Sets', correct: false, difficulty: 'Medium', timeRaw: '2:00', dateRaw: 'Jun 21, 2026 12:00 AM' }] });
+  assert.equal(s.questions[0].category_code, 'DS');
+  assert.equal(s.questions[0].subject_code, 'DI');
+});
+
+test('DS question with a Quant-named topic classifies as DI/DS, not Q/PS', () => {
+  // Regression: "Overlapping Sets" is also a Quant PS topic. A DS row must keep
+  // its authoritative DI/DS code and not get re-inferred to Q/PS from the topic.
+  const s = buildSession({ testId: '1', source: 'GMAT Club CAT', scoreSummary,
+    gridRows: [{ num: 1, qcode: 'M27-04', instanceId: '43973474', viewUrl: 'u',
+      typeText: 'Data Insights / DS / Overlapping Sets', correct: false, difficulty: 'Medium', timeRaw: '2:00', dateRaw: 'Jun 21, 2026 12:00 AM' }] });
+  const meta = deriveQuestionMetadata(s.questions[0], s);
+  assert.equal(meta.category_code, 'DS');
+  assert.equal(meta.subject_code, 'DI');
 });

@@ -154,6 +154,13 @@ function buildSession({ testId, source, scoreSummary, gridRows }) {
       answer_choices: null,
       subject_sub: null,
       subject_sub_raw: t.categoryCode,
+      // The grid Type cell is authoritative, so set category_code directly (not
+      // just subject_sub_raw). deriveQuestionMetadata consults category_code
+      // FIRST, before topic-based inference — otherwise a DS question whose
+      // topic is a Quant-named label (e.g. "Overlapping Sets") gets re-inferred
+      // to PS/Q. The view-page question codes ("M..."/"V..."/"I...") are NOT a
+      // section signal — DS items carry "M" codes but are Data Insights.
+      category_code: t.categoryCode,
       subject_code: t.subjectCode,
       content_domain: null,
       response_format: null,
