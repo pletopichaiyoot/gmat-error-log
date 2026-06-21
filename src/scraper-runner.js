@@ -513,6 +513,11 @@ const {
   runScrape: runTtpScrape,
 } = require('./scrapers/ttp_scraper');
 
+const {
+  runScrape: runGmatClubCatScrape,
+  ScrapeAnomalyError: GmatClubCatAnomalyError,
+} = require('./scrapers/gmat_club_cat_scraper');
+
 const STARTTEST_TAB_RE = /starttest\.com/i;
 const TTP_TAB_RE = /gmat\.targettestprep\.com/i;
 const GMATCLUB_HOME_URL = 'https://gmatclub.com/forum/analytics.php#error_log';
@@ -1237,6 +1242,85 @@ async function runTtpScrapeFromOpenBrowser(options = {}) {
   }
 }
 
+async function runGmatClubCatScrapeFromOpenBrowser(options = {}) {
+  const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
+  const source = options.source || 'GMAT Club CAT';
+  const startedAt = new Date().toISOString();
+  const consoleLogs = [];
+  const pageErrors = [];
+  const progressEvents = [];
+  const pushLog = (target, entry, limit = 800) => { target.push(entry); if (target.length > limit) target.shift(); };
+
+  let browser = null;
+  let connectedCdpUrl = requestedCdpUrl;
+  let attemptedCdpUrls = [requestedCdpUrl];
+  let cdpFallbackUsed = false;
+  let page = null;
+  let onConsole = null;
+  let onPageError = null;
+  try {
+    const cdpConnection = await connectBrowserOverCdp(requestedCdpUrl);
+    browser = cdpConnection.browser;
+    connectedCdpUrl = cdpConnection.connectedUrl;
+    attemptedCdpUrls = cdpConnection.attemptedUrls;
+    cdpFallbackUsed = cdpConnection.fallbackUsed;
+
+    const pages = browser.contexts().flatMap((ctx) => ctx.pages());
+    page = pages.find((p) => /gmatclub\.com/i.test(p.url())) || pages.find((p) => p.url() === 'about:blank') || pages[0];
+    if (!page) {
+      throw new Error('No gmatclub.com tab found. Open https://gmatclub.com/gmat-focus-tests/?page=tests in your logged-in tab first.');
+    }
+    page.setDefaultTimeout(0);
+    await page.bringToFront();
+
+    onConsole = (msg) => pushLog(consoleLogs, { at: new Date().toISOString(), type: msg.type(), text: clipText(msg.text(), 1200) });
+    onPageError = (error) => pushLog(pageErrors, { at: new Date().toISOString(), text: clipText(error?.stack || error?.message || String(error), 2000) }, 50);
+    page.on('console', onConsole);
+    page.on('pageerror', onPageError);
+
+    const data = await runGmatClubCatScrape({
+      page,
+      options: {
+        since: options.since,
+        source,
+        minDelayMs: Number(options.minDelayMs) || 1500,
+        maxDelayMs: Number(options.maxDelayMs) || 3000,
+        onProgress: (evt) => pushLog(progressEvents, { at: new Date().toISOString(), ...evt }, 800),
+      },
+    });
+
+    const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+    return {
+      data,
+      tabUrl: page.url(),
+      debug: {
+        startedAt, finishedAt: new Date().toISOString(),
+        cdpUrl: connectedCdpUrl, requestedCdpUrl, attemptedCdpUrls, cdpFallbackUsed,
+        source,
+        diagnostics: {
+          sessions: sessions.length,
+          questions: sessions.reduce((sum, s) => sum + (s.stats?.total_q_api || 0), 0),
+          warnings: Array.isArray(data?.warnings) ? data.warnings.length : 0,
+        },
+        progressEvents, consoleLogs, pageErrors,
+      },
+    };
+  } catch (error) {
+    error.scrapeDebug = {
+      startedAt, finishedAt: new Date().toISOString(),
+      cdpUrl: connectedCdpUrl, requestedCdpUrl, attemptedCdpUrls, cdpFallbackUsed,
+      source, tabUrl: page?.url?.() || null,
+      progressEvents, consoleLogs, pageErrors,
+      anomaly: error instanceof GmatClubCatAnomalyError ? { name: error.name, url: error.url, snippet: error.snippet } : null,
+    };
+    throw error;
+  } finally {
+    if (page && onConsole) page.off('console', onConsole);
+    if (page && onPageError) page.off('pageerror', onPageError);
+    // No browser.close() — preserve the user's logged-in GMAT Club session.
+  }
+}
+
 // ─── OPE Mock scraper runners ──────────────────────────────────────────────
 // Two-step UX: (1) list takes for the chosen OPE so the user picks one,
 // (2) scrape that take's Score Report. The user must have the OPE landing
@@ -1584,6 +1668,7 @@ module.exports = {
   runGmatClubPhase2FromOpenBrowser,
   openStartTestProductInOpenBrowser,
   runTtpScrapeFromOpenBrowser,
+  runGmatClubCatScrapeFromOpenBrowser,
   runOpeListAttemptsFromOpenBrowser,
   runOpeMockScrapeFromOpenBrowser,
   runOpePhase3FromOpenBrowser,
