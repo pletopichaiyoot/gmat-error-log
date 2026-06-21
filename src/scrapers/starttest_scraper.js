@@ -1331,6 +1331,16 @@ async function readReviewFrame(frame) {
   }
   for (const k of ['stemHtml', 'passageHtml', 'keyPointHtml', 'rationaleHtml']) delete data[k];
 
+  // On many CR items `.passage-block` is just the bare "Passage:" heading — the
+  // actual argument lives in `.ITSStemText`. Strip the label; if nothing real is
+  // left, blank it out so (a) we never persist a useless "Passage:" stub and (b)
+  // the split below can lift the real argument out of the stem (its guard treats
+  // a non-empty data.passage as authoritative). A genuine `.passage-block` body
+  // (RC) survives, just without a leading "Passage:" label.
+  if (data.passage) {
+    data.passage = data.passage.replace(/^\s*passage\s*:?\s*/i, '').trim();
+  }
+
   // StartTest's `.ITSStemText` is the whole item body, so single-choice stems
   // arrive as: boilerplate + prompt + (CR) argument + every choice text. Split
   // out the prompt, lift any CR argument into `passage`, and drop the duplicated

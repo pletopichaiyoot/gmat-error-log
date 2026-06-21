@@ -140,15 +140,21 @@
   }
 
   function mapDifficulty(raw) {
-    // Bands: "555-605", "605-655", "655-705", "705-805", "805+"
+    // GMAT Club's own Focus-scale band → tier mapping, taken verbatim from
+    // their Difficulty filter UI. Seven bands, bucketed on the lower bound:
+    //   Easy:   "Sub 505", "505-555"           (low < 555)
+    //   Medium: "555-605", "605-655"           (555 <= low < 655)
+    //   Hard:   "655-705", "705-805", "805+"   (low >= 655)
+    // Title-cased to match the StartTest/OPE difficulty labels (downstream
+    // aggregation is case-insensitive, but raw display elsewhere is not).
     if (!raw) return null;
     const m = String(raw).match(/(\d+)/);
     if (!m) return null;
     const low = parseInt(m[1], 10);
     if (!Number.isFinite(low)) return null;
-    if (low < 650) return 'EASY';
-    if (low < 705) return 'MEDIUM';
-    return 'HARD';
+    if (low < 555) return 'Easy';
+    if (low < 655) return 'Medium';
+    return 'Hard';
   }
 
   function extractTopicId(url) {
