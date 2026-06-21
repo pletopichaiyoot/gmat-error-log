@@ -99,10 +99,19 @@ function parseScoreReport(rows) {
     else if (/verbal/.test(label)) { bucket = 'verbal'; lo = 60; hi = 90; }
     else if (/data insight/.test(label)) { bucket = 'di'; lo = 60; hi = 90; }
     if (!bucket) continue;
-    // The score is the last in-range integer that is NOT the min/max bound.
-    const nums = (valsText.match(/\d+(?:\.\d+)?/g) || []).map((n) => parseFloat(n));
-    const candidates = nums.filter((n) => Number.isInteger(n) && n >= lo && n <= hi && n !== lo && n !== hi);
-    out[bucket] = { score: candidates.length ? candidates[candidates.length - 1] : firstIntInRange(valsText, lo, hi), percentile };
+    // Values text is "min mean score max" where mean is the only float.
+    // Keep only pure-integer tokens; the score is the middle one (ints[1]).
+    const ints = (valsText.match(/\d+(?:\.\d+)?/g) || [])
+      .filter((t) => /^\d+$/.test(t))
+      .map(Number);
+    let score;
+    if (ints.length === 3) {
+      score = ints[1];
+    } else {
+      const inRange = ints.filter((n) => n >= lo && n <= hi);
+      score = inRange.length ? inRange[inRange.length - 1] : null;
+    }
+    out[bucket] = { score, percentile };
   }
   return out;
 }

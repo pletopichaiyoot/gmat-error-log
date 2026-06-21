@@ -59,6 +59,11 @@ test('parseScoreReport extracts section scores + percentiles', () => {
   assert.deepEqual(got.di, { score: 74, percentile: 41 });
 });
 
+test('parseScoreReport handles boundary score (perfect Quant 90)', () => {
+  const got = parseScoreReport([['Quantitative Reasoning', '99th', '60 90.00 90 90']]);
+  assert.deepEqual(got.quant, { score: 90, percentile: 99 });
+});
+
 test('parseSinceDateKey', () => {
   assert.equal(parseSinceDateKey('20250101000000'), '2025-01-01');
   assert.equal(parseSinceDateKey(''), '');
