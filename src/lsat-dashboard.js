@@ -125,6 +125,7 @@ function buildSessionRow(s, atts) {
     run_id: 'lsat',
     session_external_id: `lsat-${s.id}`,
     session_date: s.started_at,
+    created_at: s.started_at,
     source: sourceLabel(s),
     subject: subjectForKind(s.section_kind),
     subject_code: null,

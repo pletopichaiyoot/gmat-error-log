@@ -2249,6 +2249,9 @@ function App() {
       let valB = b[key] ?? '';
 
       if (key === 'session_date') {
+        // session_date is date-only (LSAT rows carry a full timestamp). Tie-break
+        // same-day rows by created_at (record time) then id below, so the table
+        // sorts by date AND time, not date alone.
         valA = new Date(valA).getTime();
         valB = new Date(valB).getTime();
       } else if (typeof valA === 'string') {
@@ -2258,7 +2261,14 @@ function App() {
 
       if (valA < valB) return order === 'asc' ? -1 : 1;
       if (valA > valB) return order === 'asc' ? 1 : -1;
-      return 0;
+
+      // Deterministic tie-break: most-recently-recorded first, then id.
+      const tA = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const tB = b.created_at ? new Date(b.created_at).getTime() : 0;
+      if (tA !== tB) return order === 'asc' ? tA - tB : tB - tA;
+      const idA = Number(a.id) || 0;
+      const idB = Number(b.id) || 0;
+      return order === 'asc' ? idA - idB : idB - idA;
     });
 
     return list;
