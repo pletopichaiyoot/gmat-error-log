@@ -32,6 +32,8 @@
 //     data= blob on the cmd=item iframe URL) for stable upserts across rescrapes.
 //   - q_code namespace prefixed `ope-` to avoid collisions with practice books.
 
+const { sanitizeStemHtml, stemHtmlToText } = require('./ope-stem');
+
 const STARTTEST_HOST_RE = /starttest\.com/i;
 const ITDSTART_HOST_RE = /ITDStart\.aspx/i;
 
@@ -1070,24 +1072,55 @@ async function readReviewAllFrame(frame) {
           || null;
         const text = extractOptionText(textSpan);
         const letter = VALUE_TO_LETTER[Number(r.value)] || r.value;
+        // Like the stem, math answer choices (fractions, radicals, expressions)
+        // render as inline raster <img> with no alt, so extractOptionText comes
+        // back empty/mangled. Capture the option's HTML (chrome stripped) so the
+        // Node side can keep the equation image and derive a clean text label.
+        let textHtml = null;
+        if (textSpan && textSpan.querySelector('img, sup, sub')) {
+          const clone = textSpan.cloneNode(true);
+          clone.querySelectorAll('.solIcon, script, style, button, input, [role="button"], [aria-hidden="true"]').forEach((n) => n.remove());
+          textHtml = clone.innerHTML;
+        }
         return {
           label: letter,
           value: r.value,
           text,
+          textHtml,
           isUserSelected: !!r.checked,
           isCorrect: String(r.value) === String(correctKey),
         };
       });
     }
 
-    let bodyText = (document.body?.innerText || '').replace(/\r\n/g, '\n');
-    bodyText = bodyText.replace(
-      /^This is a read only version[^.]*\.[^.]*\.[^.]*\.\s*/i,
-      '',
-    ).trim();
-    const cutMatch = bodyText.match(/\n\s*A[)\s]\s*[^\n]/);
-    let stem = cutMatch ? bodyText.slice(0, cutMatch.index).trim() : bodyText;
-    stem = stem.replace(/\n\s*(?:Comments?|Rationale|Key Point):.*$/is, '').trim();
+    // Stem extraction. Prefer the dedicated .ITSStemText container: it holds the
+    // full item body (prompt + CR argument / DS statements) but NOT the answer
+    // choices (those are separate .ITSMCOptionText spans). OPE renders inline
+    // math as raster <img> (base64 data: URIs, no alt text), which innerText
+    // silently drops — gutting Quant/DS stems. So we return the container's HTML
+    // (status icon + UI chrome stripped) and let the Node side keep the equation
+    // images while deriving a clean text stem. Falls back to the original
+    // body-innerText "cut at A)" approach for any frame without .ITSStemText, so
+    // those item types are byte-for-byte unaffected.
+    const stemEl = document.querySelector('.ITSStemText')
+      || document.querySelector('.stem-container-inner')
+      || document.querySelector('.stem-block-inner');
+    let stem = '';
+    let stemHtml = null;
+    if (stemEl) {
+      const clone = stemEl.cloneNode(true);
+      clone.querySelectorAll('.solIcon, script, style, button, input, select, [role="button"], [aria-hidden="true"]').forEach((n) => n.remove());
+      stemHtml = clone.innerHTML;
+    } else {
+      let bodyText = (document.body?.innerText || '').replace(/\r\n/g, '\n');
+      bodyText = bodyText.replace(
+        /^This is a read only version[^.]*\.[^.]*\.[^.]*\.\s*/i,
+        '',
+      ).trim();
+      const cutMatch = bodyText.match(/\n\s*A[)\s]\s*[^\n]/);
+      stem = cutMatch ? bodyText.slice(0, cutMatch.index).trim() : bodyText;
+      stem = stem.replace(/\n\s*(?:Comments?|Rationale|Key Point):.*$/is, '').trim();
+    }
 
     return {
       itemName: baseItemName,
@@ -1098,6 +1131,7 @@ async function readReviewAllFrame(frame) {
       objective: itemInfo.Objective || null,
       vPreviousTimeSpentMs: typeof window.vPreviousTimeSpent === 'number' ? window.vPreviousTimeSpent : null,
       stem,
+      stemHtml,
       choices,
       correctKey,
       my_answer: myAnswerStr,
@@ -1225,6 +1259,29 @@ async function scrapeAttemptPhase3(popup, {
     let data;
     try {
       data = await readReviewAllFrame(frame);
+      // .ITSStemText path returns raw container HTML in data.stemHtml. Sanitize
+      // it to a render-safe subset (inline data: equation images preserved) and
+      // derive the clean text stem from it. The body-innerText fallback path
+      // leaves stemHtml null and keeps its pre-baked text stem untouched.
+      if (data && data.stemHtml != null) {
+        const safeHtml = sanitizeStemHtml(data.stemHtml);
+        data.stemHtml = safeHtml || null;
+        data.stem = stemHtmlToText(safeHtml) || data.stem || '';
+      }
+      // Same treatment for single-choice answer options whose math renders as an
+      // inline image: keep the equation image in choice.textHtml, derive a clean
+      // text label. Choices without textHtml (plain text / DI matrix / dropdown)
+      // are untouched.
+      if (data && Array.isArray(data.choices)) {
+        for (const c of data.choices) {
+          if (c && c.textHtml != null) {
+            const safe = sanitizeStemHtml(c.textHtml);
+            c.textHtml = safe || null;
+            const t = stemHtmlToText(safe);
+            if (t) c.text = t;
+          }
+        }
+      }
     } catch (e) {
       errors.push({ seq, message: `read failed: ${e.message}` });
       if (e instanceof ScrapeAnomalyError) { aborted = true; abortReason = e.message; break; }

@@ -323,6 +323,52 @@ function normalizeQuestionText(value) {
     .trim();
 }
 
+// OPE renders inline math (fractions, radicals, symbols) as inline raster images
+// with no alt text; the scraper preserves them as self-contained data: <img> in
+// question_stem_html so we can show the real equations. The scraper already
+// emits a tight subset, but stored HTML is never rendered blindly: this strips
+// everything except sup/sub/i/b/br/p and <img> with a data: src (dropping all
+// attributes, so no event handlers survive) before dangerouslySetInnerHTML.
+const STEM_ALLOWED_TAGS = new Set(['SUP', 'SUB', 'I', 'EM', 'B', 'STRONG', 'BR', 'P']);
+function sanitizeStemHtmlNode(node) {
+  Array.from(node.childNodes).forEach((child) => {
+    if (child.nodeType === Node.TEXT_NODE) return;
+    if (child.nodeType !== Node.ELEMENT_NODE) { child.remove(); return; }
+    if (child.tagName === 'IMG') {
+      const src = child.getAttribute('src') || '';
+      if (!/^data:image\//i.test(src)) { child.remove(); return; }
+      Array.from(child.attributes).forEach((a) => { if (a.name.toLowerCase() !== 'src') child.removeAttribute(a.name); });
+      return;
+    }
+    if (!STEM_ALLOWED_TAGS.has(child.tagName)) {
+      sanitizeStemHtmlNode(child);                       // clean subtree first
+      child.replaceWith(...Array.from(child.childNodes)); // then unwrap
+      return;
+    }
+    Array.from(child.attributes).forEach((a) => child.removeAttribute(a.name));
+    sanitizeStemHtmlNode(child);
+  });
+}
+function sanitizeStemHtml(html) {
+  const raw = String(html || '');
+  if (!raw.trim() || typeof document === 'undefined') return '';
+  const tpl = document.createElement('template');
+  tpl.innerHTML = raw;
+  sanitizeStemHtmlNode(tpl.content);
+  return tpl.innerHTML.trim();
+}
+
+// Renders a question stem: the math-image-bearing HTML (OPE) when present,
+// otherwise the plain-text stem. All non-OPE sources have no question_stem_html,
+// so they fall through to the original plain-text <p> render unchanged.
+function StemContent({ row }) {
+  const html = sanitizeStemHtml(row?.question_stem_html);
+  if (html) {
+    return <div className="question-stem-html" dangerouslySetInnerHTML={{ __html: html }} />;
+  }
+  return <p>{normalizeQuestionText(row?.question_stem) || 'No locally scraped stem yet.'}</p>;
+}
+
 // Split a passage into display paragraphs. Splits on blank lines (the paragraph
 // break both LSAT JSON and StartTest enrichment use), drops a leading "Passage:"
 // label, and collapses intra-paragraph whitespace so each <p> wraps cleanly.
@@ -4664,7 +4710,7 @@ function App() {
                   <div className="question-review-section">
                     <h3>Question Stem</h3>
                     <div className="question-stem-card">
-                      <p>{normalizeQuestionText(questionReview.row.question_stem) || 'No locally scraped stem yet.'}</p>
+                      <StemContent row={questionReview.row} />
                     </div>
                   </div>
 
@@ -4850,6 +4896,7 @@ function App() {
                             {choices.map((choice, index) => {
                               const label = String(choice?.label || String.fromCharCode(65 + index)).trim();
                               const text = normalizeQuestionText(choice?.text || '');
+                              const choiceHtml = sanitizeStemHtml(choice?.textHtml);
                               const isMine = anyMine
                                 ? !!choice?.isUserSelected
                                 : myAns.toUpperCase() === label.toUpperCase();
@@ -4870,7 +4917,9 @@ function App() {
                                       {!isMine && isCorrect && <span className="question-mini-chip accent-chip">Correct answer</span>}
                                     </div>
                                   </div>
-                                  <p>{text || '-'}</p>
+                                  {choiceHtml
+                                    ? <div className="answer-choice-html question-stem-html" dangerouslySetInnerHTML={{ __html: choiceHtml }} />
+                                    : <p>{text || '-'}</p>}
                                 </article>
                               );
                             })}

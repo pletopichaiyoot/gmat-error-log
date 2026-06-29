@@ -10,7 +10,7 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    port: 5173,
+    port: 5170,
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:4310',

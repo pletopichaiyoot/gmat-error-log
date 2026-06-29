@@ -31,7 +31,7 @@ For design work run `/impeccable <command>` (e.g. `critique`, `audit`, `polish`,
 | Install deps | `npm install` |
 | Full dev (API + Web) | `npm run dev` |
 | API only (port 4310) | `npm run dev:api` |
-| Web only (port 5173) | `npm run dev:web` |
+| Web only (port 5170) | `npm run dev:web` |
 | Build frontend | `npm run build:web` |
 | Production start | `npm run build:web && npm start` |
 | Lint (report) | `npm run lint` |

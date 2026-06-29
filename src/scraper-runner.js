@@ -326,6 +326,7 @@ async function runScrapeFromOpenBrowser(options = {}) {
     };
     gmatPage.on('console', onConsole);
     gmatPage.on('pageerror', onPageError);
+    attachDialogAutoHandler(gmatPage);
 
     const scraperIsLoaded = await gmatPage.evaluate(() => typeof window.runScraper === 'function');
     if (!scraperIsLoaded) {
@@ -548,6 +549,27 @@ async function navigateGmatClubHomeSafe(page) {
   }
 }
 
+// Take ownership of native JS dialogs (alert/confirm/prompt/beforeunload) on a CDP
+// page. With no handler registered, Playwright auto-dismisses dialogs via an internal
+// `dialog.close().then(() => {})` that has NO .catch() — so when that dismiss CDP
+// command races page teardown/navigation and the send() rejects ("Target closed"),
+// it surfaces as an unhandled promise rejection in the API log. Registering any
+// handler suppresses that internal path; we accept beforeunload (so navigations
+// aren't cancelled) and dismiss everything else, swallowing the error when the
+// target is already gone. No detach needed: the handler captures no state (unlike
+// the console/pageerror handlers, which keep mutating the returned debug arrays),
+// and each runner connects fresh over CDP so listeners don't accumulate across runs.
+function attachDialogAutoHandler(page) {
+  page.on('dialog', async (dialog) => {
+    try {
+      if (dialog.type() === 'beforeunload') await dialog.accept();
+      else await dialog.dismiss();
+    } catch (_error) {
+      // Target already navigated/closed — nothing left to dismiss.
+    }
+  });
+}
+
 async function runStartTestScrapeFromOpenBrowser(options = {}) {
   const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
   const sourceId = String(options.sourceId || '').trim();
@@ -602,6 +624,7 @@ async function runStartTestScrapeFromOpenBrowser(options = {}) {
     }, 50);
     startTestPage.on('console', onConsole);
     startTestPage.on('pageerror', onPageError);
+    attachDialogAutoHandler(startTestPage);
 
     const data = await runStartTestPhase1({
       page: startTestPage,
@@ -807,6 +830,7 @@ async function runStartTestPhase2FromOpenBrowser(options = {}) {
     }, 50);
     startTestPage.on('console', onConsole);
     startTestPage.on('pageerror', onPageError);
+    attachDialogAutoHandler(startTestPage);
 
     const result = await runStartTestPhase2({
       page: startTestPage,
@@ -932,6 +956,7 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
     }, 50);
     page.on('console', onConsole);
     page.on('pageerror', onPageError);
+    attachDialogAutoHandler(page);
 
     const items = [];
     const errors = [];
@@ -1174,6 +1199,7 @@ async function runTtpScrapeFromOpenBrowser(options = {}) {
     }, 50);
     ttpPage.on('console', onConsole);
     ttpPage.on('pageerror', onPageError);
+    attachDialogAutoHandler(ttpPage);
 
     const data = await runTtpScrape({
       page: ttpPage,
@@ -1277,6 +1303,7 @@ async function runGmatClubCatScrapeFromOpenBrowser(options = {}) {
     onPageError = (error) => pushLog(pageErrors, { at: new Date().toISOString(), text: clipText(error?.stack || error?.message || String(error), 2000) }, 50);
     page.on('console', onConsole);
     page.on('pageerror', onPageError);
+    attachDialogAutoHandler(page);
 
     const data = await runGmatClubCatScrape({
       page,
@@ -1350,6 +1377,7 @@ async function runGmatClubCatPhase2FromOpenBrowser(options = {}) {
     onConsole = (msg) => pushLog(consoleLogs, { at: new Date().toISOString(), type: msg.type(), text: clipText(msg.text(), 1200) });
     onPageError = (e) => pushLog(pageErrors, { at: new Date().toISOString(), text: clipText(e?.stack || e?.message || String(e), 2000) }, 50);
     page.on('console', onConsole); page.on('pageerror', onPageError);
+    attachDialogAutoHandler(page);
 
     const items = []; const errors = [];
     const maxErrors = Math.max(5, Math.ceil(targets.length / 4));

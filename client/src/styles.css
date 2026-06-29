@@ -2056,6 +2056,26 @@ th.sortable:hover {
   color: var(--ink);
 }
 
+/* OPE stems whose inline math is preserved as data: <img> (question_stem_html). */
+.question-stem-html {
+  line-height: 1.8;
+  color: var(--ink);
+}
+
+.question-stem-html p {
+  margin: 0 0 var(--s2);
+}
+
+.question-stem-html p:last-child {
+  margin-bottom: 0;
+}
+
+/* Inline equation images sit on the text baseline; figures scale to the card. */
+.question-stem-html img {
+  max-width: 100%;
+  vertical-align: middle;
+}
+
 .question-passage-card {
   padding: var(--s4);
   border-radius: var(--r-s);

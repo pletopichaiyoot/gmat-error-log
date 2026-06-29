@@ -98,7 +98,7 @@ Other DB scripts: `npm run db:verify` (check schema + data parity), `npm run db:
 npm run dev
 ```
 
-- Web: `http://localhost:5173`
+- Web: `http://localhost:5170`
 - API: `http://127.0.0.1:4310`
 
 ### API only
