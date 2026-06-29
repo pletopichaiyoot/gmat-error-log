@@ -26,6 +26,7 @@ const QUESTION_ATTEMPT_INSERT_COLUMNS = [
   'subject_sub_raw',
   'question_url',
   'question_stem',
+  'question_stem_html',
   'answer_choices',
   'response_format',
   'response_details',
@@ -128,6 +129,11 @@ async function initDb() {
   await backfillStudyPlanDays();
   await rebucketWeeksMonSunOnce();
   await backfillSparseQuestionAttempts();
+
+  // Refresh OPE difficulty buckets from the current theta sample. Idempotent
+  // and cheap (a few hundred rows); keeps stored labels in sync with the
+  // empirical per-section cutoffs after restarts, manual edits, or imports.
+  await recomputeIrtCutoffs();
 }
 
 async function saveLsatAttempt({ testNum, sectionRoman, sectionKind, questionNumber, userAnswer, correctAnswer, confidence, timeMs, sessionId }) {
@@ -665,6 +671,7 @@ function scoreAttemptSnapshot(snapshot = {}) {
   if (snapshot.q_code) score += 2;
   if (snapshot.question_url) score += 2;
   if (snapshot.question_stem) score += 2;
+  if (snapshot.question_stem_html) score += 1;
   if (snapshot.subject_code) score += 1;
   if (snapshot.category_code) score += 1;
   if (snapshot.subcategory) score += 1;
@@ -705,6 +712,7 @@ function buildAttemptSnapshotIndex(rows = []) {
       content_domain: normalizedTextOrNull(row?.content_domain),
       question_url: normalizedTextOrNull(row?.question_url),
       question_stem: normalizedTextOrNull(row?.question_stem),
+      question_stem_html: normalizedTextOrNull(row?.question_stem_html),
       answer_choices: normalizeAnswerChoicesForStorage(row?.answer_choices),
       response_format: normalizedTextOrNull(row?.response_format),
       response_details: normalizeResponseDetailsForStorage(row?.response_details),
@@ -812,7 +820,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     if (existing?.id) {
       const existingAttempts = await tx.all(
         `
-          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta, taxonomy_path
+          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, question_stem_html, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta, taxonomy_path
           FROM question_attempts
           WHERE session_id = ?
         `,
@@ -956,6 +964,10 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
         null;
       const questionUrl = normalizedTextOrNull(q.question_url) || preservedSnapshot?.question_url || null;
       const questionStem = normalizedTextOrNull(q.question_stem) || preservedSnapshot?.question_stem || null;
+      // OPE Phase 3 stores render-ready stem HTML (inline equation images) in
+      // question_stem_html. Phase 1 rescrapes don't supply it, so preserve the
+      // enriched value across rescrapes — same pattern as question_stem.
+      const questionStemHtml = normalizedTextOrNull(q.question_stem_html) || preservedSnapshot?.question_stem_html || null;
       const answerChoices =
         normalizeAnswerChoicesForStorage(q.answer_choices) ||
         preservedSnapshot?.answer_choices ||
@@ -996,6 +1008,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
         q.subject_sub_raw || null,
         questionUrl,
           questionStem,
+          questionStemHtml,
           answerChoices,
           responseFormat,
           responseDetails,
@@ -1069,12 +1082,12 @@ function platformWhereClause(platform) {
   return null;
 }
 
-// Buckets the `difficulty` text column into Easy/Medium/Hard. OPE Phase 3 stores
-// the raw IRT 3PL b-parameter (theta, e.g. "-0.076"); other sources store text
-// labels which pass through unchanged. Cutoffs at ±0.43 are the exact terciles
-// of the standard N(0,1) ability scale that GMAC's item bank is calibrated on
-// — anchored on 0 so semantics stay stable as new sessions arrive, rather than
-// drifting with the user's seen-sample mean.
+// Buckets the `difficulty` text column into Easy/Medium/Hard. OPE rows are
+// already pre-labeled by recomputeIrtCutoffs() (empirical per-section/per-DI-
+// topic terciles of the seen theta distribution), so they hit the ELSE branch
+// and pass through unchanged; other sources store text labels that pass through
+// too. The numeric ±0.43 branch is only a legacy fallback for any row whose
+// `difficulty` still holds a raw theta string (pre-recompute / mid-migration).
 function difficultyBucketExpr(alias = 'q') {
   const col = `${alias}.difficulty`;
   return `CASE
@@ -1624,6 +1637,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
         q.cat_id,
         q.question_url,
         q.question_stem,
+        q.question_stem_html,
         q.passage_text,
         q.answer_choices,
         q.response_format,
@@ -2580,6 +2594,7 @@ async function getSessionAnalysis(sessionId) {
         q.time_sec,
         q.question_url,
         q.question_stem,
+        q.question_stem_html,
         q.passage_text,
         q.answer_choices,
         q.response_format,
@@ -3267,31 +3282,39 @@ async function enrichOpeSessionAttempts({ sessionExternalId, source, enrichedIte
         // scripts use it to reconstruct the grid / dropdown ordering.
         value: c?.value != null ? String(c.value).trim() : null,
         text: String(c?.text || '').trim() || null,
+        // OPE math answer choices render as inline data: images (no alt); the
+        // scraper keeps the render-ready HTML here so the modal shows the real
+        // equation. Null for plain-text choices and non-OPE sources.
+        textHtml: String(c?.textHtml || '').trim() || null,
         isCorrect: !!c?.isCorrect,
         isUserSelected: !!c?.isUserSelected,
       }))
-      .filter((c) => c.label || c.text);
+      .filter((c) => c.label || c.text || c.textHtml);
 
     const timeSecPrecise = Number.isFinite(Number(item?.vPreviousTimeSpentMs))
       ? Math.round(Number(item.vPreviousTimeSpentMs) / 1000)
       : null;
     // OPE Phase 3 exposes the IRT 3PL b-parameter as a raw float. Store it on
     // `difficulty_theta` (for sorting/analytics) and bucket to a text label on
-    // `difficulty` (for the chip-rendering UI). The ±0.43 below is just an
+    // `difficulty` (for the chip-rendering UI). The label below is just an
     // initial guess; recomputeIrtCutoffs() runs at the end of this function
     // and overwrites every label with per-subject empirical p33/p67 cutoffs.
+    // theta=0.000 is a missing-calibration sentinel → 'Unknown' (recompute
+    // confirms this); the ±0.43 split is the legacy fallback for the rest.
     const thetaNum = Number.isFinite(Number(item?.difficulty))
       ? Number(item.difficulty)
       : null;
     const difficultyLabel = thetaNum == null
       ? null
-      : thetaNum < -0.43 ? 'Easy' : thetaNum > 0.43 ? 'Hard' : 'Medium';
+      : thetaNum === 0 ? 'Unknown'
+        : thetaNum < -0.43 ? 'Easy' : thetaNum > 0.43 ? 'Hard' : 'Medium';
 
     try {
       await tx.run(
         `
           UPDATE question_attempts
           SET question_stem = COALESCE(NULLIF(?, ''), question_stem),
+              question_stem_html = COALESCE(NULLIF(?, ''), question_stem_html),
               answer_choices = CASE WHEN ? > 0 THEN ? ELSE answer_choices END,
               correct_answer = COALESCE(NULLIF(?, ''), correct_answer),
               my_answer = COALESCE(NULLIF(?, ''), my_answer),
@@ -3302,6 +3325,7 @@ async function enrichOpeSessionAttempts({ sessionExternalId, source, enrichedIte
         `,
         [
           item.stem || '',
+          item.stemHtml || '',
           answerChoicesArr.length,
           answerChoicesArr.length ? JSON.stringify(answerChoicesArr) : null,
           item.correct_answer || '',
@@ -3330,8 +3354,20 @@ async function enrichOpeSessionAttempts({ sessionExternalId, source, enrichedIte
 
 // Recomputes empirical IRT cutoffs from current theta data and rebuckets
 // every theta-bearing row's `difficulty` label to match. Called after each
-// Phase 3 enrichment so the OPE buckets stay consistent as new attempts
-// arrive.
+// Phase 3 enrichment (and once at startup from initDb) so the OPE buckets
+// stay consistent as new attempts arrive.
+//
+// Cutoffs are the empirical p33/p67 terciles of the seen theta distribution,
+// computed with percentile_cont (interpolated, tie-safe). An earlier version
+// used PERCENT_RANK() + MIN(CASE WHEN pr >= x) which collapsed under ties:
+// GMAC reports ~15% of items at exactly theta=0.000 (a missing-calibration
+// sentinel), and that spike forced both the p33 and p67 boundaries to the
+// same post-tie value, degenerating the Medium band to a single row.
+//
+// theta=0.000 rows are EXCLUDED from the cutoff math and labeled 'Unknown'
+// (see the rebucket below) — they are a no-calibration sentinel, not genuine
+// average difficulty, and treating them as real skews the terciles and
+// behaves inconsistently across sections.
 //
 // Keying:
 //   Q, V → cutoffs keyed on subject_code alone (sub_key='')
@@ -3340,53 +3376,38 @@ async function enrichOpeSessionAttempts({ sessionExternalId, source, enrichedIte
 //          'Data Sufficiency', 'Graphs and Tables', 'Two-part analysis',
 //          'Multi-source reasoning'.)
 //
-// Buckets with fewer than 10 theta-bearing rows are skipped; those rows
+// Buckets with fewer than 10 non-zero theta rows are skipped; those rows
 // fall back to the global ±0.43 cutoff (the legacy default) until the
 // sample grows.
 async function recomputeIrtCutoffs() {
   // Q and V: one cutoff per subject_code.
   const qvRows = await all(`
-    WITH ranked AS (
-      SELECT subject_code, difficulty_theta,
-             PERCENT_RANK() OVER (PARTITION BY subject_code ORDER BY difficulty_theta) AS pr,
-             COUNT(*) OVER (PARTITION BY subject_code) AS n
-      FROM question_attempts
-      WHERE difficulty_theta IS NOT NULL
-        AND subject_code IN ('Q','V')
-    )
     SELECT subject_code,
            '' AS sub_key,
-           MIN(CASE WHEN pr >= 0.3333 THEN difficulty_theta END) AS p33,
-           MIN(CASE WHEN pr >= 0.6667 THEN difficulty_theta END) AS p67,
-           MAX(n) AS n
-    FROM ranked
+           percentile_cont(0.3333) WITHIN GROUP (ORDER BY difficulty_theta) AS p33,
+           percentile_cont(0.6667) WITHIN GROUP (ORDER BY difficulty_theta) AS p67,
+           COUNT(*) AS n
+    FROM question_attempts
+    WHERE difficulty_theta IS NOT NULL
+      AND difficulty_theta <> 0
+      AND subject_code IN ('Q','V')
     GROUP BY subject_code
-    HAVING MAX(n) >= 10
+    HAVING COUNT(*) >= 10
   `);
 
   // DI: one cutoff per (subject_code, topic).
   const diRows = await all(`
-    WITH ranked AS (
-      SELECT subject_code, COALESCE(topic, '') AS sub_key, difficulty_theta,
-             PERCENT_RANK() OVER (
-               PARTITION BY subject_code, COALESCE(topic, '')
-               ORDER BY difficulty_theta
-             ) AS pr,
-             COUNT(*) OVER (
-               PARTITION BY subject_code, COALESCE(topic, '')
-             ) AS n
-      FROM question_attempts
-      WHERE difficulty_theta IS NOT NULL
-        AND subject_code = 'DI'
-        AND COALESCE(topic, '') <> ''
-    )
-    SELECT subject_code, sub_key,
-           MIN(CASE WHEN pr >= 0.3333 THEN difficulty_theta END) AS p33,
-           MIN(CASE WHEN pr >= 0.6667 THEN difficulty_theta END) AS p67,
-           MAX(n) AS n
-    FROM ranked
-    GROUP BY subject_code, sub_key
-    HAVING MAX(n) >= 10
+    SELECT subject_code, COALESCE(topic, '') AS sub_key,
+           percentile_cont(0.3333) WITHIN GROUP (ORDER BY difficulty_theta) AS p33,
+           percentile_cont(0.6667) WITHIN GROUP (ORDER BY difficulty_theta) AS p67,
+           COUNT(*) AS n
+    FROM question_attempts
+    WHERE difficulty_theta IS NOT NULL
+      AND difficulty_theta <> 0
+      AND subject_code = 'DI'
+      AND COALESCE(topic, '') <> ''
+    GROUP BY subject_code, COALESCE(topic, '')
+    HAVING COUNT(*) >= 10
   `);
 
   const rows = [...qvRows, ...diRows];
@@ -3404,8 +3425,18 @@ async function recomputeIrtCutoffs() {
     );
   }
 
-  // Rebucket: match each row to its cutoff entry by (subject_code, key).
-  // For Q/V the cutoff row has sub_key=''; for DI it has sub_key=topic.
+  // theta=0.000 is a missing-calibration sentinel — label it 'Unknown' and
+  // leave it out of the Easy/Medium/Hard rebucket below (both subsequent
+  // updates are guarded by difficulty_theta <> 0).
+  await run(`
+    UPDATE question_attempts
+    SET difficulty = 'Unknown'
+    WHERE difficulty_theta = 0
+  `);
+
+  // Rebucket: match each non-zero-theta row to its cutoff entry by
+  // (subject_code, key). For Q/V the cutoff row has sub_key=''; for DI it
+  // has sub_key=topic.
   await run(`
     UPDATE question_attempts
     SET difficulty = (
@@ -3423,6 +3454,7 @@ async function recomputeIrtCutoffs() {
         END
     )
     WHERE difficulty_theta IS NOT NULL
+      AND difficulty_theta <> 0
       AND EXISTS (
         SELECT 1 FROM irt_cutoffs c
         WHERE c.subject_code = question_attempts.subject_code
@@ -3434,7 +3466,7 @@ async function recomputeIrtCutoffs() {
       )
   `);
 
-  // Fallback ±0.43 for any theta-bearing row that didn't match a cutoff
+  // Fallback ±0.43 for any non-zero-theta row that didn't match a cutoff
   // (small sub-buckets, unknown subject codes, etc.).
   await run(`
     UPDATE question_attempts
@@ -3444,6 +3476,7 @@ async function recomputeIrtCutoffs() {
       ELSE 'Medium'
     END
     WHERE difficulty_theta IS NOT NULL
+      AND difficulty_theta <> 0
       AND NOT EXISTS (
         SELECT 1 FROM irt_cutoffs c
         WHERE c.subject_code = question_attempts.subject_code
