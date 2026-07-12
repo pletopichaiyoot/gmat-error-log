@@ -113,7 +113,9 @@ async function initDb() {
 
   // One-time backfill: older OPE Phase 3 writes stored raw IRT theta as a numeric
   // string in `difficulty`; move those into `difficulty_theta` and bucket the label.
-  // Idempotent via difficulty_theta IS NULL.
+  // Idempotent via difficulty_theta IS NULL. Scoped to OPE — theta is authoritative
+  // ONLY for ope-mock (see recomputeIrtCutoffs); every other source keeps its
+  // scraper/report difficulty tag and must never have theta derived from it.
   await run(`
     UPDATE question_attempts
     SET difficulty_theta = CAST(difficulty AS REAL),
@@ -124,6 +126,7 @@ async function initDb() {
         END
     WHERE difficulty_theta IS NULL
       AND difficulty ~ '^-{0,1}\\.{0,1}[0-9]'
+      AND session_id IN (SELECT id FROM sessions WHERE LOWER(COALESCE(source, '')) LIKE '%practice exam%')
   `);
 
   await backfillStudyPlanDays();
@@ -3393,6 +3396,17 @@ async function enrichOpeSessionAttempts({ sessionExternalId, source, enrichedIte
 // fall back to the global ±0.43 cutoff (the legacy default) until the
 // sample grows.
 async function recomputeIrtCutoffs() {
+  // IRT theta is authoritative ONLY for OPE mock exams (ope-mock platform,
+  // source LIKE '%practice exam%'): those items are IRT-scored and difficulty is
+  // DERIVED from theta here. Every other source (GMAT Club, GMAT Club CAT, OG
+  // books, Focus practice, TTP) gets its difficulty from the scraper/report and
+  // must NEVER be relabeled by this function — many of those rows carry a
+  // spurious difficulty_theta=0 that coexists with a valid label, and treating 0
+  // as a "recalibrate me" signal silently clobbered ~1170 real labels to
+  // 'Unknown' (regression from the tie-safe recalibration change). Scope every
+  // read AND write below to OPE sessions only.
+  const OPE_ONLY = `session_id IN (SELECT id FROM sessions WHERE LOWER(COALESCE(source, '')) LIKE '%practice exam%')`;
+
   // Q and V: one cutoff per subject_code.
   const qvRows = await all(`
     SELECT subject_code,
@@ -3404,6 +3418,7 @@ async function recomputeIrtCutoffs() {
     WHERE difficulty_theta IS NOT NULL
       AND difficulty_theta <> 0
       AND subject_code IN ('Q','V')
+      AND ${OPE_ONLY}
     GROUP BY subject_code
     HAVING COUNT(*) >= 10
   `);
@@ -3419,6 +3434,7 @@ async function recomputeIrtCutoffs() {
       AND difficulty_theta <> 0
       AND subject_code = 'DI'
       AND COALESCE(topic, '') <> ''
+      AND ${OPE_ONLY}
     GROUP BY subject_code, COALESCE(topic, '')
     HAVING COUNT(*) >= 10
   `);
@@ -3445,6 +3461,7 @@ async function recomputeIrtCutoffs() {
     UPDATE question_attempts
     SET difficulty = 'Unknown'
     WHERE difficulty_theta = 0
+      AND ${OPE_ONLY}
   `);
 
   // Rebucket: match each non-zero-theta row to its cutoff entry by
@@ -3468,6 +3485,7 @@ async function recomputeIrtCutoffs() {
     )
     WHERE difficulty_theta IS NOT NULL
       AND difficulty_theta <> 0
+      AND ${OPE_ONLY}
       AND EXISTS (
         SELECT 1 FROM irt_cutoffs c
         WHERE c.subject_code = question_attempts.subject_code
@@ -3490,6 +3508,7 @@ async function recomputeIrtCutoffs() {
     END
     WHERE difficulty_theta IS NOT NULL
       AND difficulty_theta <> 0
+      AND ${OPE_ONLY}
       AND NOT EXISTS (
         SELECT 1 FROM irt_cutoffs c
         WHERE c.subject_code = question_attempts.subject_code
