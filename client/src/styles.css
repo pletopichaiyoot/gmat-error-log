@@ -2070,10 +2070,22 @@ th.sortable:hover {
   margin-bottom: 0;
 }
 
-/* Inline equation images sit on the text baseline; figures scale to the card. */
+/* Inline equation images (OPE math: fractions, radicals) are opaque white-matte
+   GIFs with no alt text. Two problems to correct here:
+   1. Tailwind Preflight defaults every <img> to display:block, which drops each
+      fraction onto its own line and shatters the sentence — force inline flow so
+      "rate of 1/4 gallon" reads as one line.
+   2. The GIF's white matte would otherwise paint a hard white box on the cream
+      stem card (and a glaring one on the tinted answer choices). mix-blend-mode
+      multiply drops white onto whatever surface sits behind it while keeping the
+      black glyph, so the math integrates on every surface. The only images that
+      survive sanitize are these self-contained data: math GIFs (auth figure URLs
+      are stripped), and they are all white-matte line art, so multiply is safe. */
 .question-stem-html img {
+  display: inline-block;
   max-width: 100%;
   vertical-align: middle;
+  mix-blend-mode: multiply;
 }
 
 .question-passage-card {
