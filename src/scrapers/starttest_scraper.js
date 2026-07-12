@@ -11,6 +11,7 @@
 
 const { htmlToReadableText } = require('./mathml-text');
 const { splitStemAndPassage } = require('./question-stem-split');
+const { sanitizeStemHtml, stemHtmlToText } = require('./ope-stem');
 
 const STARTTEST_HOST_RE = /starttest\.com/i;
 const BOOK_SESSION_TABLE_SEL = 'table.PracticeSessionsTable-tbl tbody tr';
@@ -1094,6 +1095,23 @@ async function readReviewFrame(frame) {
       clone.querySelectorAll('img, button, [role="button"], [aria-hidden="true"], input, [class*="trikeout" i], [class*="Marker" i], script, style').forEach((n) => n.remove());
       return clone.innerHTML;
     };
+    // Image-math capture. StartTest ITD renders inline math (fractions, radicals,
+    // symbol tables) that has no <math> as a self-contained `data:image/...`
+    // <img> with empty alt. innerText drops it and cleanMathHtml (which needs
+    // <math> and strips <img>) can't see it — so math-only stems/choices came
+    // back empty. When the element carries a data: image, return its UI-stripped
+    // innerHTML (imgs KEPT) so the Node side can preserve the equation image
+    // (ope-stem sanitize) and derive a readable text label. Null when there is no
+    // data: image, so plain-text and MathML paths are left completely untouched.
+    const imgHtml = (el) => {
+      if (!el) return null;
+      const hasDataImg = Array.from(el.querySelectorAll('img'))
+        .some((im) => /^data:image\//i.test(im.getAttribute('src') || ''));
+      if (!hasDataImg) return null;
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll('button, [role="button"], [aria-hidden="true"], input, [class*="trikeout" i], [class*="Marker" i], .solIcon, script, style').forEach((n) => n.remove());
+      return clone.innerHTML;
+    };
 
     // --- Correct answer key (works for both MC and Matrix) ---
     let correctKey = null;
@@ -1245,6 +1263,20 @@ async function readReviewFrame(frame) {
           // ancestor or after a few levels. Quant pages still rely on this.
           let color = null;
           let container = el.closest('tr, li, .ITSMCOption, .ITSMCOptionTable, [class*="MCOption"], [class*="OptionRow"]') || el.parentElement;
+          // The option's text/math lives in a SIBLING span, not the input. The
+          // radio is <input id="chk{itemseq}{seq}" class="ITSMCOptionMarker"> and
+          // the content is <span id="radio{itemseq}{seq}" class="ITSMCOptionText">.
+          // `container` above resolves to the input itself (ITSMCOptionMarker
+          // matches [class*="MCOption"]), so reading HTML off it yields nothing —
+          // this is why image-math choices came back empty. Resolve the real
+          // content span (by id, then by class within the option table) and read
+          // stem/image HTML off THAT. Fall back to container for odd layouts.
+          const optionTable = el.closest('.ITSMCOptionTable');
+          const textId = el.id ? el.id.replace(/^chk/, 'radio') : null;
+          const contentEl =
+            (textId && document.getElementById(textId))
+            || (optionTable && optionTable.querySelector('.ITSMCOptionTextOn, .ITSMCOptionText, .optionText'))
+            || container;
           for (let node = container, depth = 0; node && depth < 4 && !color; node = node.parentElement, depth += 1) {
             color = colorFromStyle(node.getAttribute && node.getAttribute('style'));
             if (!color) {
@@ -1269,7 +1301,8 @@ async function readReviewFrame(frame) {
           return {
             value: el.value,
             label: labelText,
-            contentHtml: cleanMathHtml(container),                  // non-null only if the row has MathML
+            contentHtml: cleanMathHtml(contentEl),                  // non-null only if the option has MathML
+            imgContentHtml: imgHtml(contentEl),                     // non-null only if the option has a data: math image
             color,                                                  // yellow|red|green|null
             checked: el.checked || pickByColor || inUserSelectedRow,
             isCorrect: color === 'yellow' || color === 'green' || inCorrectRow,
@@ -1305,6 +1338,7 @@ async function readReviewFrame(frame) {
       rationale: text('.ItemRationaleText'),
       yourScoreText: text('.sol-your-score-container'),
       stemHtml: cleanMathHtml(pickEl(['.ITSStemText', '.stem-container-inner', '.stem-block-inner'])),
+      stemImgHtml: imgHtml(pickEl(['.ITSStemText', '.stem-container-inner', '.stem-block-inner'])),
       passageHtml: cleanMathHtml(pickEl(['.passage-block-inner', '.passage-block'])),
       keyPointHtml: cleanMathHtml(pickEl(['.sol-key-point-content'])),
       rationaleHtml: cleanMathHtml(pickEl(['.ItemRationaleText'])),
@@ -1320,16 +1354,39 @@ async function readReviewFrame(frame) {
   if (data.passageHtml) data.passage = htmlToReadableText(data.passageHtml);
   if (data.keyPointHtml) data.keyPoint = htmlToReadableText(data.keyPointHtml);
   if (data.rationaleHtml) data.rationale = htmlToReadableText(data.rationaleHtml);
+  // Image-math stems (no MathML): keep the render-safe HTML with the inline
+  // equation image in questionStemHtml (the review modal renders it) and derive a
+  // [math]-marked text stem for the LLM/search. Only when the MathML path above
+  // produced nothing — the two are mutually exclusive in practice (a stem is
+  // either MathML or image-math, never both).
+  if (data.stemImgHtml && !data.stemHtml) {
+    const safe = sanitizeStemHtml(data.stemImgHtml);
+    if (safe) {
+      data.questionStemHtml = safe;
+      const t = stemHtmlToText(safe);
+      if (t) data.stem = t;
+    }
+  }
   if (data.choicesType === 'single' && Array.isArray(data.choices)) {
     for (const c of data.choices) {
       if (c.contentHtml) {
         const t = htmlToReadableText(c.contentHtml);
         if (t) c.label = t;
+      } else if (c.imgContentHtml) {
+        // Image-math answer choice: keep the equation image in textHtml (the
+        // modal renders it) and derive a readable text label ("[math]").
+        const safe = sanitizeStemHtml(c.imgContentHtml);
+        if (safe) {
+          c.textHtml = safe;
+          const t = stemHtmlToText(safe);
+          if (t) c.label = t;
+        }
       }
       delete c.contentHtml;
+      delete c.imgContentHtml;
     }
   }
-  for (const k of ['stemHtml', 'passageHtml', 'keyPointHtml', 'rationaleHtml']) delete data[k];
+  for (const k of ['stemHtml', 'stemImgHtml', 'passageHtml', 'keyPointHtml', 'rationaleHtml']) delete data[k];
 
   // On many CR items `.passage-block` is just the bare "Passage:" heading — the
   // actual argument lives in `.ITSStemText`. Strip the label; if nothing real is

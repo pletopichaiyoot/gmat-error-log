@@ -348,10 +348,17 @@ function normalizeAnswerChoicesForStorage(value) {
       .map((item) => {
         const label = normalizedTextOrNull(item?.label);
         const text = normalizedTextOrNull(item?.text);
-        if (!label && !text) return null;
+        // textHtml holds the render-ready HTML for a math answer choice that is
+        // an inline equation image (OPE / StartTest OG fractions/radicals). It is
+        // enrichment-only — Phase 1 never supplies it — so preserve it across
+        // Phase-1 rescrapes (same rationale as question_stem_html) or the choice
+        // images get silently wiped on the next scrape.
+        const textHtml = normalizedTextOrNull(item?.textHtml);
+        if (!label && !text && !textHtml) return null;
         return {
           label: label || null,
           text: text || null,
+          ...(textHtml ? { textHtml } : {}),
         };
       })
       .filter(Boolean);
@@ -2757,6 +2764,10 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
           text: cleanText(c?.label),
           value: c?.value,
           color: c?.color || null,
+          // Image-math choices (fractions/radicals rendered as inline data:
+          // images) carry render-ready HTML the scraper derived via ope-stem;
+          // keep it so the modal shows the real equation. Null for text choices.
+          textHtml: String(c?.textHtml || '').trim() || null,
           isCorrect: !!c?.isCorrect,
           isUserSelected: !!c?.isUserSelected,
         };
@@ -2979,6 +2990,7 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
           UPDATE question_attempts
           SET q_code = COALESCE(?, q_code),
               question_stem = COALESCE(?, question_stem),
+              question_stem_html = COALESCE(NULLIF(?, ''), question_stem_html),
               answer_choices = ?,
               response_format = COALESCE(?, response_format),
               response_details = ?,
@@ -2991,6 +3003,7 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
         [
           formQuestionId != null ? String(formQuestionId) : (stableKey || null),
           item.stem || null,
+          item.questionStemHtml || '',
           JSON.stringify(answerChoicesArr),
           responseFormat,
           JSON.stringify(responseDetailsPayload),
@@ -4697,5 +4710,5 @@ module.exports = {
   updateMockResult,
   deleteMockResult,
   seedMockResultsIfEmpty,
-  _sqlInternals: { platformWhereClause },
+  _sqlInternals: { platformWhereClause, normalizeAnswerChoicesForStorage },
 };
