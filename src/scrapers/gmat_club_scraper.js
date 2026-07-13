@@ -310,9 +310,15 @@
         : '';
       const questionId = questionIdAttr || extractTopicId(questionUrl);
 
-      // The notes button is hover-revealed; the cell text is empty by default.
-      // Capture any visible text in case GMAT Club ever surfaces a saved note.
-      const notes = cells[8] ? cells[8].textContent.replace(/\s+/g, ' ').trim() : '';
+      // The note cell renders its text TWICE: a visible truncated preview
+      // <span> plus a `hidden group-hover:block` hover-popup holding the full
+      // note. textContent concatenates both (doubling every note); innerText
+      // excludes the hidden popup, so it returns the note exactly once. CSS
+      // `truncate` clips the preview visually only — innerText still yields the
+      // full text. (Thai notes come back as literal '?' here: GMAT Club's own
+      // note field mangles non-Latin text on save, so the source is already
+      // corrupted — nothing the scraper can recover.)
+      const notes = cells[8] ? cells[8].innerText.replace(/\s+/g, ' ').trim() : '';
 
       return {
         attemptId,

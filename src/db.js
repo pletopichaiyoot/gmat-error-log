@@ -955,8 +955,16 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
         preserved?.mistake_type ||
         preservedSnapshot?.mistake_type ||
         null;
+      // GMAT Club's note field mangles Thai/non-Latin text to literal '?' on
+      // save, so a scraped note carrying a run of 3+ '?' is source-corrupted.
+      // Don't let it clobber a good previously-stored note — fall through to
+      // the preserved value (which may hold the pre-corruption text). Scoped to
+      // GMAT Club: other sources round-trip their notes cleanly.
+      const scrapedNote = normalizedTextOrNull(q.notes);
+      const gmatClubCorruptedNote =
+        scrapedNote && /gmat club/i.test(session.source || '') && /\?{3,}/.test(scrapedNote);
       const notes =
-        normalizedTextOrNull(q.notes) ||
+        (gmatClubCorruptedNote ? null : scrapedNote) ||
         preserved?.notes ||
         preservedSnapshot?.notes ||
         null;
