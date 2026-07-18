@@ -2,6 +2,7 @@ const { Pool, types } = require('pg');
 const { toPg } = require('./sql-util');
 const { runMigrations } = require('../scripts/migrate');
 const { deriveQuestionMetadata, enrichQuestionMetadata } = require('./question-metadata');
+const { isFlatGradeableChoices } = require('./ai-practice-sets');
 
 // node-postgres returns int8/bigint (COUNT, SUM(int), session_external_id) and
 // numeric (ROUND results, computed percentages) as STRINGS to preserve precision.
@@ -1071,6 +1072,140 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
   return get('SELECT * FROM scrape_runs WHERE id = ?', [runId]);
 }
 
+// 53-bit deterministic hash (mirrors the scrapers' hashSessionExternalId).
+function hash53(input) {
+  const text = String(input || '');
+  let h1 = 0xdeadbeef ^ 0;
+  let h2 = 0x41c6ce57 ^ 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
+  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
+  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+
+// Curation helper: gradeable redo candidates for Claude Cowork to pick from.
+// subject is a subject_code ('Q'|'V'|'DI') or falsy for all. wrongOnly defaults true.
+async function listAiPracticeCandidates({ subject = '', wrongOnly = true, limit = 40 } = {}) {
+  const conds = [
+    "qa.question_stem IS NOT NULL AND length(qa.question_stem) > 10",
+    "qa.answer_choices IS NOT NULL AND qa.answer_choices NOT IN ('', '[]')",
+    "qa.correct_answer IS NOT NULL AND qa.correct_answer <> ''",
+    "LOWER(COALESCE(s.source, '')) NOT LIKE '%ai curated%'",
+  ];
+  const params = [];
+  if (wrongOnly) conds.push('qa.correct = 0');
+  if (subject) { conds.push('qa.subject_code = ?'); params.push(subject); }
+  params.push(safeInt(limit) || 40);
+  const rows = await all(
+    `SELECT qa.id, qa.q_code, s.source, qa.topic, qa.subcategory, qa.difficulty,
+            qa.correct, qa.answer_choices, qa.created_at
+       FROM question_attempts qa JOIN sessions s ON s.id = qa.session_id
+      WHERE ${conds.join(' AND ')}
+      ORDER BY qa.created_at ASC
+      LIMIT ?`,
+    params
+  );
+  // Final flat-gradeable filter (excludes multi-part DI) in JS.
+  return rows.filter((r) => isFlatGradeableChoices(r.answer_choices));
+}
+
+// Resolve set item ids to servable question payloads + prior-attempt summary.
+async function resolveAiPracticeSetItems(ids) {
+  const clean = (Array.isArray(ids) ? ids : []).map((n) => safeInt(n)).filter((n) => Number.isInteger(n) && n > 0);
+  if (clean.length === 0) return { items: [], missing: [] };
+  const placeholders = clean.map(() => '?').join(', ');
+  const rows = await all(
+    `SELECT qa.id, qa.q_code, s.source AS source, qa.subject_code, qa.category_code,
+            qa.subcategory, qa.topic, qa.difficulty, qa.question_url, qa.question_stem,
+            qa.question_stem_html, qa.answer_choices, qa.response_format,
+            qa.correct_answer, qa.correct AS prior_correct, qa.my_answer AS prior_my_answer,
+            s.session_date AS prior_session_date
+       FROM question_attempts qa JOIN sessions s ON s.id = qa.session_id
+      WHERE qa.id IN (${placeholders})`,
+    clean
+  );
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const items = [];
+  const missing = [];
+  for (const id of clean) {           // preserve the set's item order
+    const r = byId.get(id);
+    if (!r || !isFlatGradeableChoices(r.answer_choices) || !r.correct_answer) { missing.push(id); continue; }
+    items.push({
+      itemId: r.id, qCode: r.q_code, source: r.source, subjectCode: r.subject_code,
+      categoryCode: r.category_code, subcategory: r.subcategory, topic: r.topic,
+      difficulty: r.difficulty, questionUrl: r.question_url, questionStem: r.question_stem,
+      questionStemHtml: r.question_stem_html, answerChoices: r.answer_choices,
+      responseFormat: r.response_format, correctAnswer: r.correct_answer,
+      priorAttempt: {
+        correct: r.prior_correct, myAnswer: r.prior_my_answer,
+        sessionDate: r.prior_session_date, source: r.source,
+      },
+    });
+  }
+  return { items, missing };
+}
+
+// Pure: build the data object saveScrapeResult() consumes for one AI-curated run.
+function buildAiCuratedSessionData({ slug, title, subject, gradedItems, nowIso, sessionExternalId }) {
+  const items = Array.isArray(gradedItems) ? gradedItems : [];
+  const total = items.length;
+  const correct = items.filter((g) => Number(g.correct) === 1).length;
+  const errors = total - correct;
+  const times = items.map((g) => safeInt(g.timeSec)).filter((n) => Number.isInteger(n) && n >= 0);
+  const avgTime = times.length ? Math.round(times.reduce((a, b) => a + b, 0) / times.length) : null;
+  const accuracy = total ? Math.round((correct / total) * 1000) / 10 : null;
+  const dateOnly = String(nowIso || new Date().toISOString()).slice(0, 10);
+  return {
+    extracted_at: nowIso || new Date().toISOString(),
+    sessions: [{
+      session_id: sessionExternalId,
+      source: 'AI Curated Practice',
+      subject: subject || null,
+      date: dateOnly,
+      title: title || slug,
+      stats: { total_q_api: total, total_q_categories: total, correct, errors, accuracy_pct: accuracy, avg_time_sec: avgTime },
+      questions: items.map((g, i) => ({
+        q_code: g.served.qCode || null,
+        q_id: `aic-att-${slug}-${i + 1}`,
+        subject_code: g.served.subjectCode || null,
+        category_code: g.served.categoryCode || null,
+        subcategory: g.served.subcategory || null,
+        topic: g.served.topic || null,
+        topic_source: 'ai-curated',
+        question_url: g.served.questionUrl || null,
+        question_stem: g.served.questionStem || null,
+        question_stem_html: g.served.questionStemHtml || null,
+        answer_choices: g.served.answerChoices || null,
+        response_format: g.served.responseFormat || null,
+        correct: Number(g.correct) === 1 ? 1 : 0,
+        my_answer: g.myAnswer || null,
+        correct_answer: g.served.correctAnswer || null,
+        difficulty: g.served.difficulty || null,   // copy text label; theta stays NULL
+        time_sec: safeInt(g.timeSec),
+        confidence: g.confidence || null,
+      })),
+    }],
+  };
+}
+
+async function logAiCuratedSession({ slug, title, subject, gradedItems }) {
+  const nowIso = new Date().toISOString();
+  const sessionExternalId = hash53(`ai-${slug}-${Date.now()}`);
+  const data = buildAiCuratedSessionData({ slug, title, subject, gradedItems, nowIso, sessionExternalId });
+  await saveScrapeResult(data, { source: 'AI Curated Practice' });
+  const row = await get(
+    `SELECT id FROM sessions WHERE session_external_id = ? AND source = ? ORDER BY id DESC LIMIT 1`,
+    [sessionExternalId, 'AI Curated Practice']
+  );
+  return { sessionId: row ? row.id : null, sessionExternalId };
+}
+
 async function listRuns(limit = 20) {
   return all(
     `
@@ -1090,12 +1225,13 @@ async function getLatestRunId() {
 
 function platformWhereClause(platform) {
   // Heuristic match — matches the frontend's getSourcePlatform().
+  if (platform === 'ai-curated') return "LOWER(COALESCE(s.source, '')) LIKE '%ai curated%'";
   if (platform === 'gmatclub-cat') return "LOWER(COALESCE(s.source, '')) LIKE '%gmat club cat%'";
   if (platform === 'gmatclub') return "LOWER(COALESCE(s.source, '')) LIKE '%gmat club%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%gmat club cat%'";
   if (platform === 'ttp') return "LOWER(COALESCE(s.source, '')) LIKE '%target test prep%'";
   if (platform === 'ope-mock') return "LOWER(COALESCE(s.source, '')) LIKE '%practice exam%'";
   if (platform === 'starttest') {
-    return "LOWER(COALESCE(s.source, '')) NOT LIKE '%gmat club%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%target test prep%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%practice exam%'";
+    return "LOWER(COALESCE(s.source, '')) NOT LIKE '%gmat club%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%target test prep%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%practice exam%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%ai curated%'";
   }
   return null;
 }
@@ -4685,6 +4821,11 @@ module.exports = {
   initDb,
   backfillSparseQuestionAttempts,
   saveScrapeResult,
+  listAiPracticeCandidates,
+  resolveAiPracticeSetItems,
+  buildAiCuratedSessionData,
+  logAiCuratedSession,
+  hash53,
   enrichSessionAttempts,
   enrichGmatClubSessionAttempts,
   enrichGmatClubCatSessionAttempts,
