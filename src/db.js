@@ -687,6 +687,8 @@ function scoreAttemptSnapshot(snapshot = {}) {
   if (snapshot.category_code) score += 1;
   if (snapshot.subcategory) score += 1;
   if (snapshot.answer_choices) score += 1;
+  if (snapshot.my_answer) score += 1;
+  if (snapshot.correct_answer) score += 1;
   if (snapshot.response_format) score += 1;
   if (snapshot.response_details) score += 2;
   if (snapshot.topic) score += 1;
@@ -736,6 +738,15 @@ function buildAttemptSnapshotIndex(rows = []) {
       // them — same pattern as mistake_type / notes.
       difficulty: normalizedTextOrNull(row?.difficulty),
       difficulty_theta: Number.isFinite(Number(row?.difficulty_theta)) ? Number(row.difficulty_theta) : null,
+      // Phase 2 (StartTest ITDReview / GMAT Club / OPE) is the ONLY producer of
+      // the picked/correct letters + confidence — Phase 1 always emits null for
+      // them (buildQuestionRecord). Without preserving them here, every Phase 1
+      // rescrape of an already-enriched session wipes them back to null (while
+      // keeping the stem/choices), leaving orphaned questions with blank answers.
+      // Same preservation pattern as answer_choices / difficulty_theta above.
+      my_answer: normalizedTextOrNull(row?.my_answer),
+      correct_answer: normalizedTextOrNull(row?.correct_answer),
+      confidence: normalizedTextOrNull(row?.confidence),
     };
 
     const qid = String(row?.q_id || '').trim();
@@ -1040,10 +1051,10 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           Number.isFinite(Number(q.difficulty_theta))
             ? Number(q.difficulty_theta)
             : (preservedSnapshot?.difficulty_theta ?? null),
-          q.confidence || null,
+          q.confidence || preservedSnapshot?.confidence || null,
           safeInt(q.time_sec),
-          q.my_answer || null,
-          q.correct_answer || null,
+          q.my_answer || preservedSnapshot?.my_answer || null,
+          q.correct_answer || preservedSnapshot?.correct_answer || null,
           topic,
           topicSource,
           contentDomain,
@@ -4849,6 +4860,9 @@ module.exports = {
   initDb,
   backfillSparseQuestionAttempts,
   saveScrapeResult,
+  // Exported for unit testing the Phase-1-rescrape preservation of Phase-2 fields.
+  buildAttemptSnapshotIndex,
+  pickAttemptSnapshot,
   listAiPracticeCandidates,
   resolveAiPracticeSetItems,
   buildAiCuratedSessionData,
