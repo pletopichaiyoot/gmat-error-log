@@ -1699,6 +1699,60 @@ th.sortable:hover {
   color: var(--ink-2);
 }
 
+/* Attempt history — used both in the error-row expand (compact) and the modal (full). */
+.error-expand-history {
+  margin-top: 12px;
+  border-top: 1px solid var(--border, #e5e0d5);
+  padding-top: 10px;
+}
+.error-expand-history-label {
+  display: block;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-3, #8a8577);
+  margin-bottom: 8px;
+}
+.attempt-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.attempt-history--full { gap: 12px; }
+.attempt-history-status { margin: 4px 0; font-size: 0.85rem; }
+.attempt-history-item {
+  border-left: 3px solid var(--border, #e5e0d5);
+  padding: 6px 0 6px 10px;
+}
+.attempt-history-item.ok { border-left-color: #3d7a5e; }
+.attempt-history-item.bad { border-left-color: #b4483c; }
+.attempt-history-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+}
+.attempt-history-n { font-weight: 600; color: var(--ink-3, #8a8577); }
+.attempt-result.ok { color: #2f5f49; font-weight: 600; }
+.attempt-result.bad { color: #b4483c; font-weight: 600; }
+.attempt-answers, .attempt-time, .attempt-date { color: var(--ink-2); }
+.attempt-mistake {
+  margin-top: 3px;
+  font-size: 0.78rem;
+  color: #8a6d1f;
+}
+.attempt-notes {
+  margin: 3px 0 0;
+  white-space: pre-wrap;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
 /* Filter bar (consolidated) */
 .error-filter-bar {
   display: grid;

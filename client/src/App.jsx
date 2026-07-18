@@ -817,6 +817,65 @@ function SourceBadge({ source }) {
   );
 }
 
+// Lists every attempt that shares this question's identity (q_code, or q_id
+// fallback) — original plus redos across platforms — each with its own note.
+// Self-fetching so it can drop into both the error-row expand and the modal.
+function AttemptHistoryList({ qCode, qId, variant = 'compact' }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    const params = new URLSearchParams();
+    if (qCode) params.set('q_code', qCode);
+    else if (qId) params.set('q_id', qId);
+    else { setRows([]); return undefined; }
+    fetchJson(`/api/attempts/history?${params.toString()}`)
+      .then((data) => { if (alive) setRows(Array.isArray(data.attempts) ? data.attempts : []); })
+      .catch(() => { if (alive) setRows([]); });
+    return () => { alive = false; };
+  }, [qCode, qId]);
+
+  if (rows === null) return <p className="muted attempt-history-status">Loading history…</p>;
+  if (rows.length === 0) return <p className="muted attempt-history-status">No attempts recorded.</p>;
+
+  return (
+    <ol className={`attempt-history attempt-history--${variant}`}>
+      {rows.map((a, idx) => {
+        const note = a.notes && String(a.notes).trim() ? String(a.notes).trim() : '';
+        const answers = (a.my_answer || a.correct_answer)
+          ? `${a.my_answer || '—'} → ${a.correct_answer || '—'}`
+          : '';
+        // mistake_type may be stored as a JSON array of tags — render it as a
+        // clean comma list, not raw JSON.
+        let mistakeTags = '';
+        if (a.mistake_type) {
+          try {
+            const parsed = JSON.parse(a.mistake_type);
+            mistakeTags = Array.isArray(parsed) ? parsed.join(', ') : String(a.mistake_type);
+          } catch (_e) {
+            mistakeTags = String(a.mistake_type);
+          }
+        }
+        return (
+          <li key={a.id || idx} className={`attempt-history-item ${Number(a.correct) === 1 ? 'ok' : 'bad'}`}>
+            <div className="attempt-history-head">
+              <span className="attempt-history-n">#{idx + 1}</span>
+              <SourceBadge source={a.source} />
+              <span className="attempt-date">{a.session_date ? String(a.session_date).slice(0, 10) : '—'}</span>
+              <span className={`attempt-result ${Number(a.correct) === 1 ? 'ok' : 'bad'}`}>
+                {Number(a.correct) === 1 ? '✓ correct' : '✗ wrong'}
+              </span>
+              {answers && <span className="attempt-answers muted">{answers}</span>}
+              {a.time_sec ? <span className="attempt-time muted">{formatDurationSeconds(a.time_sec)}</span> : null}
+            </div>
+            {mistakeTags && <div className="attempt-mistake">{mistakeTags}</div>}
+            {note && <p className="attempt-notes">{note}</p>}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
 // OPE scaled-score chip: "535 · Q78 V80 DI72". Renders nothing if no
 // total_score is set (Phase 2 score-summary scrape hasn't run for this row).
 function ScoreChip({ row }) {
@@ -1189,6 +1248,7 @@ function App() {
   const [aiQuestion, setAiQuestion] = useState('');
   const [aiMessages, setAiMessages] = useState([]);
   const [isAskingAi, setIsAskingAi] = useState(false);
+  const [attemptHistoryModal, setAttemptHistoryModal] = useState({ open: false, qCode: '', qId: '', label: '' });
   const [coachOpen, setCoachOpen] = useState(false);
   const [coachTab, setCoachTab] = useState('chat');
   const [chatSessionId, setChatSessionId] = useState(null);
@@ -1416,17 +1476,18 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!sessionAnalysis.open && !patternDrilldown.open && !syncCenterOpen && !annotation.open && !questionReview.open) return undefined;
+    if (!sessionAnalysis.open && !patternDrilldown.open && !syncCenterOpen && !annotation.open && !questionReview.open && !attemptHistoryModal.open) return undefined;
     const previous = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => {
       document.body.style.overflow = previous;
     };
-  }, [sessionAnalysis.open, patternDrilldown.open, syncCenterOpen, annotation.open, questionReview.open]);
+  }, [sessionAnalysis.open, patternDrilldown.open, syncCenterOpen, annotation.open, questionReview.open, attemptHistoryModal.open]);
 
   useEffect(() => {
     function handleEscape(event) {
       if (event.key !== 'Escape') return;
+      if (attemptHistoryModal.open) { setAttemptHistoryModal((prev) => ({ ...prev, open: false })); return; }
       if (annotation.open) { handleCloseAnnotation(); return; }
       if (questionReview.open) { handleCloseQuestionReview(); return; }
       if (patternDrilldown.open) { setPatternDrilldown((prev) => ({ ...prev, open: false })); return; }
@@ -1436,7 +1497,7 @@ function App() {
     }
     document.addEventListener('keydown', handleEscape);
     return () => document.removeEventListener('keydown', handleEscape);
-  }, [annotation.open, questionReview.open, patternDrilldown.open, sessionAnalysis.open, syncCenterOpen, coachOpen]);
+  }, [attemptHistoryModal.open, annotation.open, questionReview.open, patternDrilldown.open, sessionAnalysis.open, syncCenterOpen, coachOpen]);
 
   useEffect(() => {
     setAiReview('');
@@ -3708,6 +3769,20 @@ function App() {
                               >
                                 Note
                               </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="readmore-btn"
+                                type="button"
+                                onClick={() => setAttemptHistoryModal({
+                                  open: true,
+                                  qCode: row.q_code || '',
+                                  qId: row.q_id || '',
+                                  label: row.q_code || `#${row.id}`,
+                                })}
+                              >
+                                History
+                              </Button>
                               {canReview ? (
                                 <Button
                                   variant="outline"
@@ -3751,6 +3826,10 @@ function App() {
                                     <p>{row.notes}</p>
                                   </div>
                                 )}
+                              </div>
+                              <div className="error-expand-history">
+                                <span className="error-expand-history-label">Attempt history</span>
+                                <AttemptHistoryList qCode={row.q_code} qId={row.q_id} variant="compact" />
                               </div>
                             </td>
                           </tr>
@@ -4949,6 +5028,32 @@ function App() {
                   </div>
                 </div>
               </section>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {attemptHistoryModal.open && (
+        <div
+          className="analysis-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Attempt history"
+          onClick={() => setAttemptHistoryModal((prev) => ({ ...prev, open: false }))}
+        >
+          <div className="analysis-dialog note-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="analysis-shell">
+              <div className="analysis-header">
+                <h2>{`Attempt history — ${attemptHistoryModal.label}`}</h2>
+                <Button variant="outline" type="button" onClick={() => setAttemptHistoryModal((prev) => ({ ...prev, open: false }))}>
+                  Close
+                </Button>
+              </div>
+              <AttemptHistoryList
+                qCode={attemptHistoryModal.qCode}
+                qId={attemptHistoryModal.qId}
+                variant="full"
+              />
             </div>
           </div>
         </div>

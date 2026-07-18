@@ -24,6 +24,7 @@ const {
   getPatterns,
   getSessionAnalysis,
   updateErrorAnnotation,
+  listAttemptHistory,
   saveLsatAttempt,
   listLsatAttempts,
   listLsatErrors,
@@ -931,6 +932,17 @@ app.patch('/api/errors/:errorId', async (req, res) => {
     }
 
     res.json({ ok: true, error: updated });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Every attempt sharing a question identity (q_code, or q_id fallback), oldest
+// first — powers the error-log "Attempt history" (original + redos with notes).
+app.get('/api/attempts/history', async (req, res) => {
+  try {
+    const attempts = await listAttemptHistory({ qCode: req.query.q_code, qId: req.query.q_id });
+    res.json({ attempts });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

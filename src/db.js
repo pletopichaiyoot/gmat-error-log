@@ -2775,6 +2775,35 @@ async function getSessionAnalysis(sessionId) {
   };
 }
 
+// Every attempt that shares a question identity, oldest first — so the caller
+// can show the full redo history (original + AI-curated / cross-platform redos)
+// with each attempt's own note. Matches on q_code when present; otherwise falls
+// back to q_id (the same identity rule listErrors uses for corrected_later).
+async function listAttemptHistory({ qCode, qId } = {}) {
+  const code = String(qCode || '').trim();
+  const id = String(qId || '').trim();
+  let clause;
+  let params;
+  if (code) {
+    clause = 'TRIM(q.q_code) = ?';
+    params = [code];
+  } else if (id) {
+    clause = "COALESCE(NULLIF(TRIM(q.q_code), ''), '') = '' AND TRIM(q.q_id) = ?";
+    params = [id];
+  } else {
+    return [];
+  }
+  return all(
+    `SELECT q.id, s.source, s.session_date, q.correct, q.my_answer, q.correct_answer,
+            q.time_sec, q.difficulty, q.mistake_type, q.notes, q.q_id, q.q_code
+       FROM question_attempts q
+       INNER JOIN sessions s ON s.id = q.session_id
+      WHERE ${clause}
+      ORDER BY q.created_at ASC, q.id ASC`,
+    params
+  );
+}
+
 async function updateErrorAnnotation(errorId, { mistakeType, notes }) {
   const id = Number(errorId);
   if (!Number.isInteger(id) || id <= 0) {
@@ -4840,6 +4869,7 @@ module.exports = {
   getSessionAnalysis,
   getLatestRunForSource,
   updateErrorAnnotation,
+  listAttemptHistory,
   saveLsatAttempt,
   listLsatAttempts,
   listLsatErrors,
