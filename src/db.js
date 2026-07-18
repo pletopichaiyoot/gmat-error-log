@@ -45,6 +45,7 @@ const QUESTION_ATTEMPT_INSERT_COLUMNS = [
   'notes',
   'passage_text',
   'taxonomy_path',
+  'stimulus',
 ];
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 10 });
@@ -687,6 +688,7 @@ function scoreAttemptSnapshot(snapshot = {}) {
   if (snapshot.category_code) score += 1;
   if (snapshot.subcategory) score += 1;
   if (snapshot.answer_choices) score += 1;
+  if (snapshot.stimulus) score += 2;
   if (snapshot.my_answer) score += 1;
   if (snapshot.correct_answer) score += 1;
   if (snapshot.response_format) score += 1;
@@ -738,6 +740,9 @@ function buildAttemptSnapshotIndex(rows = []) {
       // them — same pattern as mistake_type / notes.
       difficulty: normalizedTextOrNull(row?.difficulty),
       difficulty_theta: Number.isFinite(Number(row?.difficulty_theta)) ? Number(row.difficulty_theta) : null,
+      // Phase-2 DI stimulus (charts/tables/MSR sources) — Phase 1 never supplies
+      // it, so preserve across rescrapes exactly like question_stem_html.
+      stimulus: normalizedTextOrNull(row?.stimulus),
       // Phase 2 (StartTest ITDReview / GMAT Club / OPE) is the ONLY producer of
       // the picked/correct letters + confidence — Phase 1 always emits null for
       // them (buildQuestionRecord). Without preserving them here, every Phase 1
@@ -842,7 +847,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     if (existing?.id) {
       const existingAttempts = await tx.all(
         `
-          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, question_stem_html, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta, taxonomy_path
+          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, question_stem_html, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta, taxonomy_path, stimulus
           FROM question_attempts
           WHERE session_id = ?
         `,
@@ -1062,6 +1067,11 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           notes,
           passageText,
           normalizedTextOrNull(q.taxonomy_path) || preservedSnapshot?.taxonomy_path || null,
+          // TEMPORARY placeholder: normalizeStimulusForStorage is added in a
+          // later task (DI stimulus capture, Step 3) and will replace this
+          // normalizedTextOrNull call. Kept here so the file stays runnable
+          // in the interim.
+          normalizedTextOrNull(q.stimulus) || preservedSnapshot?.stimulus || null,
       ];
       assertValueCount('question_attempts insert', QUESTION_ATTEMPT_INSERT_COLUMNS, attemptValues);
 
