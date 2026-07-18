@@ -1223,15 +1223,19 @@ async function getLatestRunId() {
   return row ? row.id : null;
 }
 
-function platformWhereClause(platform) {
+// `alias` is the table alias qualifying the `source` column ('s' for the
+// joined `sessions s`, or '' for a bare `sessions` table as in countSessions).
+// Default 's' keeps the emitted SQL byte-identical for existing callers.
+function platformWhereClause(platform, alias = 's') {
   // Heuristic match — matches the frontend's getSourcePlatform().
-  if (platform === 'ai-curated') return "LOWER(COALESCE(s.source, '')) LIKE '%ai curated%'";
-  if (platform === 'gmatclub-cat') return "LOWER(COALESCE(s.source, '')) LIKE '%gmat club cat%'";
-  if (platform === 'gmatclub') return "LOWER(COALESCE(s.source, '')) LIKE '%gmat club%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%gmat club cat%'";
-  if (platform === 'ttp') return "LOWER(COALESCE(s.source, '')) LIKE '%target test prep%'";
-  if (platform === 'ope-mock') return "LOWER(COALESCE(s.source, '')) LIKE '%practice exam%'";
+  const col = alias ? `LOWER(COALESCE(${alias}.source, ''))` : "LOWER(COALESCE(source, ''))";
+  if (platform === 'ai-curated') return `${col} LIKE '%ai curated%'`;
+  if (platform === 'gmatclub-cat') return `${col} LIKE '%gmat club cat%'`;
+  if (platform === 'gmatclub') return `${col} LIKE '%gmat club%' AND ${col} NOT LIKE '%gmat club cat%'`;
+  if (platform === 'ttp') return `${col} LIKE '%target test prep%'`;
+  if (platform === 'ope-mock') return `${col} LIKE '%practice exam%'`;
   if (platform === 'starttest') {
-    return "LOWER(COALESCE(s.source, '')) NOT LIKE '%gmat club%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%target test prep%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%practice exam%' AND LOWER(COALESCE(s.source, '')) NOT LIKE '%ai curated%'";
+    return `${col} NOT LIKE '%gmat club%' AND ${col} NOT LIKE '%target test prep%' AND ${col} NOT LIKE '%practice exam%' AND ${col} NOT LIKE '%ai curated%'`;
   }
   return null;
 }
@@ -1449,16 +1453,11 @@ async function countSessions(runId, { platform, subject, startDate, endDate } = 
     conditions.push('run_id = ?');
     params.push(runId);
   }
-  // Mirror listSessions but on the bare table (no `s.` alias here).
-  if (platform === 'gmatclub') {
-    conditions.push("LOWER(COALESCE(source, '')) LIKE '%gmat club%'");
-  } else if (platform === 'ttp') {
-    conditions.push("LOWER(COALESCE(source, '')) LIKE '%target test prep%'");
-  } else if (platform === 'ope-mock') {
-    conditions.push("LOWER(COALESCE(source, '')) LIKE '%practice exam%'");
-  } else if (platform === 'starttest') {
-    conditions.push("LOWER(COALESCE(source, '')) NOT LIKE '%gmat club%' AND LOWER(COALESCE(source, '')) NOT LIKE '%target test prep%' AND LOWER(COALESCE(source, '')) NOT LIKE '%practice exam%'");
-  }
+  // Route through the shared platformWhereClause on the bare table (no `s.`
+  // alias here) so this count stays in lockstep with listSessions/listErrors
+  // — including the ai-curated and gmatclub-cat sources.
+  const platformClause = platformWhereClause(platform, '');
+  if (platformClause) conditions.push(platformClause);
   if (subject) {
     conditions.push(`${subjectNormalizationExpr('')} = ?`);
     params.push(String(subject).toUpperCase());
