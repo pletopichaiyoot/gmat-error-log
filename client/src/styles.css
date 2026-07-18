@@ -1389,60 +1389,8 @@ th.sortable:hover {
 }
 
 /* AI Curated Practice — set list, runner, result. Warm-paper tokens only. */
-.ai-runner, .ai-result { max-width: 62ch; margin: 0 auto; }
-.ai-set-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--s4); }
-.ai-set-card {
-  border: 1px solid var(--border);
-  border-radius: var(--r);
-  padding: var(--s5);
-  background: var(--surface);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s2);
-}
-.ai-set-card h3 { margin: 0; font-size: 1.05rem; letter-spacing: -0.02em; }
-.ai-set-note { margin: 0; font-size: 0.9rem; line-height: 1.5; color: var(--ink-2); }
-.ai-set-subject {
-  align-self: flex-start;
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-2);
-  background: var(--accent-lt);
-  border-radius: var(--r-xs);
-  padding: 2px var(--s2);
-}
-
-.ai-stem { font-size: 1rem; line-height: 1.6; color: var(--ink); margin-bottom: var(--s5); }
-
-.ai-choices { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s2); }
-.ai-choice {
-  width: 100%;
-  text-align: left;
-  padding: var(--s3) var(--s4);
-  border: 1px solid var(--border);
-  border-radius: var(--r-s);
-  background: var(--surface);
-  color: var(--ink);
-  cursor: pointer;
-  transition: border-color var(--t) var(--ease), background-color var(--t) var(--ease);
-}
-.ai-choice:hover:not(:disabled) { border-color: var(--border-2); background: var(--surface-2); }
-.ai-choice:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.ai-choice.selected { border-color: var(--primary); background: var(--primary-lt); }
-.ai-choice.correct { border-color: var(--primary); background: var(--primary-md); }
-.ai-choice.wrong { border-color: var(--danger); background: var(--danger-lt); }
-.ai-choice:disabled { cursor: default; }
-
-.ai-fb-correct { color: var(--primary); font-weight: 600; margin: var(--s3) 0 0; }
-.ai-fb-wrong { color: var(--danger); font-weight: 600; margin: var(--s3) 0 0; }
-
-.ai-feedback-toggle { display: flex; flex-wrap: wrap; gap: var(--s4); align-items: center; margin: var(--s3) 0 var(--s5); color: var(--ink-2); font-size: 0.9rem; }
-.ai-feedback-toggle label { display: inline-flex; align-items: center; gap: var(--s1); cursor: pointer; }
-.ai-runner-head, .ai-runner-foot { display: flex; gap: var(--s4); align-items: center; justify-content: space-between; margin: var(--s3) 0; }
-.ai-runner-head { color: var(--muted); font-size: 0.9rem; }
-
+/* AI Curated Practice. Test chrome is shared with the LSAT surface (.lsat-st-*);
+   these are the set-picker, result report, and shared button. Warm-paper tokens. */
 .ai-btn-primary {
   background: var(--primary);
   color: var(--primary-foreground);
@@ -1458,29 +1406,100 @@ th.sortable:hover {
 .ai-btn-primary:active:not(:disabled) { filter: brightness(0.88); }
 .ai-btn-primary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .ai-btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
-.ai-btn-ghost {
+
+.ai-choice-letter { color: var(--muted); margin-right: var(--s1); font-variant-numeric: tabular-nums; }
+
+/* Set picker */
+.ai-picker { max-width: 1040px; margin: 0 auto; }
+.ai-picker-head { display: flex; flex-wrap: wrap; gap: var(--s4); align-items: flex-end; justify-content: space-between; margin-bottom: var(--s6); }
+.ai-picker-title { margin: 0; font-size: 1.22rem; letter-spacing: -0.02em; }
+.ai-mode-toggle { display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: var(--r-s); overflow: hidden; background: var(--surface); }
+.ai-mode-opt {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  text-align: left;
+  padding: var(--s2) var(--s4);
+  border: none;
   background: transparent;
   color: var(--ink-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-s);
-  padding: var(--s2) var(--s4);
-  font: inherit;
   cursor: pointer;
-  transition: background-color var(--t) var(--ease), border-color var(--t) var(--ease);
+  transition: background-color var(--t) var(--ease), color var(--t) var(--ease);
 }
-.ai-btn-ghost:hover { background: var(--surface-2); border-color: var(--border-2); }
-.ai-btn-ghost:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.ai-mode-opt + .ai-mode-opt { border-left: 1px solid var(--border); }
+.ai-mode-opt:hover { background: var(--surface-2); }
+.ai-mode-opt.is-active { background: var(--primary-lt); color: var(--ink); }
+.ai-mode-opt:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.ai-mode-name { font-size: 0.9rem; font-weight: 600; }
+.ai-mode-desc { font-size: 0.74rem; color: var(--muted); }
 
-/* Result review — full background tint per state, never a side-stripe accent. */
-.ai-review-list { list-style: none; margin: var(--s4) 0; padding: 0; display: flex; flex-direction: column; gap: var(--s2); }
+.ai-set-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--s4); }
+.ai-set-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: var(--s5);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.ai-set-card-top { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); }
+.ai-set-card h3 { margin: 0; font-size: 1.05rem; letter-spacing: -0.02em; }
+.ai-set-note { margin: 0; font-size: 0.9rem; line-height: 1.5; color: var(--ink-2); }
+.ai-set-count { font-size: 0.76rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ai-set-subject {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  background: var(--accent-lt);
+  border-radius: var(--r-xs);
+  padding: 2px var(--s2);
+}
+.ai-set-start { margin-top: var(--s2); align-self: flex-start; }
+
+/* Empty state */
+.ai-empty { max-width: 52ch; margin: var(--s10) auto 0; text-align: center; }
+.ai-empty-title { margin: 0 0 var(--s3); font-size: 1.22rem; letter-spacing: -0.02em; }
+.ai-empty-body { margin: 0; color: var(--ink-2); line-height: 1.6; }
+
+/* Result — score report */
+.ai-report {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s6);
+  padding: var(--s6);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--surface);
+  max-width: 640px;
+}
+.ai-report-score { display: flex; flex-direction: column; align-items: center; }
+.ai-report-big { font-family: 'Space Grotesk', sans-serif; font-size: 3rem; font-weight: 700; line-height: 1; letter-spacing: -0.03em; color: var(--primary); }
+.ai-report-of { font-size: 1.4rem; color: var(--muted); }
+.ai-report-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-top: var(--s1); }
+.ai-report-stats { display: flex; gap: var(--s8); margin: 0; }
+.ai-report-stats div { display: flex; flex-direction: column; gap: 2px; }
+.ai-report-stats dt { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.ai-report-stats dd { margin: 0; font-size: 1.3rem; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.ai-report-note { max-width: 640px; margin: var(--s4) 0 0; color: var(--ink-2); line-height: 1.6; }
+.ai-report-actions { margin-top: var(--s5); }
+
+/* Per-question review — full background tint per state, never a side-stripe. */
+.ai-review-list { list-style: none; margin: var(--s5) 0; padding: 0; display: flex; flex-direction: column; gap: var(--s2); max-width: 720px; }
 .ai-review-list li { border-radius: var(--r-s); padding: var(--s3) var(--s4); background: var(--surface-2); }
 .ai-review-list li.ok { background: var(--primary-lt); }
 .ai-review-list li.bad { background: var(--danger-lt); }
-.ai-review-q { font-size: 0.92rem; color: var(--ink); }
-.ai-review-meta { font-size: 0.85rem; color: var(--ink-2); margin-top: var(--s1); }
+.ai-review-q { font-size: 0.92rem; color: var(--ink); display: flex; gap: var(--s2); align-items: baseline; }
+.ai-review-n { font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+.ai-review-meta { font-size: 0.85rem; color: var(--ink-2); margin-top: var(--s2); display: flex; flex-wrap: wrap; gap: var(--s2); align-items: baseline; }
+.ai-review-result.ok { color: var(--primary); font-weight: 600; }
+.ai-review-result.bad { color: var(--danger); font-weight: 600; }
 
 @media (prefers-reduced-motion: reduce) {
-  .ai-choice, .ai-btn-primary, .ai-btn-ghost { transition: none; }
+  .ai-btn-primary, .ai-mode-opt { transition: none; }
 }
 
 .response-summary-cell {
