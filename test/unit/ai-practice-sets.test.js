@@ -20,6 +20,23 @@ test('isFlatGradeableChoices rejects empty, nested, and malformed', () => {
   assert.equal(isFlatGradeableChoices('not json'), false);
 });
 
+test('isFlatGradeableChoices rejects the B/D/F/H/J scrape corruption and blank choices', () => {
+  // StartTest mislabels choices as every-other-letter — labels must run A,B,C…
+  assert.equal(isFlatGradeableChoices('[{"label":"B","text":"1"},{"label":"D","text":"2"}]'), false);
+  // Zero-width-space "text" with no image is not renderable.
+  assert.equal(isFlatGradeableChoices('[{"label":"A","text":"1"},{"label":"B","text":"\\u200b\\u200b"}]'), false);
+  // A choice carrying only an inline image (math) IS renderable.
+  assert.equal(isFlatGradeableChoices('[{"label":"A","text":"","textHtml":"<img src=x>"},{"label":"B","text":"2"}]'), true);
+});
+
+test('correctAnswerInChoices flags answer keys that point at a missing choice', () => {
+  const { correctAnswerInChoices } = require('../../src/ai-practice-sets');
+  assert.equal(correctAnswerInChoices('[{"label":"A","text":"1"},{"label":"B","text":"2"}]', 'B'), true);
+  assert.equal(correctAnswerInChoices('[{"label":"A","text":"1"},{"label":"B","text":"2"}]', 'E'), false);
+  assert.equal(correctAnswerInChoices('[{"label":"B","text":"1"}]', 'E'), false);
+  assert.equal(correctAnswerInChoices('[{"label":"A","text":"1"}]', ''), false);
+});
+
 test('parseSetObject validates required fields and coerces items to ints', () => {
   const ok = parseSetObject({ slug: 'redo-01', title: 'T', focusNote: 'n', subject: 'Quant', items: [1, '2', 3] });
   assert.equal(ok.ok, true);

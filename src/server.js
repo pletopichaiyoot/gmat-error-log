@@ -1497,8 +1497,9 @@ app.get('/api/ai-practice/sets/:slug', async (req, res) => {
       questions: items.map((it) => ({
         itemId: it.itemId, topic: it.topic, difficulty: it.difficulty, source: it.source,
         question_stem: it.questionStem, question_stem_html: it.questionStemHtml,
-        // Strip per-choice isCorrect/isUserSelected/value flags — send label+text only.
-        answer_choices: safeParseChoices(it.answerChoices).map((c) => ({ label: c.label, text: c.text })),
+        // Strip the answer-key flags (isCorrect/isUserSelected/value) — anti-peek —
+        // but keep textHtml so math-image choices (OG) render as their equation.
+        answer_choices: safeParseChoices(it.answerChoices).map((c) => ({ label: c.label, text: c.text, textHtml: c.textHtml || null })),
       })),
     });
   } catch (err) {

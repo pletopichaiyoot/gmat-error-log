@@ -379,7 +379,7 @@ function Runner({ set, mode, onFinish, onExit }) {
               return (
                 <label key={c.label} className={cls}>
                   <input type="radio" name={`q-${q.itemId}`} value={c.label} disabled={submitted} checked={isPicked} onChange={() => pick(c.label)} />
-                  <span className="lsat-st-choice-text"><b className="ai-choice-letter">{c.label}.</b> <span dangerouslySetInnerHTML={{ __html: c.text || '' }} /></span>
+                  <span className="lsat-st-choice-text"><b className="ai-choice-letter">{c.label}.</b> <span dangerouslySetInnerHTML={{ __html: c.textHtml || c.text || '' }} /></span>
                 </label>
               );
             })}

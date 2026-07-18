@@ -2,7 +2,7 @@ const { Pool, types } = require('pg');
 const { toPg } = require('./sql-util');
 const { runMigrations } = require('../scripts/migrate');
 const { deriveQuestionMetadata, enrichQuestionMetadata } = require('./question-metadata');
-const { isFlatGradeableChoices } = require('./ai-practice-sets');
+const { isFlatGradeableChoices, correctAnswerInChoices } = require('./ai-practice-sets');
 
 // node-postgres returns int8/bigint (COUNT, SUM(int), session_external_id) and
 // numeric (ROUND results, computed percentages) as STRINGS to preserve precision.
@@ -1112,7 +1112,7 @@ async function listAiPracticeCandidates({ subject = '', wrongOnly = true, limit 
     params
   );
   // Final flat-gradeable filter (excludes multi-part DI) in JS.
-  return rows.filter((r) => isFlatGradeableChoices(r.answer_choices));
+  return rows.filter((r) => isFlatGradeableChoices(r.answer_choices) && correctAnswerInChoices(r.answer_choices, r.correct_answer));
 }
 
 // Resolve set item ids to servable question payloads + prior-attempt summary.
@@ -1135,7 +1135,7 @@ async function resolveAiPracticeSetItems(ids) {
   const missing = [];
   for (const id of clean) {           // preserve the set's item order
     const r = byId.get(id);
-    if (!r || !isFlatGradeableChoices(r.answer_choices) || !r.correct_answer) { missing.push(id); continue; }
+    if (!r || !isFlatGradeableChoices(r.answer_choices) || !correctAnswerInChoices(r.answer_choices, r.correct_answer)) { missing.push(id); continue; }
     items.push({
       itemId: r.id, qCode: r.q_code, source: r.source, subjectCode: r.subject_code,
       categoryCode: r.category_code, subcategory: r.subcategory, topic: r.topic,
