@@ -3500,6 +3500,14 @@ function App() {
                       <td>
                         <SourceBadge source={row.source} />
                         <ScoreChip row={row} />
+                        {Number(row.enrich_gap) > 0 && (
+                          <span
+                            className="enrich-flag"
+                            title={`${row.enrich_gap} answer${Number(row.enrich_gap) > 1 ? 's' : ''} missing — open this session and run Phase 2 (Enrich) to restore the picked/correct answers.`}
+                          >
+                            ⚠ enrich
+                          </span>
+                        )}
                       </td>
                       <td className="section-col"><SubjectCell row={row} /></td>
                       <td>{formatMaybe(row.question_count_display)}</td>

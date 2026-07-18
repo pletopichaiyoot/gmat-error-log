@@ -1346,6 +1346,29 @@ th.sortable:hover {
   white-space: nowrap;
 }
 
+/* Re-enrich flag on the Performance-by-Session table: a session that was
+   enriched but is now missing answer letters (Phase-1-rescrape clobber).
+   Aged-brass accent — attention without alarm, per "The Patient Coach". */
+.enrich-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 6px;
+  min-height: 20px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  vertical-align: middle;
+  cursor: help;
+  background: var(--accent-lt);
+  color: var(--accent-foreground);
+  border: 1px solid var(--accent);
+}
+
 .source-chip.source-starttest {
   background: rgba(56, 102, 209, 0.12);
   color: #1e3a8a;

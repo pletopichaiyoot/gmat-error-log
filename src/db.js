@@ -1363,6 +1363,20 @@ async function listSessions(runId, { limit, offset, platform, subject, startDate
         COALESCE(${answeredAvgTimeExpr}, s.avg_time_sec) AS avg_time_sec,
         COALESCE(${answeredAvgCorrectTimeExpr}, s.avg_correct_time_sec) AS avg_correct_time_sec,
         COALESCE(${answeredAvgWrongTimeExpr}, s.avg_incorrect_time_sec) AS avg_incorrect_time_sec,
+        -- Re-enrich flag: answered questions that WERE enriched (answer_choices
+        -- present) but have no correct_answer letter. That is precisely the
+        -- Phase-1-rescrape clobber signature — it does NOT match never-enriched
+        -- Phase-1-only rows (answer_choices IS NULL there), so the dashboard flag
+        -- stays low-noise and clears as the session is re-enriched.
+        SUM(
+          CASE
+            WHEN NOT (${unansweredExpr})
+              AND q.answer_choices IS NOT NULL
+              AND TRIM(q.answer_choices) NOT IN ('', '[]')
+              AND COALESCE(TRIM(q.correct_answer), '') = ''
+            THEN 1 ELSE 0
+          END
+        ) AS enrich_gap,
         SUM(CASE WHEN LOWER(COALESCE(q.difficulty, '')) = 'hard' THEN 1 ELSE 0 END) AS hard_total,
         SUM(
           CASE
