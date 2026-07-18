@@ -845,9 +845,15 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     );
 
     if (existing?.id) {
+      // This column list MUST include every field buildAttemptSnapshotIndex /
+      // buildAnnotationIndex read off the existing row. A field omitted here is
+      // silently NULL in the snapshot, so its Phase-1 rescrape preservation
+      // becomes a no-op even though the snapshot code + unit tests look correct
+      // (regression: my_answer/correct_answer/confidence were added to the
+      // snapshot but not here, so every rescrape kept re-wiping them).
       const existingAttempts = await tx.all(
         `
-          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, question_stem_html, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta, taxonomy_path, stimulus
+          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, question_stem_html, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta, taxonomy_path, stimulus, my_answer, correct_answer, confidence
           FROM question_attempts
           WHERE session_id = ?
         `,
