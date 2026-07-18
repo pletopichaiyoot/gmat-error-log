@@ -8,7 +8,7 @@ const LABEL_SEQUENCE = 'ABCDEFGH';
 // A choice is renderable if it has visible text (after stripping zero-width
 // junk the scraper leaves behind) OR an inline image (math questions).
 function choiceHasContent(c) {
-  const text = String(c.text ?? '').replace(/[\u200B\u200C\u200D\uFEFF\u00A0]/g, '').trim();
+  const text = String(c.text ?? '').replace(/[\u200B\u200C\uFEFF\u00A0]/g, '').trim();
   if (text !== '') return true;
   return !!(c.textHtml && String(c.textHtml).trim() !== '');
 }
