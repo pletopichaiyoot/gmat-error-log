@@ -17,3 +17,10 @@ test('strips scripts, event handlers, and external src', () => {
   assert.ok(!/<script/i.test(out), 'script stripped');
   assert.ok(!/https:\/\/evil/.test(out), 'external src stripped');
 });
+
+test('drops style with url()/expression() but keeps plain layout styles', () => {
+  const bad = sanitizeStimulusHtml('<div style="background:url(https://evil/steal)">x</div>');
+  assert.ok(!/url\(/i.test(bad), 'url() style stripped');
+  const ok = sanitizeStimulusHtml('<table style="text-align:center;width:600px"><tr><td>1</td></tr></table>');
+  assert.ok(/text-align:center/.test(ok), 'plain layout style kept');
+});

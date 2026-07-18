@@ -139,6 +139,7 @@ function sanitizeStimulusHtml(raw) {
       if (name.startsWith('on')) continue;
       if (!STIMULUS_ALLOWED_ATTRS.has(name)) continue;
       if (/javascript:/i.test(val)) continue;
+      if (name === 'style' && /url\s*\(|expression\s*\(/i.test(val)) continue;
       kept.push(`${name}="${escapeAttr(val)}"`);
     }
     return kept.length ? `<${tag} ${kept.join(' ')}>` : `<${tag}>`;
