@@ -99,4 +99,51 @@ function stemHtmlToText(html) {
   return s;
 }
 
-module.exports = { sanitizeStemHtml, stemHtmlToText, ALLOWED_TAGS };
+// Allowlist for DI stimulus: prose + tables + inline SVG shapes + data: images.
+const STIMULUS_ALLOWED_TAGS = new Set([
+  'p', 'br', 'b', 'strong', 'i', 'em', 'sup', 'sub', 'span', 'div', 'h1', 'h2', 'h3', 'ul', 'ol', 'li',
+  'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'colgroup', 'col',
+  'svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'text', 'tspan', 'defs', 'title', 'desc',
+  'img',
+]);
+// SVG geometry/label attributes worth keeping; anything else is dropped.
+const STIMULUS_ALLOWED_ATTRS = new Set([
+  'class', 'colspan', 'rowspan', 'scope', 'aria-rowcount', 'border', 'style',
+  'x', 'y', 'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'width', 'height',
+  'd', 'points', 'transform', 'viewBox', 'fill', 'stroke', 'stroke-width', 'text-anchor', 'font-size', 'dominant-baseline',
+]);
+
+function sanitizeStimulusHtml(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return '';
+  let html = raw
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '');
+  // Drop <img> whose src is not a data: image entirely.
+  html = html.replace(/<img\b[^>]*>/gi, (tag) => {
+    const src = (tag.match(/\bsrc\s*=\s*"([^"]*)"/i) || [])[1] || '';
+    return /^data:image\//i.test(src) ? `<img src="${escapeAttr(src)}">` : '';
+  });
+  // Walk every remaining tag: drop disallowed tags; on allowed tags, keep only
+  // allowed attributes and never keep on*-handlers or javascript: urls.
+  html = html.replace(/<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:[^">]|"[^"]*")*)>/g, (m, slash, tagRaw, attrs) => {
+    const tag = tagRaw.toLowerCase();
+    if (!STIMULUS_ALLOWED_TAGS.has(tag)) return '';
+    if (slash) return `</${tag}>`;
+    if (tag === 'img') return m; // already normalized above
+    const kept = [];
+    const re = /([a-zA-Z-]+)\s*=\s*"([^"]*)"/g;
+    let a;
+    while ((a = re.exec(attrs)) !== null) {
+      const name = a[1].toLowerCase();
+      const val = a[2];
+      if (name.startsWith('on')) continue;
+      if (!STIMULUS_ALLOWED_ATTRS.has(name)) continue;
+      if (/javascript:/i.test(val)) continue;
+      kept.push(`${name}="${escapeAttr(val)}"`);
+    }
+    return kept.length ? `<${tag} ${kept.join(' ')}>` : `<${tag}>`;
+  });
+  return html.trim();
+}
+
+module.exports = { sanitizeStemHtml, stemHtmlToText, ALLOWED_TAGS, sanitizeStimulusHtml };
