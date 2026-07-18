@@ -2937,14 +2937,21 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
     // eaten and the label is misread from the body.
     const cleanText = (s) => String(s || '').replace(/^\s*[A-Za-z][\).]\s+/, '').replace(/\s+/g, ' ').trim();
     let answerChoicesArr = [];
+    // value → positional letter map for single-choice items (built below). The
+    // user's pick (answerSelection) and the Key1 correct-answer are both
+    // expressed as radio `value`s, so we translate them through this map to get
+    // letters consistent with the labels. Stays null for matrix/dropdown.
+    let valueToLetter = null;
     if (item.choicesType === 'single' && Array.isArray(item.choices)) {
       answerChoicesArr = item.choices.map((c, idx) => {
-        const valNum = Number(c?.value);
-        const letterFromValue = (Number.isInteger(valNum) && valNum >= 1 && valNum <= 26)
-          ? String.fromCharCode(64 + valNum) : null;
-        // Same separator-required guard: "A) ..." → "A", but "Bacteria..." → null.
+        // Label from POSITION (A,B,C… in DOM order) — the authoritative A–E order
+        // for single-choice MC. A leading enumerator ("A) …") confirms it when
+        // present. We deliberately do NOT derive the letter from the radio's
+        // numeric `value`: StartTest sometimes numbers values 2,4,6,8,10 (not
+        // 1..5), and fromCharCode(64+value) then produces B,D,F,H,J — the
+        // "every other letter" label corruption. Position is scheme-independent.
         const letterFromLabel = String(c?.label || '').match(/^\s*([A-E])[\).]/)?.[1] || null;
-        const label = letterFromLabel || letterFromValue || String.fromCharCode(65 + idx);
+        const label = letterFromLabel || String.fromCharCode(65 + idx);
         return {
           label,
           text: cleanText(c?.label),
@@ -2958,6 +2965,12 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
           isUserSelected: !!c?.isUserSelected,
         };
       });
+      // Build value→letter from the SAME positional labels, so downstream
+      // value-based signals (answerSelection user-pick, Key1 correct answer)
+      // resolve to matching letters regardless of the value numbering scheme.
+      valueToLetter = new Map(
+        item.choices.map((c, idx) => [String(c?.value), answerChoicesArr[idx]?.label])
+      );
     } else if (item.choicesType === 'matrix' && item.choices?.rows) {
       // Matrix: one element per sub-question (row). The UI's per-row
       // rendering will need its own component later; for now we expose enough
@@ -3028,7 +3041,12 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
         // The positional `value` (1..5 → A..E) is the authoritative signal
         // for StartTest pages where labels are bare text.
         const labelLetter = (c.label || '').match(/^\s*([A-E])[\).]/)?.[1];
-        return labelLetter || choiceValueToLetter(c.value) || (c.value != null ? String(c.value) : null);
+        // Prefer the positional value→letter map (immune to StartTest's 2,4,6,8,10
+        // value scheme); fall back to the legacy value→letter, then the raw value.
+        return labelLetter
+          || (valueToLetter && valueToLetter.get(String(c.value)))
+          || choiceValueToLetter(c.value)
+          || (c.value != null ? String(c.value) : null);
       };
       const byRow = item.choices.find((c) => c && c.pickByRow === true);
       const byColor = byRow ? null : item.choices.find((c) => c && c.pickByColor === true);
@@ -3104,10 +3122,15 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
       } else if (item.choicesType === 'matrix' || rawKey.includes(',') || rawKey.includes(';')) {
         correctAnswer = rawKey.replace(/;/g, ','); // normalize separator
       } else {
+        // Key1 is the correct choice's raw `value`. Translate it through the same
+        // positional map as the labels, so an even-valued scheme (2,4,6,8,10)
+        // resolves to the right letter instead of B/D/F/H/J. Fall back to the
+        // legacy 1..26 → A..Z only when the value isn't among the choices.
         const n = Number(rawKey);
-        correctAnswer = (Number.isInteger(n) && n >= 1 && n <= 26)
+        const legacyLetter = (Number.isInteger(n) && n >= 1 && n <= 26)
           ? String.fromCharCode(64 + n)
           : rawKey;
+        correctAnswer = (valueToLetter && valueToLetter.get(rawKey)) || legacyLetter;
       }
     }
     // Fallback: if no Key1 was found (some item types) but we know the user
