@@ -1382,6 +1382,12 @@ th.sortable:hover {
   border: 1px solid rgba(225, 29, 72, 0.34);
 }
 
+.source-chip.source-ai-curated {
+  background: rgba(61, 122, 94, 0.14);
+  color: #2f5f49;
+  border: 1px solid rgba(61, 122, 94, 0.30);
+}
+
 .response-summary-cell {
   display: block;
   min-width: 0;

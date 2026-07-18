@@ -10,6 +10,7 @@ import PassageLines from './PassageLines';
 // The dashboard (default route) loads without them; they fetch on demand when
 // the user navigates to #lsat or #study-plan.
 const LsatPractice = lazy(() => import('./LsatPractice'));
+const AiPractice = lazy(() => import('./AiPractice'));
 const StudyPlan = lazy(() => import('./StudyPlan'));
 
 function RouteFallback() {
@@ -790,6 +791,7 @@ function getSourcePlatform(sourceLabel) {
   const raw = String(sourceLabel || '').trim();
   if (!raw) return null;
   if (/lsat/i.test(raw)) return 'lsat';
+  if (/ai\s*curated/i.test(raw)) return 'ai-curated';
   if (/gmat\s*club\s*cat/i.test(raw)) return 'gmatclub-cat';
   if (/gmat\s*club/i.test(raw)) return 'gmatclub';
   if (/target\s*test\s*prep/i.test(raw)) return 'ttp';
@@ -802,6 +804,7 @@ function SourceBadge({ source }) {
   if (!platform) return <span className="muted">-</span>;
   const label =
     platform === 'lsat' ? 'LSAT' :
+    platform === 'ai-curated' ? 'AI Curated' :
     platform === 'gmatclub-cat' ? 'GMAT Club CAT' :
     platform === 'gmatclub' ? 'GMAT Club' :
     platform === 'ttp' ? 'Target Test Prep' :
@@ -1061,6 +1064,7 @@ function FirstRunWelcome({
 
 function modeFromHash(hash) {
   if (hash === '#lsat') return 'lsat';
+  if (hash === '#ai-practice') return 'ai-practice';
   if (hash === '#study-plan' || hash === '#plan') return 'study-plan';
   return 'gmat';
 }
@@ -2808,6 +2812,13 @@ function App() {
       </Suspense>
     );
   }
+  if (appMode === 'ai-practice') {
+    return (
+      <Suspense fallback={<RouteFallback />}>
+        <AiPractice onExit={() => { window.location.hash = ''; }} />
+      </Suspense>
+    );
+  }
   if (appMode === 'study-plan') {
     return (
       <Suspense fallback={<RouteFallback />}>
@@ -2839,6 +2850,9 @@ function App() {
           </Button>
           <Button variant="outline" size="sm" type="button" onClick={() => { window.location.hash = '#lsat'; }}>
             LSAT Practice
+          </Button>
+          <Button variant="outline" size="sm" type="button" onClick={() => { window.location.hash = '#ai-practice'; }}>
+            AI Practice
           </Button>
           <Button variant="outline" size="sm" asChild>
             <a
@@ -3311,6 +3325,7 @@ function App() {
               <option value="gmatclub-cat">GMAT Club CAT</option>
               <option value="ttp">Target Test Prep</option>
               <option value="lsat">LSAT</option>
+              <option value="ai-curated">AI Curated</option>
             </Select>
             <Select
               className="filter-select"
@@ -3511,6 +3526,7 @@ function App() {
                       <option value="gmatclub-cat">GMAT Club CAT</option>
                       <option value="ttp">Target Test Prep</option>
                       <option value="lsat">LSAT</option>
+                      <option value="ai-curated">AI Curated</option>
                     </Select>
                     <Select
                       className="filter-select"
