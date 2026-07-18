@@ -11,7 +11,7 @@
 
 const { htmlToReadableText } = require('./mathml-text');
 const { splitStemAndPassage } = require('./question-stem-split');
-const { sanitizeStemHtml, stemHtmlToText } = require('./ope-stem');
+const { sanitizeStemHtml, stemHtmlToText, sanitizeStimulusHtml } = require('./ope-stem');
 
 const STARTTEST_HOST_RE = /starttest\.com/i;
 const BOOK_SESSION_TABLE_SEL = 'table.PracticeSessionsTable-tbl tbody tr';
@@ -1323,6 +1323,41 @@ async function readReviewFrame(frame) {
       }
     }
 
+    // --- DI stimulus (charts/tables/MSR sources) ---
+    // Review mode flattens all sources into the DOM. Collect the item stimulus:
+    // the stem region + illustration + any titled reference sources, but NOT the
+    // solution rationale (which shares the passage-block/ItemRationaleText class).
+    const stimulusRoots = [
+      document.querySelector('.its-item-table.ITSStem'),
+      document.querySelector('.illustration-container'),
+    ].filter(Boolean);
+    // MSR reference sources: titled blocks under ItemReferenceTitleText. Keep the
+    // titled section HTML/text; the plain rationale (no ItemReferenceTitleText
+    // sibling title) is excluded.
+    const referenceSources = Array.from(document.querySelectorAll('h2.ItemReferenceTitleText')).map((h) => {
+      const container = h.closest('.rationale, .passage-block, .ItemRationaleText') || h.parentElement;
+      return { title: (h.innerText || '').trim(), html: container ? container.innerHTML : '', text: container ? (container.innerText || '').trim() : '' };
+    });
+    const hasSvg = stimulusRoots.some((el) => el.querySelector('svg'));
+    const hasTable = stimulusRoots.some((el) => el.querySelector('table.table, table[border]'));
+    const stimulusHtmlRaw = stimulusRoots.map((el) => el.innerHTML).join('\n');
+    // Mark itdmedia <img>s for the Node side to screenshot: give each a data-shot
+    // index so we can find and replace it after screenshotting.
+    let shotIdx = 0;
+    const itdmediaSelectors = [];
+    stimulusRoots.forEach((root) => {
+      root.querySelectorAll('img').forEach((im) => {
+        const src = im.getAttribute('src') || '';
+        if (/itdmedia\.aspx/i.test(src)) {
+          im.setAttribute('data-shot', String(shotIdx));
+          itdmediaSelectors.push(`[data-shot="${shotIdx}"]`);
+          shotIdx += 1;
+        }
+      });
+    });
+    const stimulusHtmlMarked = stimulusRoots.map((el) => el.innerHTML).join('\n');
+    const stimulusKind = referenceSources.length ? 'msr' : hasTable && !hasSvg ? 'table' : hasSvg ? 'graph' : (hasTable ? 'mixed' : null);
+
     return {
       vItemName: window.vItemName || null,
       vItemType: window.vItemType || null,
@@ -1344,6 +1379,11 @@ async function readReviewFrame(frame) {
       rationaleHtml: cleanMathHtml(pickEl(['.ItemRationaleText'])),
       choicesType,
       choices,
+      stimulusHtmlMarked,
+      stimulusKind,
+      referenceSources,
+      itdmediaSelectors,
+      itemStimulusPresent: !!(hasSvg || hasTable || referenceSources.length),
     };
   });
 
@@ -1410,6 +1450,41 @@ async function readReviewFrame(frame) {
     if (split.stem) data.stem = split.stem;
     if (split.passage && !data.passage) data.passage = split.passage;
   }
+
+  // Build the DI stimulus object: screenshot each itdmedia chart image into a
+  // self-contained data: PNG, then sanitize the whole stimulus region.
+  if (data.itemStimulusPresent) {
+    let html = data.stimulusHtmlMarked || '';
+    for (const sel of data.itdmediaSelectors || []) {
+      try {
+        const handle = await frame.$(sel);
+        if (!handle) continue;
+        const buf = await handle.screenshot({ type: 'png' });
+        const dataUri = `data:image/png;base64,${buf.toString('base64')}`;
+        // Replace the marked <img ... data-shot="N" ...> with a data: img.
+        const shot = (sel.match(/data-shot="(\d+)"/) || [])[1];
+        const imgRe = new RegExp(`<img\\b[^>]*data-shot="${shot}"[^>]*>`, 'i');
+        html = html.replace(imgRe, `<img src="${dataUri}">`);
+      } catch (_e) { /* leave the (dead) itdmedia img; sanitizer will drop it */ }
+    }
+    const safeHtml = sanitizeStimulusHtml(html);
+    const sources = (data.referenceSources || []).map((s) => ({
+      title: s.title, html: sanitizeStimulusHtml(s.html), text: s.text,
+    }));
+    // dataText for the coach: stem-region text + each source's text.
+    const dataText = [
+      ...(data.stem ? [data.stem] : []),
+      ...sources.map((s) => `${s.title}\n${s.text}`),
+    ].join('\n\n').trim();
+    data.stimulus = safeHtml || sources.length
+      ? { kind: data.stimulusKind || 'mixed', html: safeHtml, dataText, sources }
+      : null;
+  } else {
+    data.stimulus = null;
+  }
+  // Drop the transient capture fields so they don't leak downstream.
+  delete data.stimulusHtmlMarked; delete data.itdmediaSelectors;
+  delete data.referenceSources; delete data.itemStimulusPresent; delete data.stimulusKind;
 
   return data;
 }
@@ -1753,6 +1828,9 @@ async function runPhase2({ page, options = {} }) {
       enriched.push({
         seq,
         itemMeta, // {FormQuestionID, ValidationGuid, ItemName, ResultID}
+        // `...frameData` carries every field readReviewFrame returns onto the
+        // enriched item, including `stimulus` (DI chart/table/MSR capture) —
+        // no separate assignment needed here.
         ...frameData,
       });
       prevItemName = frameData.vItemName || expectedName || prevItemName;
