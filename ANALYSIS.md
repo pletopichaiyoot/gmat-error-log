@@ -231,3 +231,62 @@ All endpoints are on `http://127.0.0.1:4310` and the Vite dev server proxies `/a
 - **`topic_source = 'gmatclub-canonical'` rows are pre-mapped at scrape time** by `GMATCLUB_CATEGORY_TO_CODE`; only ~4-5% of GMAT Club rows ever hit the LLM classifier. If a topic looks misclassified, check the mapping in `src/scrapers/gmat_club_scraper.js` first.
 - **Annotations (`mistake_type`, `notes`) survive re-scrapes.** Phase 1 deletes-and-reinserts attempts but copies annotations forward by `q_id`; Phase 2 is `UPDATE`-only. Safe to query at any time.
 - **`subcategory` is sometimes a 3–5 char abbreviation** (StartTest) and sometimes a full label (GMAT Club). For display, `pickReadableSubcategory` in `client/src/App.jsx` prefers `topic` whenever `subcategory` looks abbreviation-shaped.
+
+## Curating an AI Practice set
+
+The **AI Curated Practice** tab lets you redo previously-attempted questions you got wrong. Curation itself happens *outside* the app: you (as Claude, in a coding session — "Claude Cowork") query the error log, pick which attempts are worth a redo, and write a small JSON file. The app does the rest — lists the set, serves each question (answer stripped), grades the submission server-side, and logs a new session so it shows up in the dashboard like any other practice.
+
+**Workflow:**
+
+1. Query the DB for redo candidates (see SQL below) — wrong, gradeable, oldest-first.
+2. Pick the ids you want (e.g. by topic/subject/`mistake_type`) and write a set file.
+3. User opens the **AI Practice** tab → the set appears → **Start** → answers each question → **Finish**.
+4. The app logs a new session with `source = 'AI Curated Practice'`, one `question_attempts` row per item, **`q_code` copied unchanged from the original attempt** — so the redo links back to the prior attempt(s) even if the original came from a different platform (GMAT Club, StartTest, TTP, …). `q_id` is synthesized as `aic-att-<slug>-<n>` (not stable across re-edits of the set file — don't rely on it for identity, use `q_code`).
+
+**Where set files live:** `data/ai-practice-sets/<slug>.json` — gitignored, **read fresh on every request** (`readSetFiles()` in `src/ai-practice-sets.js`, called with no caching from `loadAiPracticeSets()` in `src/server.js`). No server restart needed after adding/editing a file.
+
+**Set-file schema:**
+
+```json
+{
+  "slug": "quant-algebra-redo-01",
+  "title": "Algebra redo — inequalities & exponents",
+  "focusNote": "Recent misses on inequality direction-flips and exponent rules.",
+  "subject": "Quant",
+  "items": [1287, 1290, 1305]
+}
+```
+
+- `slug` must match `^[a-z0-9][a-z0-9-]*$` and doubles as the filename stem (by convention, though the loader doesn't enforce filename==slug).
+- `items` are **`question_attempts.id`** values (the DB row id of the *original* enriched attempt) — not `q_code`, not `q_id`. Get these straight out of the candidate query below.
+- `title`/`focusNote`/`subject` are display-only; `subject` isn't validated against the Q/Verbal/DI enum.
+
+**Gradeability requirement (v1 is single-answer only):** an item is only servable if it has a non-empty `question_stem`, `answer_choices` that parse as a **flat** `[{label, text, ...}]` array, and a non-empty `correct_answer`. Multi-part DI (TPA/MSR/GI matrix items, which nest `options[]` inside each row) fail this check — `isFlatGradeableChoices()` in `src/ai-practice-sets.js` explicitly rejects any choice object carrying an `options` key. Don't put multi-part DI attempt ids in a set file; they'll be silently dropped.
+
+Ungradeable or missing ids aren't an error — `GET /api/ai-practice/sets/:slug` returns them in a `missing: [id, ...]` array alongside the servable `questions`, so a set can be curated a little loosely and the UI just shows fewer questions than `items.length`.
+
+**Candidate SQL** (redo candidates: wrong, gradeable, least-recently-attempted first — reproduced from `listAiPracticeCandidates` in `src/db.js`):
+
+```sql
+SELECT qa.id, qa.q_code, s.source, qa.topic, qa.subcategory, qa.difficulty,
+       qa.correct, qa.created_at
+FROM question_attempts qa JOIN sessions s ON s.id = qa.session_id
+WHERE qa.correct = 0
+  AND qa.question_stem IS NOT NULL AND length(qa.question_stem) > 10
+  AND qa.answer_choices IS NOT NULL AND qa.answer_choices NOT IN ('', '[]')
+  AND qa.correct_answer IS NOT NULL AND qa.correct_answer <> ''
+  AND LOWER(COALESCE(s.source,'')) NOT LIKE '%ai curated%'
+  AND qa.subject_code = 'Q'
+ORDER BY qa.created_at ASC
+LIMIT 30;
+```
+
+Notes on the SQL:
+- `subject_code` is `'Q' | 'V' | 'DI'` — drop that line entirely to pull candidates across all subjects.
+- The `NOT LIKE '%ai curated%'` guard keeps you from re-curating an already-curated redo as a "candidate" (its `answer_choices` there is the stripped `{label,text}` shape anyway).
+- This is the same predicate the real endpoint uses (`listAiPracticeCandidates`), plus a JS-side `isFlatGradeableChoices()` pass to drop multi-part DI — replicate that filter (no nested `options[]` in any choice) if you run the SQL by hand instead of hitting the function directly, since raw SQL can't easily express "flat JSON array of objects with no `options` key."
+- Add `AND qa.mistake_type = '...'` or `AND LOWER(qa.topic) LIKE '%...%'` to scope curation to a specific weakness.
+
+**Platform/badge plumbing:** the source label is `AI Curated Practice`; the platform key is `ai-curated` (`platformWhereClause('ai-curated')` in `src/db.js` matches `LOWER(source) LIKE '%ai curated%'`), consistent with how every other source is filtered (see "Source-platform identification" in CLAUDE.md).
+
+**Difficulty**: the original attempt's `difficulty` label is copied onto the new redo row as-is; `difficulty_theta` is never set (AI Curated Practice is not IRT-scored — same rule as every non-OPE source, see CLAUDE.md).
