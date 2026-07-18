@@ -7,7 +7,10 @@ const {
   dbPath,
   initDb,
   get: dbGet,
+  all: dbAll,
   saveScrapeResult,
+  resolveAiPracticeSetItems,
+  logAiCuratedSession,
   enrichSessionAttempts,
   enrichGmatClubSessionAttempts,
   enrichGmatClubCatSessionAttempts,
@@ -88,6 +91,9 @@ const {
   deleteSession: deleteCoachSession,
 } = require('./coach-session');
 const { isMemoryEnabled, getAllMemories, deleteMemory, deleteAllMemories } = require('./memory');
+const { readSetFiles } = require('./ai-practice-sets');
+const AI_SETS_DIR = path.join(__dirname, '..', 'data', 'ai-practice-sets');
+function loadAiPracticeSets() { return readSetFiles(AI_SETS_DIR); } // fresh every call — no cache
 
 // Process-level safety net. The Phase 2 scrapers hold a long-lived Playwright
 // CDP connection to the user's Chrome that we deliberately never close (closing
@@ -1442,6 +1448,105 @@ app.post('/api/scrape', async (req, res) => {
     }));
   }
 });
+
+// ---------- AI Curated Practice endpoints ----------
+
+app.get('/api/ai-practice/sets', async (req, res) => {
+  try {
+    const sets = loadAiPracticeSets();
+    // completedCount = how many logged AI-curated sessions exist per slug (q_id prefix aic-att-<slug>-).
+    const counts = await dbAll(
+      `SELECT count(DISTINCT qa.session_id) AS n,
+              substring(qa.q_id from 'aic-att-(.*)-[0-9]+$') AS slug
+         FROM question_attempts qa
+        WHERE qa.q_id LIKE 'aic-att-%'
+        GROUP BY slug`
+    );
+    const bySlug = new Map(counts.map((c) => [c.slug, Number(c.n) || 0]));
+    res.json({
+      sets: sets.map((s) => ({
+        slug: s.slug, title: s.title, focusNote: s.focusNote, subject: s.subject,
+        count: s.items.length, completedCount: bySlug.get(s.slug) || 0,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/ai-practice/sets/:slug', async (req, res) => {
+  try {
+    const set = loadAiPracticeSets().find((s) => s.slug === req.params.slug);
+    if (!set) return res.status(404).json({ error: 'Set not found' });
+    const { items, missing } = await resolveAiPracticeSetItems(set.items);
+    res.json({
+      slug: set.slug, title: set.title, focusNote: set.focusNote, subject: set.subject,
+      missing,
+      questions: items.map((it) => ({
+        itemId: it.itemId, topic: it.topic, difficulty: it.difficulty, source: it.source,
+        question_stem: it.questionStem, question_stem_html: it.questionStemHtml,
+        // Strip per-choice isCorrect/isUserSelected/value flags — send label+text only.
+        answer_choices: safeParseChoices(it.answerChoices).map((c) => ({ label: c.label, text: c.text })),
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function safeParseChoices(raw) {
+  try { const a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch (_e) { return []; }
+}
+
+app.post('/api/ai-practice/sets/:slug/submit', async (req, res) => {
+  try {
+    const set = loadAiPracticeSets().find((s) => s.slug === req.params.slug);
+    if (!set) return res.status(404).json({ error: 'Set not found' });
+    const answers = Array.isArray(req.body?.answers) ? req.body.answers : [];
+    if (answers.length === 0) return res.status(400).json({ error: 'No answers submitted' });
+
+    const { items } = await resolveAiPracticeSetItems(set.items);
+    const byItem = new Map(items.map((it) => [it.itemId, it]));
+
+    const gradedItems = [];
+    const results = [];
+    for (const a of answers) {
+      const it = byItem.get(Number(a.itemId));
+      if (!it) continue;                                   // stale/unavailable — skip
+      const your = String(a.answer || '').trim();
+      const key = String(it.correctAnswer || '').trim();
+      const correct = gradeAnswer(your, key, it.answerChoices) ? 1 : 0;
+      gradedItems.push({ served: it, myAnswer: your, correct, timeSec: a.timeSec, confidence: a.confidence });
+      results.push({ itemId: it.itemId, correct, yourAnswer: your, correctAnswer: key, priorAttempt: it.priorAttempt });
+    }
+    if (gradedItems.length === 0) return res.status(400).json({ error: 'No gradeable answers' });
+
+    const { sessionId } = await logAiCuratedSession({
+      slug: set.slug, title: set.title, subject: set.subject, gradedItems,
+    });
+    res.json({
+      sessionId,
+      score: { correct: gradedItems.filter((g) => g.correct === 1).length, total: gradedItems.length },
+      results,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Grade a chosen label against the stored correct_answer. Matches on label
+// (case-insensitive), or on the chosen choice's text when correct_answer holds
+// full text rather than a letter.
+function gradeAnswer(yourLabel, correctAnswer, answerChoicesJson) {
+  const y = String(yourLabel || '').trim().toUpperCase();
+  const k = String(correctAnswer || '').trim().toUpperCase();
+  if (!y || !k) return false;
+  if (y === k) return true;
+  const choices = safeParseChoices(answerChoicesJson);
+  const chosen = choices.find((c) => String(c.label || '').trim().toUpperCase() === y);
+  if (chosen && String(chosen.text || '').trim().toUpperCase() === k) return true;
+  return false;
+}
 
 // ---------- LSAT practice endpoints ----------
 let lsatDataCache = null;
