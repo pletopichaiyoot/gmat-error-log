@@ -34,6 +34,7 @@ coverage/
 
 # Copyrighted study materials & personal docs — never publish (public repo)
 /data/lsat-questions.json
+/data/ai-practice-sets/*.json
 /*.pdf
 /*.ics
 /COACHING.md
