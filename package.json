@@ -7,7 +7,7 @@
     "start": "node src/server.js",
     "dev:api": "node --watch src/server.js",
     "dev:web": "vite --config client/vite.config.js",
-    "dev": "concurrently -k \"npm:dev:api\" \"npm:dev:web\"",
+    "dev": "concurrently -k -n api,web \"npm run dev:api\" \"wait-on -t 60000 tcp:127.0.0.1:4310 && npm run dev:web\"",
     "build:web": "vite build --config client/vite.config.js",
     "preview:web": "vite preview --config client/vite.config.js",
     "lint": "eslint .",
@@ -75,6 +75,7 @@
     "globals": "^15.15.0",
     "postcss": "^8.5.8",
     "tailwindcss": "^3.4.17",
-    "vite": "^6.4.1"
+    "vite": "^6.4.1",
+    "wait-on": "^9.0.10"
   }
 }
