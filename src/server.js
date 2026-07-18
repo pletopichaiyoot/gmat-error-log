@@ -1534,6 +1534,30 @@ app.post('/api/ai-practice/sets/:slug/submit', async (req, res) => {
   }
 });
 
+// Per-question grade for "immediate feedback" mode: reveals the answer for a
+// SINGLE item the user has already committed to, keeping the rest of the set's
+// key hidden (anti-peek). Read-only — does NOT log; the end-of-session submit
+// remains the authoritative writer. The itemId must belong to this set, so a
+// caller can't harvest answers for arbitrary question rows.
+app.post('/api/ai-practice/sets/:slug/grade', async (req, res) => {
+  try {
+    const set = loadAiPracticeSets().find((s) => s.slug === req.params.slug);
+    if (!set) return res.status(404).json({ error: 'Set not found' });
+    const itemId = Number(req.body?.itemId);
+    if (!Number.isInteger(itemId) || !set.items.includes(itemId)) {
+      return res.status(400).json({ error: 'Item not in set' });
+    }
+    const { items } = await resolveAiPracticeSetItems([itemId]);
+    const it = items[0];
+    if (!it) return res.status(404).json({ error: 'Item not gradeable' });
+    const your = String(req.body?.answer || '').trim();
+    const correct = gradeAnswer(your, it.correctAnswer, it.answerChoices) ? 1 : 0;
+    res.json({ itemId, correct, correctAnswer: it.correctAnswer });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Grade a chosen label against the stored correct_answer. Matches on label
 // (case-insensitive), or on the chosen choice's text when correct_answer holds
 // full text rather than a letter.

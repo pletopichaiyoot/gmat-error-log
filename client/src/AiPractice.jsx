@@ -97,6 +97,8 @@ function Runner({ set, feedbackMode, onFinish, onQuit }) {
   const [idx, setIdx] = useState(0);
   const [answers, setAnswers] = useState({});        // itemId -> { answer, timeSec, confidence }
   const [revealed, setRevealed] = useState(false);   // immediate mode: reveal current
+  const [feedback, setFeedback] = useState({});      // itemId -> { correct, correctAnswer }
+  const [checking, setChecking] = useState(false);
   const startRef = useRef(Date.now());
   const q = set.questions[idx];
   const last = idx === set.questions.length - 1;
@@ -108,9 +110,27 @@ function Runner({ set, feedbackMode, onFinish, onQuit }) {
     setAnswers((a) => ({ ...a, [q.itemId]: { answer: label, timeSec, confidence: a[q.itemId]?.confidence || null } }));
   };
   const chosen = answers[q.itemId]?.answer || null;
+  const fb = feedback[q.itemId] || null;
 
-  const next = () => {
-    if (feedbackMode === 'immediate' && !revealed) { setRevealed(true); return; }
+  const next = async () => {
+    // Immediate mode: first click grades THIS question server-side (revealing
+    // only its answer, not the rest of the set), then reveals; second click advances.
+    if (feedbackMode === 'immediate' && !revealed) {
+      setChecking(true);
+      try {
+        const r = await fetch(`${API}/sets/${set.slug}/grade`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ itemId: q.itemId, answer: chosen }),
+        });
+        if (r.ok) {
+          const data = await r.json();
+          setFeedback((f) => ({ ...f, [q.itemId]: { correct: data.correct, correctAnswer: data.correctAnswer } }));
+        }
+      } catch (_e) { /* network error — reveal without inline grade */ }
+      setChecking(false);
+      setRevealed(true);
+      return;
+    }
     if (last) {
       const payload = set.questions
         .filter((it) => answers[it.itemId])
@@ -119,6 +139,16 @@ function Runner({ set, feedbackMode, onFinish, onQuit }) {
     } else {
       setIdx((i) => i + 1);
     }
+  };
+
+  const choiceClass = (label) => {
+    let cls = 'ai-choice';
+    if (chosen === label) cls += ' selected';
+    if (feedbackMode === 'immediate' && revealed && fb) {
+      if (label === fb.correctAnswer) cls += ' correct';
+      else if (label === chosen) cls += ' wrong';
+    }
+    return cls;
   };
 
   return (
@@ -137,7 +167,7 @@ function Runner({ set, feedbackMode, onFinish, onQuit }) {
           <li key={c.label}>
             <button
               type="button"
-              className={`ai-choice${chosen === c.label ? ' selected' : ''}`}
+              className={choiceClass(c.label)}
               onClick={() => pick(c.label)}
               disabled={feedbackMode === 'immediate' && revealed}
             >
@@ -147,11 +177,15 @@ function Runner({ set, feedbackMode, onFinish, onQuit }) {
         ))}
       </ul>
       {feedbackMode === 'immediate' && revealed && (
-        <p className="muted">Answer recorded — correctness shown on the results screen.</p>
+        fb
+          ? <p className={fb.correct ? 'ai-fb-correct' : 'ai-fb-wrong'}>
+              {fb.correct ? '✓ Correct' : `✗ Not quite — correct answer: ${fb.correctAnswer}`}
+            </p>
+          : <p className="muted">Answer recorded — correctness shown on the results screen.</p>
       )}
       <div className="ai-runner-foot">
-        <button type="button" className="ai-btn-primary" onClick={next} disabled={!chosen}>
-          {feedbackMode === 'immediate' && !revealed ? 'Check' : last ? 'Finish' : 'Next'}
+        <button type="button" className="ai-btn-primary" onClick={next} disabled={!chosen || checking}>
+          {checking ? 'Checking…' : feedbackMode === 'immediate' && !revealed ? 'Check' : last ? 'Finish' : 'Next'}
         </button>
       </div>
     </main>
