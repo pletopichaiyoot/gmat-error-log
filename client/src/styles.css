@@ -1409,6 +1409,24 @@ th.sortable:hover {
 
 .ai-choice-letter { color: var(--muted); margin-right: var(--s1); font-variant-numeric: tabular-nums; }
 
+/* Review-mode answer reveal (full tint per state, never a side-stripe). */
+.ai-reveal {
+  display: flex;
+  gap: var(--s3);
+  align-items: baseline;
+  margin: var(--s4) 0 0;
+  padding: var(--s3) var(--s4);
+  border-radius: var(--r-s);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+.ai-reveal.is-correct { background: var(--primary-lt); color: var(--ink); }
+.ai-reveal.is-wrong { background: var(--danger-lt); color: var(--ink); }
+.ai-reveal-mark { font-weight: 700; font-size: 1.1rem; flex: none; }
+.ai-reveal.is-correct .ai-reveal-mark { color: var(--primary); }
+.ai-reveal.is-wrong .ai-reveal-mark { color: var(--danger); }
+.ai-reveal-hint { color: var(--muted); }
+
 /* Set picker */
 .ai-picker { max-width: 1040px; margin: 0 auto; }
 .ai-picker-head { display: flex; flex-wrap: wrap; gap: var(--s4); align-items: flex-end; justify-content: space-between; margin-bottom: var(--s6); }

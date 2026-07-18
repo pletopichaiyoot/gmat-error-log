@@ -155,9 +155,14 @@ function Runner({ set, mode, onFinish, onExit }) {
   const chosen = cur?.answer || null;
   const fb = feedback[q.itemId] || null;
 
+  // Review mode holds BOTH clocks while you read the revealed answer; exam mode
+  // stays continuously timed like the real test.
+  const reviewFrozen = !isExam && submitted;
+  const clockStopped = paused || reviewFrozen;
+
   // Section countdown at GMAT Focus pace; goes negative into red overtime.
   const sectionBudget = PER_Q_BUDGET_MS * questions.length;
-  const sectionElapsed = paused ? sessAccRef.current : (now - sessStartRef.current + sessAccRef.current);
+  const sectionElapsed = clockStopped ? sessAccRef.current : (now - sessStartRef.current + sessAccRef.current);
   const sectionRemaining = sectionBudget - sectionElapsed;
   const isOvertime = sectionRemaining < 0;
   const absR = Math.abs(sectionRemaining);
@@ -171,12 +176,21 @@ function Runner({ set, mode, onFinish, onExit }) {
 
   const answeredCount = questions.filter((it) => answers[it.itemId]?.submitted).length;
 
-  // Ticker keeps the section clock live; per-question freezes once submitted.
+  // Ticker stops when either clock is stopped (manual pause or review reveal).
   useEffect(() => {
-    if (paused) return undefined;
+    if (clockStopped) return undefined;
     const id = setInterval(() => setNow(Date.now()), 250);
     return () => clearInterval(id);
-  }, [paused]);
+  }, [clockStopped]);
+
+  // Auto-pause the section clock when a review answer is revealed; resume on
+  // leaving it. Banks/restarts the running segment just like the pause button.
+  useEffect(() => {
+    if (paused) return; // pause button owns the accumulation while paused
+    if (reviewFrozen) sessAccRef.current += Date.now() - sessStartRef.current;
+    else sessStartRef.current = Date.now();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviewFrozen]);
 
   // Reset the per-question timer on navigation.
   useEffect(() => {
@@ -310,13 +324,13 @@ function Runner({ set, mode, onFinish, onExit }) {
         </div>
         <div className="lsat-st-subbar-right">
           <span
-            className={`lsat-st-section-timer ${paused ? 'is-paused' : ''} ${sectionLow ? 'is-low' : ''} ${isOvertime ? 'is-overtime' : ''}`}
+            className={`lsat-st-section-timer ${clockStopped ? 'is-paused' : ''} ${sectionLow ? 'is-low' : ''} ${isOvertime ? 'is-overtime' : ''}`}
             aria-label={isOvertime ? 'Section time exceeded' : 'Section time remaining'}
-            title={isOvertime ? 'Past GMAT Focus target pace (~2 min/question). Wrap up when ready.' : 'Time remaining at GMAT Focus pace (~2 min/question)'}
+            title={reviewFrozen ? 'Paused while you review the answer' : isOvertime ? 'Past GMAT Focus target pace (~2 min/question). Wrap up when ready.' : 'Time remaining at GMAT Focus pace (~2 min/question)'}
           >
             <IconClock />{isOvertime ? '+' : ''}{pad2(secMin)}:{pad2(secSec)}{isOvertime && <span className="lsat-st-overtime-tag">OVER</span>}
           </span>
-          <span className={`lsat-st-timer ${paused ? 'is-paused' : ''}`} aria-label="Time on this question" title="Time on this question">{formatMs(qElapsed)}</span>
+          <span className={`lsat-st-timer ${clockStopped ? 'is-paused' : ''}`} aria-label="Time on this question" title="Time on this question">{formatMs(qElapsed)}</span>
           <span className="lsat-st-score">{answeredCount}<span className="lsat-st-score-of">/{questions.length}</span></span>
           <button type="button" className={`lsat-st-pause ${paused ? 'is-paused' : ''}`} onClick={togglePause} disabled={submitted} aria-label={paused ? 'Resume timer' : 'Pause timer'}>
             {paused ? 'Resume' : 'Pause'}
@@ -325,7 +339,7 @@ function Runner({ set, mode, onFinish, onExit }) {
               : <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="0.5" /><rect x="14" y="5" width="4" height="14" rx="0.5" /></svg>}
           </button>
           {!submitted ? (
-            <button type="button" className="lsat-st-submit" onClick={submit} disabled={!chosen || checking}>{checking ? 'Checking…' : 'Submit'}<IconCheck /></button>
+            <button type="button" className="lsat-st-submit" onClick={submit} disabled={!chosen || checking || paused}>{checking ? 'Checking…' : 'Submit'}<IconCheck /></button>
           ) : (
             <button type="button" className="lsat-st-submit is-next" onClick={goNext}>{idx >= questions.length - 1 ? 'Finish' : 'Next'}<IconNext /></button>
           )}
@@ -370,6 +384,18 @@ function Runner({ set, mode, onFinish, onExit }) {
               );
             })}
           </div>
+
+          {!isExam && submitted && fb && (
+            <div className={`ai-reveal ${fb.correct ? 'is-correct' : 'is-wrong'}`} role="status">
+              <span className="ai-reveal-mark">{fb.correct ? '✓' : '✗'}</span>
+              <span className="ai-reveal-text">
+                {fb.correct
+                  ? <>Correct — the answer is <b>{fb.correctAnswer}</b>.</>
+                  : <>Incorrect. You chose <b>{chosen}</b>; the correct answer is <b>{fb.correctAnswer}</b>.</>}
+                <span className="ai-reveal-hint"> Timer paused — press Next to continue.</span>
+              </span>
+            </div>
+          )}
 
           {submitted && (
             <div className="lsat-st-actions">
