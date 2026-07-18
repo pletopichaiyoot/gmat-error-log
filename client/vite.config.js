@@ -11,6 +11,10 @@ export default defineConfig({
   },
   server: {
     port: 5170,
+    // Fail loudly if 5170 is taken instead of silently drifting to 5171+
+    // (which could collide with a neighbouring project's dev server, e.g.
+    // bloom-web on 5173). The Raycast start/stop scripts assume 5170.
+    strictPort: true,
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:4310',
