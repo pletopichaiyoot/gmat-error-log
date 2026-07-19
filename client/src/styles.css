@@ -3161,6 +3161,12 @@ th.sortable:hover {
   color: var(--primary);
 }
 
+.section-nav-link--active {
+  color: var(--primary);
+  background: var(--primary-lt);
+  font-weight: 700;
+}
+
 /* Smooth scroll for anchor links */
 html {
   scroll-behavior: smooth;
@@ -6367,12 +6373,11 @@ html {
   font-variant-numeric: tabular-nums;
 }
 
-.today-progress { display: flex; flex-direction: column; gap: 6px; }
+.today-progress { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); }
 .today-progress-meta {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: var(--s3);
+  flex-direction: column;
+  gap: 2px;
   font-size: 0.8rem;
   color: var(--ink-2);
   font-variant-numeric: tabular-nums;

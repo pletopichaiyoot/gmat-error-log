@@ -1167,6 +1167,7 @@ function App() {
   const [customSince, setCustomSince] = useState('');
   const [sessions, setSessions] = useState([]);
   const [errors, setErrors] = useState([]);
+  const [activeSection, setActiveSection] = useState('today');
   const [patterns, setPatterns] = useState({
     bySubject: [],
     byDifficulty: [],
@@ -2893,6 +2894,24 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFirstRun, appMode]);
 
+  // Scroll-spy: highlight the section-nav link for whichever section is
+  // currently in view. Re-observes when the nav (re)appears post-first-run.
+  useEffect(() => {
+    const ids = ['today', 'dashboard', 'categories', 'sessions', 'errors'];
+    const targets = ids.map((id) => document.getElementById(id)).filter(Boolean);
+    if (!targets.length) return undefined;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.filter((e) => e.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (visible?.target?.id) setActiveSection(visible.target.id);
+      },
+      { rootMargin: '-45% 0px -45% 0px', threshold: [0, 0.25, 0.5] },
+    );
+    targets.forEach((t) => obs.observe(t));
+    return () => obs.disconnect();
+  }, [isFirstRun]);
+
   if (appMode === 'lsat') {
     return (
       <Suspense fallback={<RouteFallback />}>
@@ -2969,11 +2988,19 @@ function App() {
       {/* Section nav — hidden on first run when there is nothing to jump to */}
       {!isFirstRun && (
         <nav className="section-nav" aria-label="Jump to section">
-          <a href="#today" className="section-nav-link">Today</a>
-          <a href="#dashboard" className="section-nav-link">Dashboard</a>
-          <a href="#categories" className="section-nav-link">Categories</a>
-          <a href="#sessions" className="section-nav-link">Sessions</a>
-          <a href="#errors" className="section-nav-link">Error Log</a>
+          {[
+            ['today', 'Today'], ['dashboard', 'Dashboard'], ['categories', 'Categories'],
+            ['sessions', 'Sessions'], ['errors', 'Error Log'],
+          ].map(([id, label]) => (
+            <a
+              key={id}
+              href={`#${id}`}
+              className={`section-nav-link${activeSection === id ? ' section-nav-link--active' : ''}`}
+              aria-current={activeSection === id ? 'true' : undefined}
+            >
+              {label}
+            </a>
+          ))}
         </nav>
       )}
 
