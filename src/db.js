@@ -381,6 +381,17 @@ function normalizeAnswerChoicesForStorage(value) {
   }
 }
 
+// Stimulus is stored as a JSON string. Accept an object or a string; return a
+// compact JSON string, or null when empty.
+function normalizeStimulusForStorage(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') { const t = value.trim(); return t || null; }
+  try {
+    const hasContent = value.html || (Array.isArray(value.sources) && value.sources.length) || value.dataText;
+    return hasContent ? JSON.stringify(value) : null;
+  } catch (_e) { return null; }
+}
+
 function toNullableInteger(value) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed)) return null;
@@ -1073,11 +1084,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           notes,
           passageText,
           normalizedTextOrNull(q.taxonomy_path) || preservedSnapshot?.taxonomy_path || null,
-          // TEMPORARY placeholder: normalizeStimulusForStorage is added in a
-          // later task (DI stimulus capture, Step 3) and will replace this
-          // normalizedTextOrNull call. Kept here so the file stays runnable
-          // in the interim.
-          normalizedTextOrNull(q.stimulus) || preservedSnapshot?.stimulus || null,
+          normalizeStimulusForStorage(q.stimulus) || preservedSnapshot?.stimulus || null,
       ];
       assertValueCount('question_attempts insert', QUESTION_ATTEMPT_INSERT_COLUMNS, attemptValues);
 
@@ -3236,7 +3243,8 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
               my_answer = COALESCE(?, my_answer),
               correct_answer = COALESCE(?, correct_answer),
               time_sec = COALESCE(?, time_sec),
-              passage_text = COALESCE(NULLIF(?, ''), passage_text)
+              passage_text = COALESCE(NULLIF(?, ''), passage_text),
+              stimulus = COALESCE(?, stimulus)
           WHERE id = ?
         `,
         [
@@ -3250,6 +3258,7 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
           correctAnswer,
           timeSecPrecise,
           item.passage || '',
+          normalizeStimulusForStorage(item.stimulus),
           targetRow.id,
         ]
       );
@@ -4974,5 +4983,5 @@ module.exports = {
   updateMockResult,
   deleteMockResult,
   seedMockResultsIfEmpty,
-  _sqlInternals: { platformWhereClause, normalizeAnswerChoicesForStorage },
+  _sqlInternals: { platformWhereClause, normalizeAnswerChoicesForStorage, normalizeStimulusForStorage },
 };
