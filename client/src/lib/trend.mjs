@@ -24,3 +24,30 @@ export function pickWeakestCategory(rows, { minTotal = 5 } = {}) {
   if (!eligible.length) return null;
   return eligible.reduce((worst, r) => (Number(r.accuracy_pct) < Number(worst.accuracy_pct) ? r : worst));
 }
+
+// Aggregate category rows into per-subject Hard/Medium/Easy accuracy.
+// rows carry: subject_family, {hard,medium,easy}_total, {hard,medium,easy}_accuracy_pct.
+// keyOf maps a row to its subject bucket name (caller passes normalizeSubjectFamilyDisplay).
+export function buildSubjectDifficultyMatrix(rows, { subjects = ['Quant', 'Verbal', 'Data Insights'], keyOf = (r) => r?.subject_family } = {}) {
+  const bands = ['hard', 'medium', 'easy'];
+  const acc = new Map(subjects.map((s) => [s, { hard: { c: 0, t: 0 }, medium: { c: 0, t: 0 }, easy: { c: 0, t: 0 } }]));
+  for (const row of (Array.isArray(rows) ? rows : [])) {
+    const bucket = acc.get(keyOf(row));
+    if (!bucket) continue;
+    for (const b of bands) {
+      const total = Number(row?.[`${b}_total`]) || 0;
+      const accuracy = Number(row?.[`${b}_accuracy_pct`]);
+      if (total > 0 && Number.isFinite(accuracy)) {
+        bucket[b].c += (accuracy / 100) * total;
+        bucket[b].t += total;
+      }
+    }
+  }
+  return subjects.map((subject) => ({
+    subject,
+    cells: bands.map((band) => {
+      const { c, t } = acc.get(subject)[band];
+      return { band, total: t, accuracy: t > 0 ? Number(((c * 100) / t).toFixed(1)) : null };
+    }),
+  }));
+}

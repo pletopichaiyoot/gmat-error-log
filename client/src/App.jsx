@@ -15,7 +15,8 @@ const StudyPlan = lazy(() => import('./StudyPlan'));
 
 import HeroBand from './components/HeroBand';
 import Sparkline from './components/Sparkline';
-import { buildAccuracyTrend, pickWeakestCategory } from './lib/trend.mjs';
+import DifficultyMatrix from './components/DifficultyMatrix';
+import { buildAccuracyTrend, pickWeakestCategory, buildSubjectDifficultyMatrix } from './lib/trend.mjs';
 
 function RouteFallback() {
   return (
@@ -2084,6 +2085,14 @@ function App() {
     };
   }, [categoryRows]);
 
+  const difficultyMatrix = useMemo(
+    () => buildSubjectDifficultyMatrix(categoryRows, {
+      subjects: ['Quant', 'Verbal', 'Data Insights'],
+      keyOf: (r) => normalizeSubjectFamilyDisplay(r.subject_family),
+    }),
+    [categoryRows],
+  );
+
   const wrongCategoryRows = useMemo(() => {
     const counts = new Map();
     for (const row of sessionAnalysis.data?.slowWrongQuestions || []) {
@@ -3261,6 +3270,13 @@ function App() {
                 </article>
               );
             })}
+          </div>
+        )}
+
+        {!collapsedSections.topicDashboard && subjectCards.length > 0 && (
+          <div className="diffmatrix-panel">
+            <span className="diffmatrix-title">Accuracy by Difficulty</span>
+            <DifficultyMatrix data={difficultyMatrix} />
           </div>
         )}
       </section>
