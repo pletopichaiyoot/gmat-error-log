@@ -40,6 +40,7 @@ import {
   isDayRowDraggableId,
   dateFromDayRowId,
 } from './studyPlanReorder.mjs';
+import { formatMockDate } from './lib/mockFormat.mjs';
 
 function fetchJson(url, opts) {
   return fetch(url, opts).then(async (r) => {
@@ -783,34 +784,34 @@ function MockResultsPanel({ mocks, onAdd, onUpdate, onDelete }) {
     const delta = c - p;
     if (delta === 0) return { label: '=', color: 'var(--muted)' };
     if (delta > 0) return { label: `▲ ${delta}`, color: '#1f9d55' };
-    return { label: `▼ ${Math.abs(delta)}`, color: 'var(--danger)' };
+    return { label: `▼ ${Math.abs(delta)}`, color: 'var(--accent-ink)' };
   }
 
   return (
-    <section className="card" style={{ padding: 0, overflow: 'hidden' }}>
-      <header style={{ padding: '16px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--primary-lt)' }}>
+    <section className="card sp-mock">
+      <header className="sp-mock-head">
         <div>
           <div className="sp-stat-label">
             {mocks.length} mock{mocks.length === 1 ? '' : 's'} recorded
             {scrapedCount > 0 && <span style={{ marginLeft: 8, opacity: 0.85 }}>· {scrapedCount} scraped, {manualCount} manual</span>}
           </div>
-          <h2 style={{ margin: '4px 0 0 0', fontSize: 18, fontWeight: 700 }}>Mock Results</h2>
+          <h2 className="sp-mock-title">Mock Results</h2>
         </div>
         {!adding && <Button size="sm" onClick={() => setAdding(true)}>+ Add mock</Button>}
       </header>
 
       {mocks.length > 0 && (
         <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <table className="sp-mock-table">
             <thead>
-              <tr className="sp-th-row" style={{ background: 'var(--surface-2)', textAlign: 'left' }}>
-                <th style={{ padding: '10px 24px' }}>Date</th>
-                <th style={{ padding: '10px 12px' }}>Source</th>
-                <th style={{ padding: '10px 12px' }}>Total</th>
-                <th style={{ padding: '10px 12px' }}>Quant</th>
-                <th style={{ padding: '10px 12px' }}>DI</th>
-                <th style={{ padding: '10px 12px' }}>Verbal</th>
-                <th style={{ padding: '10px 24px', textAlign: 'right' }}></th>
+              <tr className="sp-th-row">
+                <th>Date</th>
+                <th>Source</th>
+                <th>Total</th>
+                <th>Quant</th>
+                <th>DI</th>
+                <th>Verbal</th>
+                <th style={{ textAlign: 'right' }}></th>
               </tr>
             </thead>
             <tbody>
@@ -821,19 +822,19 @@ function MockResultsPanel({ mocks, onAdd, onUpdate, onDelete }) {
                 }
                 const prev = idx > 0 ? mocks[idx - 1] : null;
                 return (
-                  <tr key={m.id} style={{ borderTop: '1px solid var(--border)' }}>
-                    <td style={{ padding: '10px 24px', whiteSpace: 'nowrap' }}>{m.mock_date}</td>
-                    <td style={{ padding: '10px 12px' }}>
+                  <tr key={m.id}>
+                    <td style={{ whiteSpace: 'nowrap' }}>{formatMockDate(m.mock_date)}</td>
+                    <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                         <span>{m.source_label}</span>
                         <SourceTypeChip type={m.source_type} />
                       </div>
                     </td>
-                    <td style={{ padding: '10px 12px' }}><ScoreCell score={m.total_score} pct={m.total_percentile} trend={trend(m, prev, 'total_score')} /></td>
-                    <td style={{ padding: '10px 12px' }}><ScoreCell score={m.quant_score} pct={m.quant_percentile} trend={trend(m, prev, 'quant_score')} /></td>
-                    <td style={{ padding: '10px 12px' }}><ScoreCell score={m.di_score} pct={m.di_percentile} trend={trend(m, prev, 'di_score')} /></td>
-                    <td style={{ padding: '10px 12px' }}><ScoreCell score={m.verbal_score} pct={m.verbal_percentile} trend={trend(m, prev, 'verbal_score')} /></td>
-                    <td style={{ padding: '10px 24px', textAlign: 'right' }}>
+                    <td><ScoreCell score={m.total_score} pct={m.total_percentile} trend={trend(m, prev, 'total_score')} /></td>
+                    <td><ScoreCell score={m.quant_score} pct={m.quant_percentile} trend={trend(m, prev, 'quant_score')} /></td>
+                    <td><ScoreCell score={m.di_score} pct={m.di_percentile} trend={trend(m, prev, 'di_score')} /></td>
+                    <td><ScoreCell score={m.verbal_score} pct={m.verbal_percentile} trend={trend(m, prev, 'verbal_score')} /></td>
+                    <td style={{ textAlign: 'right' }}>
                       {isScraped ? (
                         <span style={{ fontSize: 11, opacity: 0.5 }} title="Scraped from GMAT Official Practice — edit via the dashboard scrape flow">read-only</span>
                       ) : (
@@ -856,9 +857,9 @@ function MockResultsPanel({ mocks, onAdd, onUpdate, onDelete }) {
       )}
 
       {latest && (
-        <div style={{ padding: '12px 24px', borderTop: '1px solid var(--border)', fontSize: 12, color: 'var(--ink-2)' }}>
+        <div className="sp-mock-foot">
           {previous ? (
-            <>Latest: <strong>{latest.source_label}</strong> ({latest.mock_date}) — Total {latest.total_score} vs prev {previous.total_score} ({(latest.total_score - previous.total_score) >= 0 ? '+' : ''}{latest.total_score - previous.total_score}).</>
+            <>Latest: <strong>{latest.source_label}</strong> ({formatMockDate(latest.mock_date)}) — Total {latest.total_score} vs prev {previous.total_score} ({(latest.total_score - previous.total_score) >= 0 ? '+' : ''}{latest.total_score - previous.total_score}).</>
           ) : (
             <>Baseline established. Add more mocks to see trend.</>
           )}
