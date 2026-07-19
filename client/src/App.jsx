@@ -3681,8 +3681,8 @@ function App() {
                 filters.subject || filters.difficulty || filters.confidence ||
                 filters.search || filters.mistakeTag || filters.platform;
               return (
-                <div className="error-filter-bar">
-                  <div className="error-filter-primary error-filter-sticky">
+                <div className="error-filter-bar error-filter-sticky">
+                  <div className="error-filter-primary">
                     <Select
                       className="filter-select"
                       value={filters.platform}
