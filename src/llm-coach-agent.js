@@ -360,6 +360,10 @@ async function runCoachTool(name, args) {
         correctAnswer: q.correct_answer,
         mistakeType: q.mistake_type || '',
         notes: clipText(q.notes || '', 200),
+        stimulusData: (() => {
+          try { const s = q.stimulus ? JSON.parse(q.stimulus) : null; return s ? clipText(s.dataText || '', 600) : ''; }
+          catch { return ''; }
+        })(),
       })),
     };
   }

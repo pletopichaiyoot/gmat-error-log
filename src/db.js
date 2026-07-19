@@ -2800,6 +2800,7 @@ async function getSessionAnalysis(sessionId) {
         q.answer_choices,
         q.response_format,
         q.response_details,
+        q.stimulus,
         q.topic_source,
         q.content_domain,
         q.mistake_type,
