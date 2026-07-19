@@ -419,7 +419,14 @@ function StemContent({ row }) {
   if (html) {
     return <div className="question-stem-html" dangerouslySetInnerHTML={{ __html: html }} />;
   }
-  return <p>{normalizeQuestionText(row?.question_stem) || 'No locally scraped stem yet.'}</p>;
+  let text = normalizeQuestionText(row?.question_stem);
+  // DI Graphics-Interpretation stems begin with an "[item contains image]" marker
+  // for the chart, which now renders in the stimulus block below. Drop the leading
+  // image/figure marker when a stimulus is present so the actual prompt shows.
+  if (row?.stimulus && text) {
+    text = text.replace(/^\s*\[(?:item contains image|figure|image)\]\s*/i, '').trim();
+  }
+  return <p>{text || 'No locally scraped stem yet.'}</p>;
 }
 
 // Split a passage into display paragraphs. Splits on blank lines (the paragraph
