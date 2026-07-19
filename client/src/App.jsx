@@ -3682,7 +3682,7 @@ function App() {
                 filters.search || filters.mistakeTag || filters.platform;
               return (
                 <div className="error-filter-bar">
-                  <div className="error-filter-primary">
+                  <div className="error-filter-primary error-filter-sticky">
                     <Select
                       className="filter-select"
                       value={filters.platform}

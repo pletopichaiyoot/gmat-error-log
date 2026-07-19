@@ -1912,6 +1912,23 @@ th.sortable:hover {
   gap: var(--s2);
 }
 
+/* Pins the always-visible primary row under .section-nav (sticky, top:0,
+   z-index:100, ~44.5px tall: 1px border + 3px padding + a link box of
+   8px+8px padding around a 0.8rem/1.6 line box, all ×2 where symmetric).
+   The advanced panel (.error-filter-secondary) is a sibling below this
+   row and is intentionally NOT part of the sticky element, so opening it
+   doesn't pin a tall block. z-index stays below the section-nav (100)
+   and the coach FAB/dock (1100). */
+.error-filter-sticky {
+  position: sticky;
+  top: 44px;
+  z-index: 20;
+  background: var(--surface);
+  padding-top: var(--s2);
+  padding-bottom: var(--s2);
+  border-bottom: 1px solid var(--border);
+}
+
 .error-filter-primary .filter-select {
   width: auto;
   flex: 0 0 auto;
