@@ -1991,27 +1991,6 @@ th.sortable:hover {
   padding: 4px 30px 4px 10px;
 }
 
-.question-mini-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 20px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid rgba(181, 74, 68, 0.25);
-  background: rgba(181, 74, 68, 0.08);
-  color: var(--danger);
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.question-mini-chip.success-chip {
-  border-color: rgba(61, 122, 94, 0.28);
-  background: rgba(61, 122, 94, 0.10);
-  color: var(--primary);
-}
-
 .question-review-overlay {
   padding: 0;
   align-items: stretch;
@@ -2028,65 +2007,90 @@ th.sortable:hover {
 }
 
 .question-review-shell {
-  gap: var(--s4);
+  gap: var(--s5);
+  padding: var(--s5) var(--s6);
 }
 
 .question-review-hero {
   display: grid;
-  gap: var(--s3);
-  padding: var(--s4);
+  gap: var(--s4);
+  padding: var(--s5);
   border: 1px solid var(--border);
-  border-radius: var(--r-s);
-  background: var(--surface-2);
+  border-radius: var(--r);
+  background: var(--surface);
+  box-shadow: var(--shadow);
 }
 
-.question-review-meta {
+/* Meta bar: identity chips (subject-led) on the left, attribute chips on the
+   right. Grouping + a single green anchor replaces the old row of seven
+   look-alike pills so the header scans in one pass. */
+.qr-meta-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  justify-content: space-between;
+  gap: var(--s3) var(--s5);
+  padding-bottom: var(--s4);
+  border-bottom: 1px solid var(--border);
 }
 
-.question-review-chip {
+.qr-meta-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  align-items: center;
+}
+
+.qr-meta-chip {
   display: inline-flex;
   align-items: center;
   min-height: 28px;
   padding: 4px 12px;
   border-radius: 999px;
-  border: 1px solid rgba(27, 33, 29, 0.06);
-  background: rgba(255, 255, 255, 0.68);
-  color: var(--ink);
-  font-size: 0.74rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  white-space: nowrap;
+  transition: background var(--t) var(--ease);
 }
 
-.question-review-chip.chip-subject {
-  border-color: rgba(61, 122, 94, 0.20);
-  background: rgba(61, 122, 94, 0.06);
+.qr-chip-subject {
+  border-color: rgba(61, 122, 94, 0.30);
+  background: var(--primary-lt);
   color: var(--primary);
+  font-weight: 700;
 }
 
-.question-review-chip.chip-difficulty-hard {
-  border-color: rgba(181, 74, 68, 0.22);
-  background: rgba(181, 74, 68, 0.06);
+.qr-chip-quiet {
+  color: var(--muted);
+  background: var(--surface-2);
+  border-color: transparent;
+}
+
+.qr-chip-source {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.qr-chip-diff-hard {
+  border-color: rgba(181, 74, 68, 0.28);
+  background: var(--danger-lt);
   color: var(--danger);
 }
 
-.question-review-chip.chip-difficulty-medium {
-  border-color: rgba(196, 168, 67, 0.22);
-  background: rgba(196, 168, 67, 0.06);
-  color: #8f7c35;
+.qr-chip-diff-medium {
+  border-color: rgba(196, 168, 67, 0.32);
+  background: var(--accent-lt);
+  color: var(--accent-ink);
 }
 
-.question-review-chip.chip-difficulty-easy {
-  border-color: rgba(61, 122, 94, 0.18);
-  background: rgba(61, 122, 94, 0.05);
+.qr-chip-diff-easy {
+  border-color: rgba(61, 122, 94, 0.24);
+  background: var(--primary-lt);
   color: var(--primary);
-}
-
-.question-review-chip.muted-chip {
-  color: var(--muted);
 }
 
 .difficulty-chip {
@@ -2132,74 +2136,170 @@ th.sortable:hover {
   color: var(--primary);
 }
 
-.question-review-stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: var(--s2);
-}
-
-.question-review-stats > div,
-.question-side-card {
-  display: grid;
-  gap: 4px;
-  padding: var(--s3);
-  border-radius: var(--r-s);
+/* Verdict + facts strip — the one-glance outcome banner. Colour is driven by
+   the actual result (correct/incorrect), so "Your answer" is only red when the
+   pick was wrong — never red-by-position like the old four-card stats grid. */
+.qr-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s4) var(--s6);
+  padding: var(--s4) var(--s5);
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.82);
+  border-radius: var(--r);
+  background: var(--surface);
 }
 
-.question-review-stats > div:nth-child(1) {
-  border-color: rgba(181, 74, 68, 0.18);
-  background: rgba(181, 74, 68, 0.04);
+.qr-verdict-right {
+  border-color: rgba(61, 122, 94, 0.32);
+  background: rgba(61, 122, 94, 0.06);
 }
 
-.question-review-stats > div:nth-child(2) {
-  border-color: rgba(61, 122, 94, 0.18);
-  background: rgba(61, 122, 94, 0.04);
+.qr-verdict-wrong {
+  border-color: rgba(181, 74, 68, 0.30);
+  background: rgba(181, 74, 68, 0.05);
 }
 
-.question-review-stats > div:nth-child(3) {
-  border-color: rgba(74, 127, 165, 0.18);
-  background: rgba(74, 127, 165, 0.04);
+.qr-verdict-badge {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding-right: var(--s6);
+  border-right: 1px solid var(--border);
 }
 
-.question-review-stats > div:nth-child(4) {
-  border-color: rgba(196, 168, 67, 0.18);
-  background: rgba(196, 168, 67, 0.04);
+.qr-verdict-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #fff;
 }
 
-.question-review-stats > div:nth-child(1) strong { color: var(--danger); }
-.question-review-stats > div:nth-child(2) strong { color: var(--primary); }
-.question-review-stats > div:nth-child(3) strong { color: var(--info); }
-.question-review-stats > div:nth-child(4) strong { color: #8f7c35; }
+.qr-verdict-right .qr-verdict-icon { background: var(--primary); }
+.qr-verdict-wrong .qr-verdict-icon { background: var(--danger); }
 
-.question-review-stats span,
-.question-side-label {
-  font-size: 0.7rem;
+.qr-verdict-label {
+  font-family: 'Manrope', 'Trebuchet MS', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.qr-verdict-right .qr-verdict-label { color: var(--primary); }
+.qr-verdict-wrong .qr-verdict-label { color: var(--danger); }
+
+.qr-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s4) var(--s8);
+  align-items: center;
+  flex: 1;
+}
+
+.qr-fact {
+  display: grid;
+  gap: 3px;
+}
+
+.qr-fact > span {
+  font-size: 0.68rem;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--muted);
 }
 
-.question-review-stats strong {
+.qr-fact > strong {
   font-size: 1rem;
+  font-weight: 600;
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
+}
+
+/* Your-answer value follows the verdict; correct-answer value is the missed
+   answer (gold) unless the pick was right (green). */
+.qr-verdict-right .qr-fact-yours { color: var(--primary); }
+.qr-verdict-wrong .qr-fact-yours { color: var(--danger); }
+.qr-fact-correct { color: var(--accent-ink); }
+.qr-verdict-right .qr-fact-correct { color: var(--primary); }
+
+/* Compact annotation bar — lives in the hero (under the verdict), not buried at
+   the bottom of a long modal. Glanceable prior tags + notes preview + one-click
+   Annotate; the full editor stays in the annotation dialog. */
+.qr-annot-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3) var(--s5);
+  padding: var(--s3) var(--s5);
+  border: 1px solid rgba(74, 127, 165, 0.18);
+  border-radius: var(--r);
+  background: rgba(74, 127, 165, 0.04);
+}
+
+.qr-annot-field {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.qr-annot-notes {
+  flex: 1;
+  min-width: 200px;
+}
+
+.qr-annot-label {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--info);
+}
+
+.qr-annot-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.qr-annot-notes p {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 0.92rem;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.qr-annot-btn {
+  flex: 0 0 auto;
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 /* DI composite answer summary table */
 .di-answer-summary {
   display: grid;
   border: 1px solid var(--border);
-  border-radius: var(--r-s);
+  border-radius: var(--r);
   overflow: hidden;
+  box-shadow: var(--shadow);
 }
 
 .di-answer-summary-row {
   display: grid;
-  grid-template-columns: minmax(90px, auto) 1fr 1fr;
-  gap: var(--s2);
-  padding: 10px var(--s3);
+  grid-template-columns: minmax(100px, auto) 1fr 1fr;
+  gap: var(--s3);
+  padding: 12px var(--s4);
   border-bottom: 1px solid var(--border);
   align-items: center;
 }
@@ -2209,33 +2309,33 @@ th.sortable:hover {
 }
 
 .di-answer-summary-header {
-  background: rgba(61, 122, 94, 0.04);
+  background: var(--surface-2);
 }
 
 .di-answer-summary-header span {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--muted);
 }
 
 .di-row-wrong {
-  background: rgba(181, 74, 68, 0.03);
+  background: rgba(181, 74, 68, 0.04);
 }
 
 .di-row-correct {
-  background: rgba(61, 122, 94, 0.03);
+  background: rgba(61, 122, 94, 0.04);
 }
 
 .di-part-label {
   font-weight: 600;
-  font-size: 0.82rem;
+  font-size: 0.88rem;
   color: var(--ink);
 }
 
 .di-answer-yours {
-  font-size: 0.88rem;
+  font-size: 0.92rem;
   color: var(--danger);
   font-weight: 500;
 }
@@ -2245,7 +2345,7 @@ th.sortable:hover {
 }
 
 .di-answer-correct {
-  font-size: 0.88rem;
+  font-size: 0.92rem;
   color: var(--primary);
   font-weight: 500;
 }
@@ -2253,10 +2353,10 @@ th.sortable:hover {
 .di-answer-summary-footer {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: var(--s2);
-  padding: var(--s3);
+  gap: var(--s3);
+  padding: var(--s4);
   border-top: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--surface-2);
 }
 
 .di-answer-summary-footer > div {
@@ -2265,15 +2365,15 @@ th.sortable:hover {
 }
 
 .di-answer-summary-footer span {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--muted);
 }
 
 .di-answer-summary-footer strong {
-  font-size: 1rem;
+  font-size: 1.05rem;
   color: var(--ink);
 }
 
@@ -2286,32 +2386,45 @@ th.sortable:hover {
   gap: var(--s3);
 }
 
+.question-review-section > h3 {
+  margin: 0;
+  font-family: 'Manrope', 'Trebuchet MS', sans-serif;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-bottom: var(--s2);
+  border-bottom: 1px solid var(--border);
+}
+
 .question-stem-card {
-  padding: var(--s4);
-  border-radius: var(--r-s);
+  padding: var(--s5);
+  border-radius: var(--r);
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
   background: var(--surface);
-  /* Cap reading measure so long stems don't stretch edge-to-edge in the wide
-     review-modal grid column; left-aligned (default block flow, no centering). */
+  box-shadow: var(--shadow);
   max-width: 72ch;
 }
 
 .question-stem-card p {
   margin: 0;
   white-space: pre-wrap;
-  line-height: 1.7;
+  line-height: 1.75;
   color: var(--ink);
+  font-size: 0.98rem;
 }
 
 /* OPE stems whose inline math is preserved as data: <img> (question_stem_html). */
 .question-stem-html {
   line-height: 1.8;
   color: var(--ink);
+  font-size: 0.98rem;
 }
 
 .question-stem-html p {
-  margin: 0 0 var(--s2);
+  margin: 0 0 var(--s3);
 }
 
 .question-stem-html p:last-child {
@@ -2337,41 +2450,101 @@ th.sortable:hover {
 }
 
 .question-passage-card {
-  padding: var(--s4);
-  border-radius: var(--r-s);
+  padding: var(--s5);
+  border-radius: var(--r);
   border: 1px solid var(--border);
   border-left: 3px solid #94a3b8;
-  background: color-mix(in srgb, var(--surface) 85%, transparent);
+  background: var(--surface);
+  box-shadow: var(--shadow);
   display: grid;
   gap: var(--s3);
-  max-height: 320px;
+  max-height: 360px;
   overflow-y: auto;
-  /* Skin the shared <PassageLines> gutter: --ink-2 (#4a524e) clears AA on this surface. */
   font-size: 0.95rem;
-  line-height: 1.7;
+  line-height: 1.75;
   color: var(--ink-dim, var(--ink));
   --passage-gutter-color: var(--ink-2);
-  /* Cap reading measure to match the stem card; left-aligned, not centered. */
   max-width: 72ch;
 }
 
 .question-passage-card p {
   margin: 0;
   white-space: pre-wrap;
-  line-height: 1.7;
+  line-height: 1.75;
   color: var(--ink-dim, var(--ink));
   font-size: 0.95rem;
+}
+
+/* MSR "Question Information" tab panel: one tab per source passage. When the
+   passage card holds the tab strip, let the tabpanel own the scroll so the
+   tabs stay pinned above it. */
+.question-passage-card:has(.qr-info-tabs) {
+  padding: 0;
+  overflow: visible;
+  max-height: none;
+  gap: 0;
+}
+
+.qr-info-tabs {
+  display: grid;
+  gap: 0;
+  min-height: 0;
+}
+
+.qr-info-tablist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  padding: var(--s3) var(--s4) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.qr-info-tab {
+  padding: 8px var(--s4);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: var(--r-s) var(--r-s) 0 0;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  margin-bottom: -1px;
+  transition: color var(--t) var(--ease), background var(--t) var(--ease);
+}
+
+.qr-info-tab:hover { color: var(--ink); }
+
+.qr-info-tab.active {
+  background: var(--surface);
+  border-color: var(--border);
+  border-bottom-color: var(--surface);
+  color: var(--primary);
+}
+
+.qr-info-tabpanel {
+  padding: var(--s5);
+  overflow-y: auto;
+  max-height: 340px;
+}
+
+.question-review-layout.has-passage .qr-info-tabpanel {
+  max-height: calc(100vh - 280px);
 }
 
 /* DI stimulus (charts/tables/MSR sources), sanitized via sanitizeStimulusHtml
    and rendered above the answer choices. Mirrors the boxed-surface treatment
    of .question-stem-card / .question-passage-card above. */
 .question-stimulus {
-  margin: 0 0 var(--s4);
-  padding: var(--s3) var(--s4);
+  margin: 0 0 var(--s5);
+  padding: var(--s4) var(--s5);
   border: 1px solid var(--border);
-  border-radius: var(--r-s);
-  background: var(--surface-2);
+  border-radius: var(--r);
+  background: var(--surface);
+  box-shadow: var(--shadow);
   overflow-x: auto;
 }
 
@@ -2408,12 +2581,12 @@ th.sortable:hover {
   display: flex;
   flex-wrap: wrap;
   gap: var(--s1);
-  margin-bottom: var(--s2);
+  margin-bottom: var(--s3);
   border-bottom: 1px solid var(--border);
 }
 
 .stimulus-tab {
-  padding: var(--s1) var(--s3);
+  padding: var(--s2) var(--s4);
   border: 1px solid var(--border);
   border-bottom: none;
   border-radius: var(--r-s) var(--r-s) 0 0;
@@ -2421,8 +2594,14 @@ th.sortable:hover {
   color: var(--ink);
   font: inherit;
   font-weight: 600;
+  font-size: 0.82rem;
   cursor: pointer;
   opacity: 0.65;
+  transition: opacity var(--t) var(--ease), background var(--t) var(--ease);
+}
+
+.stimulus-tab:hover {
+  opacity: 0.85;
 }
 
 .stimulus-tab.active {
@@ -2433,55 +2612,40 @@ th.sortable:hover {
 }
 
 .stimulus-tabpanel {
-  padding: var(--s2) 0;
+  padding: var(--s3) 0;
 }
 
 .question-review-layout {
   display: grid;
-  gap: var(--s4);
+  gap: var(--s5);
 }
 
 .question-review-col {
   display: grid;
-  gap: var(--s4);
+  gap: var(--s5);
   align-content: start;
 }
 
-.question-annotation-grid {
+.response-slot-list {
   display: grid;
-  gap: var(--s3);
-  grid-template-columns: 1fr;
-}
-
-/* The section heading's own bottom margin (--s3, from the global h3 rule) would
-   stack with the parent .question-review-section grid gap (also --s3), doubling
-   the space above the annotation grid. Zero it out here so the rhythm matches
-   the rest of the review modal's --s3 spacing. */
-.question-annotation-section h3 {
-  margin-bottom: 0;
-}
-
-.answer-choice-list,
-.response-slot-list,
-.question-side-stack {
-  display: grid;
-  gap: var(--s3);
+  gap: var(--s4);
 }
 
 .response-slot-card {
   display: grid;
-  gap: var(--s3);
-  padding: var(--s4);
-  border-radius: var(--r-s);
+  gap: var(--s4);
+  padding: var(--s5);
+  border-radius: var(--r);
   border: 1px solid var(--border);
   background: var(--surface);
+  box-shadow: var(--shadow);
 }
 
 .response-slot-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--s3);
+  gap: var(--s4);
 }
 
 .response-slot-head > div {
@@ -2490,7 +2654,7 @@ th.sortable:hover {
 }
 
 .response-slot-head strong {
-  font-size: 1rem;
+  font-size: 1.05rem;
   color: var(--ink);
 }
 
@@ -2498,12 +2662,12 @@ th.sortable:hover {
   display: inline-flex;
   align-items: center;
   width: fit-content;
-  min-height: 22px;
-  padding: 2px 10px;
+  min-height: 24px;
+  padding: 3px 11px;
   border-radius: 999px;
   background: rgba(217, 185, 62, 0.14);
   color: #7f5a0f;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -2514,13 +2678,12 @@ th.sortable:hover {
 }
 
 .response-slot-summary span {
-  font-size: 0.8rem;
-  color: var(--muted);
+  font-size: 0.82rem;
+  color: var(--ink-2);
 }
 
-/* Dropdown slot variant */
 .slot-dropdown {
-  border-left: 3px solid rgba(74, 127, 165, 0.4);
+  border-left: 3px solid rgba(74, 127, 165, 0.45);
 }
 
 .slot-dropdown-answers {
@@ -2531,151 +2694,188 @@ th.sortable:hover {
 }
 
 .slot-answer-yours {
-  font-size: 0.82rem;
+  font-size: 0.85rem;
   color: var(--danger);
   font-weight: 500;
 }
 
 .slot-answer-correct {
-  font-size: 0.82rem;
+  font-size: 0.85rem;
   color: var(--primary);
   font-weight: 500;
 }
 
-/* Choice grid slot variant */
 .slot-choice-grid {
-  border-left: 3px solid rgba(196, 168, 67, 0.4);
+  border-left: 3px solid rgba(196, 168, 67, 0.45);
 }
 
-.response-slot-options {
+/* ============================================================
+   Unified answer-review card language (all question types)
+   One vocabulary: a letter/label badge, the option text, and an
+   inline state pill — used by single-choice MC AND the DI slot
+   options. gold = correct-you-missed, red = your wrong pick,
+   green = your right pick (DESIGN.md two-voice answer semantic).
+   ============================================================ */
+.qr-choices {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: grid;
-  gap: var(--s2);
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--s3);
 }
 
-.slot-options-compact {
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-}
-
-.slot-options-compact .answer-choice-card {
-  padding: var(--s2) var(--s3);
-}
-
-.slot-options-compact .answer-choice-head strong {
-  font-size: 0.92rem;
-}
-
-.response-option-card {
-  padding: var(--s3);
-}
-
-.answer-choice-card {
+.qr-choice {
   display: grid;
-  gap: 10px;
-  padding: var(--s4);
-  border-radius: var(--r-s);
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s4);
+  padding: var(--s3) var(--s5);
   border: 1px solid var(--border);
+  border-radius: var(--r);
   background: var(--surface);
-  transition: border-color var(--t) var(--ease), box-shadow var(--t) var(--ease), transform var(--t) var(--ease);
+  transition: border-color var(--t) var(--ease), background var(--t) var(--ease);
 }
 
-.answer-choice-card.mine {
-  border-color: rgba(181, 74, 68, 0.25);
-  border-left: 3px solid var(--danger);
-  background: rgba(181, 74, 68, 0.03);
+.qr-choice-letter {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.88rem;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  border: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
 }
 
-.answer-choice-card.correct {
-  border-color: rgba(61, 122, 94, 0.28);
-  border-left: 3px solid var(--primary);
-  background: rgba(61, 122, 94, 0.03);
+.qr-choice-body {
+  min-width: 0;
 }
 
-.answer-choice-card.mine.correct {
-  border-left-color: var(--primary);
+.qr-choice-body p {
+  margin: 0;
+  line-height: 1.6;
+  color: var(--ink);
+  white-space: pre-wrap;
+}
+
+.qr-choice-state {
+  align-self: center;
+  white-space: nowrap;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.qr-choice-right {
+  border-color: rgba(61, 122, 94, 0.38);
   background: rgba(61, 122, 94, 0.06);
 }
+.qr-choice-right .qr-choice-letter { background: var(--primary); color: #fff; border-color: var(--primary); }
+.qr-choice-right .qr-choice-state { background: rgba(61, 122, 94, 0.14); color: var(--primary); }
 
-.answer-choice-card.mine.wrong {
-  border-color: rgba(181, 74, 68, 0.30);
-  border-left: 3px solid var(--danger);
+.qr-choice-wrong {
+  border-color: rgba(181, 74, 68, 0.38);
   background: rgba(181, 74, 68, 0.05);
 }
+.qr-choice-wrong .qr-choice-letter { background: var(--danger); color: #fff; border-color: var(--danger); }
+.qr-choice-wrong .qr-choice-state { background: rgba(181, 74, 68, 0.12); color: var(--danger); }
 
-.answer-choice-card.correct-only {
-  border-color: rgba(196, 168, 67, 0.32);
-  border-left: 3px solid var(--accent);
-  background: rgba(196, 168, 67, 0.06);
+.qr-choice-correct {
+  border-color: rgba(196, 168, 67, 0.42);
+  background: rgba(196, 168, 67, 0.07);
 }
+.qr-choice-correct .qr-choice-letter { background: var(--accent); color: #3a3316; border-color: var(--accent); }
+.qr-choice-correct .qr-choice-state { background: rgba(196, 168, 67, 0.18); color: var(--accent-ink); }
 
-.question-mini-chip.accent-chip {
-  border-color: rgba(196, 168, 67, 0.35);
-  background: rgba(196, 168, 67, 0.14);
-  color: #8a7320;
-}
+/* Compact variant for DI choice-grid slots (short Yes/No options). */
+.qr-choices-compact .qr-choice { padding: 8px var(--s4); }
 
-/* ---- Legend (above answer choices) ---- */
-.answer-choice-legend {
+/* ---- Legend — only the matrix grid needs it (bare ✓/✗ symbols) ---- */
+.qr-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--s3);
-  padding: 6px 10px;
-  margin-bottom: var(--s2);
-  border: 1px dashed var(--border);
+  gap: var(--s4);
+  align-items: center;
+  margin-bottom: var(--s3);
+  padding: var(--s2) var(--s3);
+  background: var(--surface-2);
   border-radius: var(--r-s);
-  background: var(--surface);
   font-size: 0.72rem;
   color: var(--ink-2);
 }
-.answer-choice-legend .legend-item {
+.qr-legend-item {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-.answer-choice-legend .legend-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 3px;
-  border: 1px solid var(--border);
-}
-.legend-dot-correct { background: rgba(196, 168, 67, 0.45); border-color: rgba(196, 168, 67, 0.7); }
-.legend-dot-right   { background: rgba(61, 122, 94, 0.45);  border-color: rgba(61, 122, 94, 0.7); }
-.legend-dot-wrong   { background: rgba(181, 74, 68, 0.45);  border-color: rgba(181, 74, 68, 0.7); }
-
-/* ---- Matrix grid (Two-Part Analysis / MSR) ---- */
-.answer-matrix-wrap { display: grid; gap: var(--s2); }
-.answer-matrix-grid {
-  display: grid;
-  gap: 4px;
-  padding: var(--s3);
-  border: 1px solid var(--border);
-  border-radius: var(--r-s);
-  background: var(--surface);
-  align-items: stretch;
-}
-.amg-corner { }
-.amg-header {
-  text-align: center;
   font-weight: 600;
-  font-size: 0.78rem;
-  color: var(--ink);
-  padding: 6px 10px;
+}
+.qr-legend-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+.ld-key   { background: rgba(196, 168, 67, 0.20); color: var(--accent-ink); border: 1px solid rgba(196, 168, 67, 0.5); }
+.ld-right { background: rgba(61, 122, 94, 0.20);  color: var(--primary);    border: 1px solid rgba(61, 122, 94, 0.5); }
+.ld-wrong { background: rgba(181, 74, 68, 0.18);  color: var(--danger);     border: 1px solid rgba(181, 74, 68, 0.5); }
+
+/* ---- Matrix grid (Two-Part Analysis / MSR Yes-No) ---- */
+.qr-matrix-wrap { display: grid; gap: var(--s3); }
+.qr-matrix {
+  display: grid;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  overflow: hidden;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.mx-corner {
+  background: var(--surface-2);
+  padding: 10px 12px;
+  font-weight: 700;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-2);
   border-bottom: 1px solid var(--border);
 }
-.amg-row-label {
+.mx-header {
+  text-align: center;
+  font-weight: 700;
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.mx-row-label {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: flex-start;
-  padding: 8px 10px;
-  font-size: 0.88rem;
+  padding: 12px 14px;
+  font-size: 0.92rem;
   color: var(--ink);
-  line-height: 1.5;
+  line-height: 1.55;
   border-top: 1px solid var(--border);
 }
-.amg-row-label .amg-row-num {
+.mx-row-num {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   border-radius: 999px;
   background: var(--primary-lt);
   color: var(--primary);
@@ -2684,114 +2884,74 @@ th.sortable:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  font-variant-numeric: tabular-nums;
 }
-.amg-cell {
+.mx-cell {
   border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1rem;
+  font-size: 1.05rem;
   font-weight: 700;
-  min-width: 60px;
-  color: var(--ink-2);
+  min-width: 72px;
+  color: var(--muted);
 }
-.amg-cell.cell-correct { background: rgba(196, 168, 67, 0.18); color: #8a7320; }
-.amg-cell.cell-right   { background: rgba(61, 122, 94, 0.20);  color: var(--primary); }
-.amg-cell.cell-wrong   { background: rgba(181, 74, 68, 0.18);  color: var(--danger); }
+.mx-cell.cell-key   { background: rgba(196, 168, 67, 0.18); color: var(--accent-ink); }
+.mx-cell.cell-right { background: rgba(61, 122, 94, 0.18);  color: var(--primary); }
+.mx-cell.cell-wrong { background: rgba(181, 74, 68, 0.16);  color: var(--danger); }
 
-/* ---- Dropdown blanks (Graphics Interpretation) ---- */
-.answer-blank-wrap { display: grid; gap: var(--s2); }
-.answer-blank-list { display: grid; gap: var(--s3); }
-.answer-blank-card {
+/* ---- Dropdown blanks (Graphics Interpretation) — you vs correct ---- */
+.qr-blanks { display: grid; gap: var(--s4); }
+.qr-blank {
   display: grid;
-  gap: var(--s2);
-  padding: var(--s3);
+  gap: var(--s3);
+  padding: var(--s4) var(--s5);
   border: 1px solid var(--border);
-  border-radius: var(--r-s);
+  border-radius: var(--r);
   background: var(--surface);
+  box-shadow: var(--shadow);
 }
-.answer-blank-head strong {
-  font-size: 0.95rem;
-  color: var(--ink);
-}
-.answer-blank-body {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--s2);
-}
-.answer-blank-cell {
-  display: grid;
-  gap: 4px;
-  padding: 10px 12px;
-  border-radius: var(--r-s);
-  border: 1px solid var(--border);
-  background: var(--bg);
-}
-.answer-blank-cell.cell-right   { border-color: rgba(61, 122, 94, 0.4);  background: rgba(61, 122, 94, 0.08); }
-.answer-blank-cell.cell-wrong   { border-color: rgba(181, 74, 68, 0.4);  background: rgba(181, 74, 68, 0.06); }
-.answer-blank-cell.cell-correct { border-color: rgba(196, 168, 67, 0.4); background: rgba(196, 168, 67, 0.08); }
-.answer-blank-cell.cell-empty   { color: var(--ink-2); border-style: dashed; }
-.answer-blank-meta {
-  font-size: 0.68rem;
-  font-weight: 600;
+.qr-blank-head {
+  font-size: 0.72rem;
+  font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--ink-2);
 }
-.answer-blank-text {
-  font-size: 0.95rem;
+.qr-blank-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s3);
+}
+.qr-blank-cell {
+  display: grid;
+  gap: 4px;
+  padding: 10px 14px;
+  border-radius: var(--r-s);
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.qr-blank-cell.cell-right   { border-color: rgba(61, 122, 94, 0.42);  background: rgba(61, 122, 94, 0.08); }
+.qr-blank-cell.cell-wrong   { border-color: rgba(181, 74, 68, 0.42);  background: rgba(181, 74, 68, 0.07); }
+.qr-blank-cell.cell-correct { border-color: rgba(196, 168, 67, 0.42); background: rgba(196, 168, 67, 0.08); }
+.qr-blank-cell.cell-empty   { border-style: dashed; color: var(--muted); }
+.qr-blank-meta {
+  font-size: 0.66rem;
   font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.qr-blank-val {
+  font-size: 1rem;
+  font-weight: 700;
   color: var(--ink);
 }
+.qr-blank-cell.cell-right .qr-blank-val { color: var(--primary); }
+.qr-blank-cell.cell-wrong .qr-blank-val { color: var(--danger); }
 @media (max-width: 640px) {
-  .answer-blank-body { grid-template-columns: 1fr; }
-}
-
-.answer-choice-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s2);
-}
-
-.answer-choice-head strong {
-  font-size: 1.1rem;
-  color: var(--ink);
-}
-
-.answer-choice-flags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.answer-choice-card p,
-.question-side-card p {
-  margin: 0;
-  color: var(--ink-2);
-  line-height: 1.6;
-  white-space: pre-wrap;
-}
-
-.question-side-card {
-  border-color: rgba(74, 127, 165, 0.14);
-  background: rgba(74, 127, 165, 0.03);
-}
-
-.question-side-label {
-  color: var(--info);
-}
-
-.question-side-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.question-side-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s2);
+  .qr-blank-body { grid-template-columns: 1fr; }
 }
 
 .redo-pill {
@@ -3015,19 +3175,20 @@ th.sortable:hover {
 .question-review-nav {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  margin-right: var(--s2);
-  padding-right: var(--s2);
-  border-right: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+  gap: var(--s2);
+  margin-right: var(--s3);
+  padding-right: var(--s3);
+  border-right: 1px solid var(--border);
 }
 
 .question-review-nav-counter {
-  font-size: 0.78rem;
+  font-size: 0.82rem;
   font-weight: 600;
-  color: var(--ink-2, #475569);
-  min-width: 48px;
+  color: var(--ink-2);
+  min-width: 52px;
   text-align: center;
   letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
 }
 
 .analysis-block { display: grid; gap: var(--s3); }
@@ -3738,19 +3899,12 @@ html {
   /* Two columns only when there's a passage: passage left, stem + choices right.
      No passage (CR / LR / most Quant & DI) stays single-column, stem over choices. */
   .question-review-layout.has-passage {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
     align-items: start;
   }
 
-  /* Let the passage fill most of the fullscreen modal instead of a cramped 320px box,
-     so long RC passages are visible with minimal internal scrolling. */
   .question-review-layout.has-passage .question-passage-card {
-    max-height: calc(100vh - 300px);
-  }
-
-  .question-annotation-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 0.8fr);
-    align-items: start;
+    max-height: calc(100vh - 280px);
   }
 
   .response-slot-head {

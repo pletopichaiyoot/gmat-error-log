@@ -166,6 +166,20 @@ For schema, conventions (unanswered-row filter, subject normalization, topic can
 
 When the user wants to **review or be coached on his practice** ("review today's/this week's practice", "how did I do", "where am I weak", "dissect my misses", "review my timing", "re-summarize my performance", "what should I drill"), read **COACHING.md** first — the personal coaching playbook (diagnostic checklist, current DI triage rule, Phase-2 enrichment workflow, "Patient Coach" voice). It lives in the **MBA2027-GMAT** study folder (`/Users/pletopichaiyoot/Desktop/mba2027/MBA2027-GMAT/COACHING.md`), **not in this public repo** — per the study-materials save convention; skip gracefully if that folder isn't mounted. ANALYSIS.md (here) is the reference; COACHING.md is how to use it for him.
 
+## Curating AI Curated Practice sets
+
+When the user wants a **practice set to redo** ("curate a practice set", "make me a set to redo", "practice X with the AI curated feature"), the curation happens **here, in a coding/Cowork session** — query the DB, pick `question_attempts.id`s, and write `data/ai-practice-sets/<slug>.json` (`{ slug, title, focusNote, subject, items:[id,…] }`, read fresh per request, gitignored). Full recipe + candidate SQL: the **"Curating an AI Practice set"** section in [ANALYSIS.md](ANALYSIS.md). Two hard rules:
+
+1. **Only gradeable single-answer rows** — non-empty `question_stem`, a **flat** `[{label,text}]` `answer_choices` array, and a non-empty `correct_answer`. Multi-part DI (TPA/MSR/GI/TA with nested `options[]`) is rejected by `isFlatGradeableChoices()` and silently dropped.
+2. **NEVER add scraped-incorrectly "blank-choice" rows** — questions whose `answer_choices` contains entries with empty/whitespace `text` (a scrape glitch: e.g. 5 options, 3 blank). The structural gradeability check counts choices but does **not** inspect their text, so a blank-choice row still serves and renders as empty buttons. Filter it out at curation time:
+
+```sql
+AND (SELECT count(*) FROM json_array_elements(qa.answer_choices::json) e
+     WHERE COALESCE(TRIM(e->>'text'),'') = '') = 0
+```
+
+(This bit us once — attempt `14839` had 5 choices, 3 of them blank.)
+
 ## REST endpoints (selected)
 
 - `POST /api/scrape` — Phase 1 scrape, dispatched by `preset.platform` (StartTest or GMAT Club).

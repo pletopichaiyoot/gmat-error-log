@@ -487,6 +487,66 @@ function StimulusSource({ src }) {
   );
 }
 
+// Collect every MSR source passage (sibling `.tabcontent` blocks) across a
+// row's stimulus into a flat list of sanitized tab HTML. MSR items would
+// otherwise show the same passages three times — flattened in the passage
+// column, again inline in the stimulus, and referenced by the stem ("the
+// tabs") — the "stem and passages mixed up" bug. When ≥2 tabs exist the review
+// panel renders them as ONE "Question Information" tab strip and suppresses the
+// duplicates.
+function getPassageTabs(row) {
+  let s = null;
+  try { s = row?.stimulus ? JSON.parse(row.stimulus) : null; } catch { s = null; }
+  if (!s) return [];
+  const htmls = [];
+  if (s.html) htmls.push(s.html);
+  (Array.isArray(s.sources) ? s.sources : []).forEach((src) => {
+    if (src?.html) htmls.push(src.html);
+  });
+  const tabs = [];
+  htmls.forEach((html) => {
+    if (!html || !/tabcontent/i.test(html)) return;
+    const tpl = document.createElement('template');
+    tpl.innerHTML = sanitizeStimulusHtml(html);
+    tpl.content.querySelectorAll('.tabcontent').forEach((t) => {
+      const inner = t.innerHTML.trim();
+      if (inner) tabs.push(inner);
+    });
+  });
+  return tabs;
+}
+
+// Tabbed "Question Information" panel — one tab per MSR source passage. Tab
+// labels aren't in the captured DOM, so they're numbered "Passage N".
+function PassageTabs({ tabs }) {
+  const [active, setActive] = useState(0);
+  if (!Array.isArray(tabs) || tabs.length === 0) return null;
+  const idx = Math.min(active, tabs.length - 1);
+  return (
+    <div className="qr-info-tabs">
+      <div className="qr-info-tablist" role="tablist">
+        {tabs.map((_, i) => (
+          <button
+            key={i}
+            type="button"
+            role="tab"
+            aria-selected={i === idx}
+            className={`qr-info-tab${i === idx ? ' active' : ''}`}
+            onClick={() => setActive(i)}
+          >
+            {`Passage ${i + 1}`}
+          </button>
+        ))}
+      </div>
+      <div
+        className="qr-info-tabpanel question-stem-html"
+        role="tabpanel"
+        dangerouslySetInnerHTML={{ __html: tabs[idx] }}
+      />
+    </div>
+  );
+}
+
 // Split a passage into display paragraphs. Splits on blank lines (the paragraph
 // break both LSAT JSON and StartTest enrichment use), drops a leading "Passage:"
 // label, and collapses intra-paragraph whitespace so each <p> wraps cleanly.
@@ -578,6 +638,57 @@ function decodeMatrixSelections(choices, correctCsv) {
     if (o?.isUserSelected && ci < colCount) userByCol[ci] = ri + 1;
   }));
   return { rowCount, colCount, headers, correctCells, correctByCol, userByCol };
+}
+
+// Some MSR "matrix" questions (46 rows as of 2026-07) arrive with an unset
+// response_format and a FLAT answer_choices array — one entry per
+// (statement × option) cell, keyed by a "row:col" value, label
+// "statement=Option", carrying reliable per-cell isCorrect / isUserSelected.
+// Left alone they render through the single-choice path, which turns each full
+// statement into a "letter" badge — the "MSR is messed up" bug. Detect the
+// shape here and rebuild the grid so it renders as a matrix.
+function isFlatMatrixChoices(choices) {
+  if (!Array.isArray(choices) || choices.length < 2) return false;
+  return choices.every((c) => /^\s*\d+\s*:\s*\d+\s*$/.test(String(c?.value || '')));
+}
+
+function decodeFlatMatrix(choices) {
+  const cells = (Array.isArray(choices) ? choices : [])
+    .map((c) => {
+      const [r, col] = String(c?.value || '').split(':').map((n) => parseInt(n, 10));
+      const label = String(c?.label || '');
+      const eq = label.lastIndexOf('=');
+      const statement = eq >= 0 ? label.slice(0, eq) : label;
+      const optionName = eq >= 0 ? label.slice(eq + 1) : '';
+      return {
+        row: r,
+        col,
+        statement: normalizeQuestionText(statement),
+        option: normalizeQuestionText(optionName),
+        isCorrect: c?.isCorrect === true,
+        isUserSelected: c?.isUserSelected === true,
+      };
+    })
+    .filter((c) => Number.isFinite(c.row) && Number.isFinite(c.col) && c.row >= 1 && c.col >= 1);
+  if (!cells.length) return null;
+  const colCount = Math.max(...cells.map((c) => c.col));
+  const rowCount = Math.max(...cells.map((c) => c.row));
+  const headers = [];
+  cells.forEach((c) => {
+    if (!headers[c.col - 1] && c.option) headers[c.col - 1] = c.option;
+  });
+  const rows = [];
+  for (let r = 1; r <= rowCount; r += 1) {
+    const rowCells = cells.filter((c) => c.row === r);
+    const statement = rowCells.find((c) => c.statement)?.statement || `Statement ${r}`;
+    const options = [];
+    for (let col = 1; col <= colCount; col += 1) {
+      const cell = rowCells.find((c) => c.col === col) || {};
+      options[col - 1] = { isCorrect: !!cell.isCorrect, isUserSelected: !!cell.isUserSelected };
+    }
+    rows.push({ text: statement, options });
+  }
+  return { colCount, rowCount, headers, rows };
 }
 
 function formatResponseFormat(value) {
@@ -4922,20 +5033,30 @@ function App() {
               </div>
 
               <div className="question-review-hero">
-                <div className="question-review-meta">
-                  <span className="question-review-chip chip-subject">{formatMaybe(normalizeSubjectFamilyDisplay(normalizedSubjectCode(questionReview.row)))}</span>
-                  <span className="question-review-chip chip-subject">{formatMaybe(normalizedCategoryCode(questionReview.row))}</span>
-                  <span className={`question-review-chip chip-difficulty-${String(questionReview.row.difficulty || '').toLowerCase()}`}>{formatMaybe(questionReview.row.difficulty)}</span>
-                  <span className="question-review-chip">{formatMaybe(normalizedSubcategory(questionReview.row))}</span>
-                  {formatResponseFormat(questionReview.row.response_format) && (
-                    <span className="question-review-chip">{formatResponseFormat(questionReview.row.response_format)}</span>
-                  )}
-                  {formatContentDomain(questionReview.row.content_domain) && (
-                    <span className="question-review-chip">{formatContentDomain(questionReview.row.content_domain)}</span>
-                  )}
-                  {formatTopicSource(questionReview.row.topic_source) && (
-                    <span className="question-review-chip muted-chip">{formatTopicSource(questionReview.row.topic_source)}</span>
-                  )}
+                <div className="qr-meta-bar">
+                  <div className="qr-meta-group">
+                    <span className="qr-meta-chip qr-chip-subject">{formatMaybe(normalizeSubjectFamilyDisplay(normalizedSubjectCode(questionReview.row)))}</span>
+                    {formatMaybe(normalizedCategoryCode(questionReview.row)) !== '-' && (
+                      <span className="qr-meta-chip">{normalizedCategoryCode(questionReview.row)}</span>
+                    )}
+                    {formatMaybe(normalizedSubcategory(questionReview.row)) !== '-' && (
+                      <span className="qr-meta-chip">{normalizedSubcategory(questionReview.row)}</span>
+                    )}
+                  </div>
+                  <div className="qr-meta-group">
+                    {formatMaybe(questionReview.row.difficulty) !== '-' && (
+                      <span className={`qr-meta-chip qr-chip-diff-${String(questionReview.row.difficulty || '').toLowerCase()}`}>{questionReview.row.difficulty}</span>
+                    )}
+                    {formatResponseFormat(questionReview.row.response_format) && (
+                      <span className="qr-meta-chip qr-chip-quiet">{formatResponseFormat(questionReview.row.response_format)}</span>
+                    )}
+                    {formatContentDomain(questionReview.row.content_domain) && (
+                      <span className="qr-meta-chip qr-chip-quiet">{formatContentDomain(questionReview.row.content_domain)}</span>
+                    )}
+                    {formatTopicSource(questionReview.row.topic_source) && (
+                      <span className="qr-meta-chip qr-chip-source">{formatTopicSource(questionReview.row.topic_source)}</span>
+                    )}
+                  </div>
                 </div>
                 {getResponseSlots(questionReview.row).length > 0 ? (
                   <div className="di-answer-summary">
@@ -4963,108 +5084,90 @@ function App() {
                   </div>
                 ) : (() => {
                   const sRow = questionReview.row;
-                  let yourVal = formatMaybe(sRow.my_answer || summarizeStructuredResponse(sRow, 'user_value'));
-                  let correctVal = formatMaybe(sRow.correct_answer || summarizeStructuredResponse(sRow, 'correct_value'));
-                  // Matrix CSVs are transposed between my_answer (often per-row)
-                  // and correct_answer (per-column), so the raw strings look
-                  // mismatched even when the answer is right. Render both in the
-                  // same "<column> → row N" orientation so they line up.
-                  if (String(sRow.response_format || '').toLowerCase() === 'matrix') {
-                    const mc = parseAnswerChoices(sRow.answer_choices);
-                    if (Array.isArray(mc[0]?.options)) {
-                      const { colCount, headers, correctByCol, userByCol } = decodeMatrixSelections(mc, sRow.correct_answer);
-                      const colLabel = (ci) => normalizeQuestionText(headers[ci] || '') || `Col ${ci + 1}`;
-                      const fmtPairs = (arr) => arr
-                        .map((r, ci) => (r ? `${colLabel(ci)} → ${r}` : null))
-                        .filter(Boolean)
-                        .join(', ');
-                      if (colCount > 0) {
-                        const u = fmtPairs(userByCol);
-                        const c = fmtPairs(correctByCol);
-                        if (u) yourVal = u;
-                        if (c) correctVal = c;
-                      }
-                    }
-                  }
+                  const ac = parseAnswerChoices(sRow.answer_choices);
+                  // Matrix-like items (true matrix format or the MSR flat-matrix
+                  // shape) carry their full answer in the grid below, so the
+                  // verdict strip skips the long "statement: value | …" blobs
+                  // and shows only the outcome + timing.
+                  const isMatrixLike = String(sRow.response_format || '').toLowerCase() === 'matrix'
+                    || isFlatMatrixChoices(ac);
+                  const yourVal = formatMaybe(sRow.my_answer || summarizeStructuredResponse(sRow, 'user_value'));
+                  const correctVal = formatMaybe(sRow.correct_answer || summarizeStructuredResponse(sRow, 'correct_value'));
+                  const isRight = Number(sRow.correct) === 1;
                   return (
-                    <div className="question-review-stats">
-                      <div>
-                        <span>Your Answer</span>
-                        <strong>{yourVal}</strong>
+                    <div className={`qr-verdict qr-verdict-${isRight ? 'right' : 'wrong'}`}>
+                      <div className="qr-verdict-badge">
+                        <span className="qr-verdict-icon" aria-hidden="true">{isRight ? '✓' : '✗'}</span>
+                        <span className="qr-verdict-label">{isRight ? 'Correct' : 'Incorrect'}</span>
                       </div>
-                      <div>
-                        <span>Correct</span>
-                        <strong>{correctVal}</strong>
-                      </div>
-                      <div>
-                        <span>Time</span>
-                        <strong>{formatDurationSeconds(sRow.time_sec)}</strong>
-                      </div>
-                      <div>
-                        <span>Confidence</span>
-                        <strong>{formatMaybe(sRow.confidence)}</strong>
+                      <div className="qr-facts">
+                        {!isMatrixLike && yourVal !== '-' && (
+                          <div className="qr-fact"><span>Your answer</span><strong className="qr-fact-yours">{yourVal}</strong></div>
+                        )}
+                        {!isMatrixLike && correctVal !== '-' && (
+                          <div className="qr-fact"><span>Correct</span><strong className="qr-fact-correct">{correctVal}</strong></div>
+                        )}
+                        <div className="qr-fact"><span>Time</span><strong>{formatDurationSeconds(sRow.time_sec)}</strong></div>
+                        {formatMaybe(sRow.confidence) !== '-' && (
+                          <div className="qr-fact"><span>Confidence</span><strong>{formatMaybe(sRow.confidence)}</strong></div>
+                        )}
                       </div>
                     </div>
                   );
                 })()}
-              </div>
 
-              <section className="question-review-section question-annotation-section">
-                <h3>Annotation</h3>
-                <div className="question-annotation-grid">
-                  <div className="question-side-card">
-                    <span className="question-side-label">Mistake Tags</span>
-                    <div className="question-side-tags">
+                <div className="qr-annot-bar">
+                  <div className="qr-annot-field">
+                    <span className="qr-annot-label">Mistake Tags</span>
+                    <div className="qr-annot-tags">
                       {parseMistakeTags(questionReview.row.mistake_type).length ? (
                         parseMistakeTags(questionReview.row.mistake_type).map((tag) => (
                           <span key={tag} className="mistake-tag-pill">{tag}</span>
                         ))
                       ) : (
-                        <span className="muted">No tags yet</span>
+                        <span className="muted">Untagged</span>
                       )}
                     </div>
                   </div>
-                  <div className="question-side-card">
-                    <span className="question-side-label">Notes</span>
+                  <div className="qr-annot-field qr-annot-notes">
+                    <span className="qr-annot-label">Notes</span>
                     <p>{normalizeQuestionText(questionReview.row.notes) || 'No notes yet.'}</p>
                   </div>
-                  <div className="question-side-card">
-                    <span className="question-side-label">Actions</span>
-                    <div className="question-side-actions">
-                      <Button variant="outline" type="button" onClick={() => handleOpenAnnotation(questionReview.row)}>
-                        Annotate
-                      </Button>
-                      {canonicalQuestionUrl(questionReview.row) ? (
-                        <Button
-                          variant="outline"
-                          type="button"
-                          onClick={() => handleOpenQuestionInGmat(questionReview.row, 'question-review-side')}
-                          disabled={openingQuestionKey === questionOpenKey(questionReview.row, 'question-review-side')}
-                        >
-                          {openingQuestionKey === questionOpenKey(questionReview.row, 'question-review-side')
-                            ? 'Opening...'
-                            : 'Open in GMAT'}
-                        </Button>
-                      ) : null}
-                    </div>
-                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    type="button"
+                    className="qr-annot-btn"
+                    onClick={() => handleOpenAnnotation(questionReview.row)}
+                  >
+                    Annotate
+                  </Button>
                 </div>
-              </section>
+              </div>
 
-              <section className={`question-review-layout${rowHasPassage(questionReview.row) ? ' has-passage' : ''}`}>
-                {rowHasPassage(questionReview.row) && (
-                  <div className="question-review-col question-review-passage-col">
-                    <div className="question-review-section">
-                      <h3>Passage</h3>
-                      <div className="question-passage-card">
-                        <PassageLines
-                          lines={questionReview.row.passage_lines}
-                          text={questionReview.row.passage_text}
-                        />
+              <section className={`question-review-layout${(rowHasPassage(questionReview.row) || getPassageTabs(questionReview.row).length >= 2) ? ' has-passage' : ''}`}>
+                {(() => {
+                  const passageTabs = getPassageTabs(questionReview.row);
+                  const hasPassageTabs = passageTabs.length >= 2;
+                  if (!hasPassageTabs && !rowHasPassage(questionReview.row)) return null;
+                  return (
+                    <div className="question-review-col question-review-passage-col">
+                      <div className="question-review-section">
+                        <h3>{hasPassageTabs ? 'Question Information' : 'Passage'}</h3>
+                        <div className="question-passage-card">
+                          {hasPassageTabs ? (
+                            <PassageTabs tabs={passageTabs} />
+                          ) : (
+                            <PassageLines
+                              lines={questionReview.row.passage_lines}
+                              text={questionReview.row.passage_text}
+                            />
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 <div className="question-review-col question-review-main-col">
                   <div className="question-review-section">
@@ -5078,6 +5181,10 @@ function App() {
                     let s = null;
                     try { s = questionReview.row?.stimulus ? JSON.parse(questionReview.row.stimulus) : null; } catch { s = null; }
                     if (!s) return null;
+                    // MSR source passages are consolidated into the left
+                    // "Question Information" tab panel; don't re-dump them inline
+                    // here (that double-render was the stem/passage mix-up).
+                    if (getPassageTabs(questionReview.row).length >= 2) return null;
                     const html = sanitizeStimulusHtml(s.html || '');
                     return (
                       <div className="question-stimulus">
@@ -5092,7 +5199,9 @@ function App() {
                   <div className="question-review-section">
                   <h3>
                     {getResponseSlots(questionReview.row).length
-                      ? 'Response Structure'
+                      || ['matrix', 'dropdown'].includes(String(questionReview.row.response_format || '').toLowerCase())
+                      || isFlatMatrixChoices(parseAnswerChoices(questionReview.row.answer_choices))
+                      ? 'Your Responses'
                       : 'Answer Choices'}
                   </h3>
                   {getResponseSlots(questionReview.row).length ? (
@@ -5129,29 +5238,26 @@ function App() {
                             </div>
 
                             {slotOptions.length ? (
-                              <div className={`response-slot-options${isChoiceGrid ? ' slot-options-compact' : ''}`}>
+                              <ul className={`qr-choices${isChoiceGrid ? ' qr-choices-compact' : ''}`}>
                                 {slotOptions.map((option, optionIndex) => {
-                                  const label = String(option?.label || '').trim();
+                                  const label = String(option?.label || String.fromCharCode(65 + optionIndex)).trim();
                                   const text = normalizeQuestionText(option?.text || '') || '-';
                                   const isMine = String(slot?.user_value || '').trim() === String(option?.id || '').trim();
                                   const isCorrect = String(slot?.correct_value || '').trim() === String(option?.id || '').trim();
+                                  const variant = isMine && isCorrect ? 'right' : isMine ? 'wrong' : isCorrect ? 'correct' : '';
+                                  const stateLabel = isMine && isCorrect ? 'Your pick · Correct' : isMine ? 'Your pick' : isCorrect ? 'Correct answer' : '';
                                   return (
-                                    <article
+                                    <li
                                       key={`${slot?.slot_id || index}-${option?.id || optionIndex}`}
-                                      className={`answer-choice-card response-option-card${isMine ? ' mine' : ''}${isCorrect ? ' correct' : ''}`}
+                                      className={`qr-choice${variant ? ` qr-choice-${variant}` : ''}`}
                                     >
-                                      <div className="answer-choice-head">
-                                        <strong>{label || text}</strong>
-                                        <div className="answer-choice-flags">
-                                          {isMine && <span className="question-mini-chip">Your pick</span>}
-                                          {isCorrect && <span className="question-mini-chip success-chip">Correct</span>}
-                                        </div>
-                                      </div>
-                                      {label && text !== label && <p>{text}</p>}
-                                    </article>
+                                      <span className="qr-choice-letter">{label}</span>
+                                      <div className="qr-choice-body"><p>{text}</p></div>
+                                      {stateLabel && <span className="qr-choice-state">{stateLabel}</span>}
+                                    </li>
                                   );
                                 })}
-                              </div>
+                              </ul>
                             ) : (
                               <p className="muted">No option-level scrape for this DI slot.</p>
                             )}
@@ -5172,11 +5278,14 @@ function App() {
                       // and we want to fall back per-flag in that case.
                       const anyMine = choices.some((c) => c?.isUserSelected === true);
                       const anyCorrectFlagged = choices.some((c) => c?.isCorrect === true);
-                      const Legend = (
-                        <div className="answer-choice-legend">
-                          <span className="legend-item"><span className="legend-dot legend-dot-correct" />Correct answer</span>
-                          <span className="legend-item"><span className="legend-dot legend-dot-right" />Your pick · right</span>
-                          <span className="legend-item"><span className="legend-dot legend-dot-wrong" />Your pick · wrong</span>
+                      // The grid renders bare ✓/✗ symbols, so it needs a key;
+                      // the flat choice/blank lists label each card inline and
+                      // don't.
+                      const MatrixLegend = (
+                        <div className="qr-legend">
+                          <span className="qr-legend-item"><span className="qr-legend-dot ld-right" aria-hidden="true">✓</span>Your pick · right</span>
+                          <span className="qr-legend-item"><span className="qr-legend-dot ld-wrong" aria-hidden="true">✗</span>Your pick · wrong</span>
+                          <span className="qr-legend-item"><span className="qr-legend-dot ld-key" aria-hidden="true">✓</span>Correct answer (missed)</span>
                         </div>
                       );
 
@@ -5189,20 +5298,20 @@ function App() {
                         // spurious empty answer column.
                         const cornerLabel = headers.length > colCount ? (headers[colCount] || '') : '';
                         return (
-                          <div className="answer-matrix-wrap">
-                            {Legend}
+                          <div className="qr-matrix-wrap">
+                            {MatrixLegend}
                             <div
-                              className="answer-matrix-grid"
+                              className="qr-matrix"
                               style={{ gridTemplateColumns: `minmax(0,1fr) repeat(${colCount}, minmax(80px, max-content))` }}
                             >
-                              <div className="amg-corner">{normalizeQuestionText(cornerLabel)}</div>
+                              <div className="mx-corner">{normalizeQuestionText(cornerLabel)}</div>
                               {Array.from({ length: colCount }).map((_, ci) => (
-                                <div key={`h-${ci}`} className="amg-header">{headers[ci] || ''}</div>
+                                <div key={`h-${ci}`} className="mx-header">{headers[ci] || ''}</div>
                               ))}
                               {choices.map((row, ri) => (
                                 <Fragment key={`r-${ri}`}>
-                                  <div className="amg-row-label">
-                                    <span className="amg-row-num">{ri + 1}</span>
+                                  <div className="mx-row-label">
+                                    <span className="mx-row-num">{ri + 1}</span>
                                     <span>{normalizeQuestionText(row?.text || row?.label || '') || '-'}</span>
                                   </div>
                                   {Array.from({ length: colCount }).map((_, ci) => {
@@ -5215,13 +5324,13 @@ function App() {
                                     const correct = correctCells.has(`${ri + 1},${ci + 1}`) || !!opt.isCorrect;
                                     const cls = userPicked && correct ? 'cell-right'
                                       : userPicked ? 'cell-wrong'
-                                      : correct ? 'cell-correct'
+                                      : correct ? 'cell-key'
                                       : '';
                                     const sym = userPicked && correct ? '✓'
                                       : userPicked ? '✗'
                                       : correct ? '✓'
                                       : '';
-                                    return <div key={`c-${ri}-${ci}`} className={`amg-cell ${cls}`}>{sym}</div>;
+                                    return <div key={`c-${ri}-${ci}`} className={`mx-cell ${cls}`}>{sym}</div>;
                                   })}
                                 </Fragment>
                               ))}
@@ -5233,73 +5342,104 @@ function App() {
                       if (fmt === 'dropdown') {
                         const correctParts = corrAns ? corrAns.split(/\s*,\s*/) : [];
                         return (
-                          <div className="answer-blank-wrap">
-                            {Legend}
-                            <div className="answer-blank-list">
-                              {choices.map((blank, bi) => {
-                                const userText = String(blank?.text || '').trim();
-                                const isPlaceholder = !userText || /^select\.\.\.?$/i.test(userText);
-                                const correctText = (correctParts[bi] || '').trim();
-                                const userIsRight = !isPlaceholder && correctText && userText === correctText;
-                                return (
-                                  <article key={`b-${bi}`} className="answer-blank-card">
-                                    <header className="answer-blank-head">
-                                      <strong>{blank?.label || `Blank ${bi + 1}`}</strong>
-                                    </header>
-                                    <div className="answer-blank-body">
-                                      <div className={`answer-blank-cell ${userIsRight ? 'cell-right' : isPlaceholder ? 'cell-empty' : 'cell-wrong'}`}>
-                                        <span className="answer-blank-meta">Your pick</span>
-                                        <span className="answer-blank-text">{isPlaceholder ? '—' : userText}</span>
-                                      </div>
-                                      <div className={`answer-blank-cell ${userIsRight ? 'cell-right' : 'cell-correct'}`}>
-                                        <span className="answer-blank-meta">Correct</span>
-                                        <span className="answer-blank-text">{correctText || '—'}</span>
-                                      </div>
+                          <div className="qr-blanks">
+                            {choices.map((blank, bi) => {
+                              const userText = String(blank?.text || '').trim();
+                              const isPlaceholder = !userText || /^select\.\.\.?$/i.test(userText);
+                              const correctText = (correctParts[bi] || '').trim();
+                              const userIsRight = !isPlaceholder && correctText && userText === correctText;
+                              return (
+                                <div key={`b-${bi}`} className="qr-blank">
+                                  <span className="qr-blank-head">{blank?.label || `Blank ${bi + 1}`}</span>
+                                  <div className="qr-blank-body">
+                                    <div className={`qr-blank-cell ${userIsRight ? 'cell-right' : isPlaceholder ? 'cell-empty' : 'cell-wrong'}`}>
+                                      <span className="qr-blank-meta">Your pick</span>
+                                      <span className="qr-blank-val">{isPlaceholder ? '—' : userText}</span>
                                     </div>
-                                  </article>
-                                );
-                              })}
-                            </div>
+                                    <div className={`qr-blank-cell ${userIsRight ? 'cell-right' : 'cell-correct'}`}>
+                                      <span className="qr-blank-meta">Correct</span>
+                                      <span className="qr-blank-val">{correctText || '—'}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
                           </div>
                         );
                       }
 
-                      return (
-                        <div className="answer-choice-wrap">
-                          {Legend}
-                          <div className="answer-choice-list">
-                            {choices.map((choice, index) => {
-                              const label = String(choice?.label || String.fromCharCode(65 + index)).trim();
-                              const text = normalizeQuestionText(choice?.text || '');
-                              const choiceHtml = sanitizeStemHtml(choice?.textHtml);
-                              const isMine = anyMine
-                                ? !!choice?.isUserSelected
-                                : myAns.toUpperCase() === label.toUpperCase();
-                              const isCorrect = anyCorrectFlagged
-                                ? !!choice?.isCorrect
-                                : corrAns.toUpperCase() === label.toUpperCase();
-                              const variant = isMine && isCorrect ? 'mine correct'
-                                : isMine ? 'mine wrong'
-                                : isCorrect ? 'correct-only'
-                                : '';
-                              return (
-                                <article key={`${label}-${index}`} className={`answer-choice-card ${variant}`}>
-                                  <div className="answer-choice-head">
-                                    <strong>{label}</strong>
-                                    <div className="answer-choice-flags">
-                                      {isMine && isCorrect && <span className="question-mini-chip success-chip">Your pick · Correct</span>}
-                                      {isMine && !isCorrect && <span className="question-mini-chip">Your pick · Wrong</span>}
-                                      {!isMine && isCorrect && <span className="question-mini-chip accent-chip">Correct answer</span>}
+                      // MSR flat-matrix: response_format is unset but the choices
+                      // are one-per-cell ("row:col"). Rebuild + render as a grid
+                      // so statements become row labels, not option "letters".
+                      if (fmt !== 'matrix' && isFlatMatrixChoices(choices)) {
+                        const fm = decodeFlatMatrix(choices);
+                        if (fm && fm.colCount > 0) {
+                          return (
+                            <div className="qr-matrix-wrap">
+                              {MatrixLegend}
+                              <div
+                                className="qr-matrix"
+                                style={{ gridTemplateColumns: `minmax(0,1fr) repeat(${fm.colCount}, minmax(80px, max-content))` }}
+                              >
+                                <div className="mx-corner" />
+                                {fm.headers.slice(0, fm.colCount).map((h, ci) => (
+                                  <div key={`fh-${ci}`} className="mx-header">{h || ''}</div>
+                                ))}
+                                {fm.rows.map((row, ri) => (
+                                  <Fragment key={`fr-${ri}`}>
+                                    <div className="mx-row-label">
+                                      <span className="mx-row-num">{ri + 1}</span>
+                                      <span>{row.text || '-'}</span>
                                     </div>
-                                  </div>
+                                    {Array.from({ length: fm.colCount }).map((_, ci) => {
+                                      const opt = row.options[ci] || {};
+                                      const userPicked = !!opt.isUserSelected;
+                                      const correct = !!opt.isCorrect;
+                                      const cls = userPicked && correct ? 'cell-right'
+                                        : userPicked ? 'cell-wrong'
+                                        : correct ? 'cell-key'
+                                        : '';
+                                      const sym = userPicked && correct ? '✓'
+                                        : userPicked ? '✗'
+                                        : correct ? '✓'
+                                        : '';
+                                      return <div key={`fc-${ri}-${ci}`} className={`mx-cell ${cls}`}>{sym}</div>;
+                                    })}
+                                  </Fragment>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        }
+                      }
+
+                      return (
+                        <ul className="qr-choices">
+                          {choices.map((choice, index) => {
+                            const label = String(choice?.label || String.fromCharCode(65 + index)).trim();
+                            const text = normalizeQuestionText(choice?.text || '');
+                            const choiceHtml = sanitizeStemHtml(choice?.textHtml);
+                            const isMine = anyMine
+                              ? !!choice?.isUserSelected
+                              : myAns.toUpperCase() === label.toUpperCase();
+                            const isCorrect = anyCorrectFlagged
+                              ? !!choice?.isCorrect
+                              : corrAns.toUpperCase() === label.toUpperCase();
+                            const variant = isMine && isCorrect ? 'right' : isMine ? 'wrong' : isCorrect ? 'correct' : '';
+                            const stateLabel = isMine && isCorrect ? 'Your pick · Correct' : isMine ? 'Your pick' : isCorrect ? 'Correct answer' : '';
+                            return (
+                              <li key={`${label}-${index}`} className={`qr-choice${variant ? ` qr-choice-${variant}` : ''}`}>
+                                <span className="qr-choice-letter">{label}</span>
+                                <div className="qr-choice-body">
                                   {choiceHtml
                                     ? <div className="answer-choice-html question-stem-html" dangerouslySetInnerHTML={{ __html: choiceHtml }} />
                                     : <p>{text || '-'}</p>}
-                                </article>
-                              );
-                            })}
-                          </div>
-                        </div>
+                                </div>
+                                {stateLabel && <span className="qr-choice-state">{stateLabel}</span>}
+                              </li>
+                            );
+                          })}
+                        </ul>
                       );
                     })()
                   ) : (

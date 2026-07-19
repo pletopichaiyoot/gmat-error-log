@@ -263,6 +263,15 @@ The **AI Curated Practice** tab lets you redo previously-attempted questions you
 
 **Gradeability requirement (v1 is single-answer only):** an item is only servable if it has a non-empty `question_stem`, `answer_choices` that parse as a **flat** `[{label, text, ...}]` array, and a non-empty `correct_answer`. Multi-part DI (TPA/MSR/GI matrix items, which nest `options[]` inside each row) fail this check — `isFlatGradeableChoices()` in `src/ai-practice-sets.js` explicitly rejects any choice object carrying an `options` key. Don't put multi-part DI attempt ids in a set file; they'll be silently dropped.
 
+**Never curate scraped-incorrectly "blank-choice" rows.** Some scraped rows have a well-formed `answer_choices` *array* but with empty/whitespace `text` on one or more options (a scrape glitch — e.g. 5 options, 3 blank). These **pass** `isFlatGradeableChoices()` (it counts the array + rejects nested `options[]`, but does **not** inspect choice text), so they still serve — and render as empty buttons the user can't answer. Always exclude them at curation time by adding this to the candidate query:
+
+```sql
+AND (SELECT count(*) FROM json_array_elements(qa.answer_choices::json) e
+     WHERE COALESCE(TRIM(e->>'text'),'') = '') = 0
+```
+
+(Real example: attempt `14839` — "t = 2x + 1, in terms of t, 4x is" — has 5 choices with 3 blank; it must not go in a set.)
+
 Ungradeable or missing ids aren't an error — `GET /api/ai-practice/sets/:slug` returns them in a `missing: [id, ...]` array alongside the servable `questions`, so a set can be curated a little loosely and the UI just shows fewer questions than `items.length`.
 
 **Candidate SQL** (redo candidates: wrong, gradeable, least-recently-attempted first — reproduced from `listAiPracticeCandidates` in `src/db.js`):
