@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from './components/ui/button';
+import ProgressRing from './components/ProgressRing';
 import {
   DndContext,
   DragOverlay,
@@ -727,6 +728,14 @@ export default function StudyPlan() {
         </section>
       )}
 
+      <button
+        type="button"
+        className="sp-jump-today"
+        onClick={() => document.querySelector('.sp-day.is-today')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+      >
+        Jump to today ↓
+      </button>
+
       <DndContext
         sensors={sensors}
         collisionDetection={closestCorners}
@@ -1009,6 +1018,7 @@ function WeekSection({ week, days, today, weekOptions, onToggle, onSkip, onUpdat
 function DayCard({ day, isToday, isPast, weekOptions, onToggle, onSkip, onUpdate, onDelete, onAdd, onEditDay, onDeleteDay, draggingDay }) {
   const prog = progressFor(day.tasks);
   const totalMinutes = day.tasks.reduce((s, t) => s + (Number(t.est_minutes) || 0), 0);
+  const isComplete = prog.total > 0 && prog.done === prog.total && !isToday;
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState('');
   const [editingDay, setEditingDay] = useState(false);
@@ -1032,7 +1042,7 @@ function DayCard({ day, isToday, isPast, weekOptions, onToggle, onSkip, onUpdate
   }
 
   return (
-    <div ref={setDayRef} style={cardStyle} className={`sp-day${isToday ? ' is-today' : ''}${draggingDay ? ' sp-day-dragmode' : ''}`}>
+    <div ref={setDayRef} style={cardStyle} className={`sp-day${isToday ? ' is-today' : ''}${isComplete ? ' is-complete' : ''}${draggingDay ? ' sp-day-dragmode' : ''}`}>
       <div className="sp-day-head">
         <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap', minWidth: 0 }}>
           <button
@@ -1054,6 +1064,7 @@ function DayCard({ day, isToday, isPast, weekOptions, onToggle, onSkip, onUpdate
             : <span className="sp-day-theme sp-day-theme-empty">Untitled day</span>}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <ProgressRing value={prog.done} total={prog.total} size={20} stroke={3} />
           <span style={{ fontSize: 11, color: 'var(--ink-2)', fontVariantNumeric: 'tabular-nums', marginRight: 2 }}>
             {prog.done}/{prog.total} · {formatMinutes(totalMinutes)}
           </span>

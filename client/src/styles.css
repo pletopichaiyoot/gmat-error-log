@@ -6109,13 +6109,18 @@ html {
 .sp-addday-btn:hover { background: var(--primary-lt); }
 .sp-addday-btn:focus-visible { outline: 2px solid rgba(196, 168, 67, 0.7); outline-offset: 1px; }
 
+.sp-jump-today { display: block; margin: 0 0 10px auto; background: transparent; border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px; cursor: pointer; font-size: 0.72rem; font-weight: 600; color: var(--primary); }
+.sp-jump-today:hover { background: var(--primary-lt); }
+
 /* Day card */
 .sp-day {
   padding: 10px 24px 12px;
   border-top: 1px solid var(--border);
   background: transparent;
 }
-.sp-day.is-today { background: var(--primary-lt); }
+.sp-day.is-today { background: var(--primary-lt); box-shadow: inset 3px 0 0 var(--primary); }
+.sp-day.is-complete { opacity: 0.6; }
+.sp-day.is-complete:hover { opacity: 1; }
 .sp-day-dragmode { cursor: grabbing; }
 .sp-day-head {
   display: flex;
