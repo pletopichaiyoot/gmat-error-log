@@ -81,3 +81,15 @@ test('buildSubjectDifficultyMatrix uses keyOf to normalize subject and skips unk
   assert.strictEqual(m[0].cells.find((c) => c.band === 'hard').accuracy, 50); // 'Nonsense' skipped
   assert.strictEqual(m[0].cells.find((c) => c.band === 'hard').total, 4);
 });
+
+test('buildSubjectDifficultyMatrix weights by volume, not a naive mean of percentages', () => {
+  const rows = [
+    { subject_family: 'Quant', hard_total: 30, hard_accuracy_pct: 90, medium_total: 0, medium_accuracy_pct: 0, easy_total: 0, easy_accuracy_pct: 0 },
+    { subject_family: 'Quant', hard_total: 10, hard_accuracy_pct: 10, medium_total: 0, medium_accuracy_pct: 0, easy_total: 0, easy_accuracy_pct: 0 },
+  ];
+  const m = buildSubjectDifficultyMatrix(rows, { subjects: ['Quant'] });
+  const hard = m[0].cells.find((c) => c.band === 'hard');
+  // weighted: (30*0.9 + 10*0.1)/40 = 70 ; naive mean would be (90+10)/2 = 50
+  assert.strictEqual(hard.accuracy, 70);
+  assert.strictEqual(hard.total, 40);
+});
