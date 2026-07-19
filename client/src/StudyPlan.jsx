@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from './components/ui/button';
+import ProgressRing from './components/ProgressRing';
 import {
   DndContext,
   DragOverlay,
@@ -40,6 +41,7 @@ import {
   isDayRowDraggableId,
   dateFromDayRowId,
 } from './studyPlanReorder.mjs';
+import { formatMockDate } from './lib/mockFormat.mjs';
 
 function fetchJson(url, opts) {
   return fetch(url, opts).then(async (r) => {
@@ -726,6 +728,14 @@ export default function StudyPlan() {
         </section>
       )}
 
+      <button
+        type="button"
+        className="sp-jump-today"
+        onClick={() => document.querySelector('.sp-day.is-today')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+      >
+        Jump to today ↓
+      </button>
+
       <DndContext
         sensors={sensors}
         collisionDetection={closestCorners}
@@ -783,34 +793,34 @@ function MockResultsPanel({ mocks, onAdd, onUpdate, onDelete }) {
     const delta = c - p;
     if (delta === 0) return { label: '=', color: 'var(--muted)' };
     if (delta > 0) return { label: `▲ ${delta}`, color: '#1f9d55' };
-    return { label: `▼ ${Math.abs(delta)}`, color: 'var(--danger)' };
+    return { label: `▼ ${Math.abs(delta)}`, color: 'var(--accent-ink)' };
   }
 
   return (
-    <section className="card" style={{ padding: 0, overflow: 'hidden' }}>
-      <header style={{ padding: '16px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--primary-lt)' }}>
+    <section className="card sp-mock">
+      <header className="sp-mock-head">
         <div>
           <div className="sp-stat-label">
             {mocks.length} mock{mocks.length === 1 ? '' : 's'} recorded
             {scrapedCount > 0 && <span style={{ marginLeft: 8, opacity: 0.85 }}>· {scrapedCount} scraped, {manualCount} manual</span>}
           </div>
-          <h2 style={{ margin: '4px 0 0 0', fontSize: 18, fontWeight: 700 }}>Mock Results</h2>
+          <h2 className="sp-mock-title">Mock Results</h2>
         </div>
         {!adding && <Button size="sm" onClick={() => setAdding(true)}>+ Add mock</Button>}
       </header>
 
       {mocks.length > 0 && (
         <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <table className="sp-mock-table">
             <thead>
-              <tr className="sp-th-row" style={{ background: 'var(--surface-2)', textAlign: 'left' }}>
-                <th style={{ padding: '10px 24px' }}>Date</th>
-                <th style={{ padding: '10px 12px' }}>Source</th>
-                <th style={{ padding: '10px 12px' }}>Total</th>
-                <th style={{ padding: '10px 12px' }}>Quant</th>
-                <th style={{ padding: '10px 12px' }}>DI</th>
-                <th style={{ padding: '10px 12px' }}>Verbal</th>
-                <th style={{ padding: '10px 24px', textAlign: 'right' }}></th>
+              <tr className="sp-th-row">
+                <th>Date</th>
+                <th>Source</th>
+                <th>Total</th>
+                <th>Quant</th>
+                <th>DI</th>
+                <th>Verbal</th>
+                <th style={{ textAlign: 'right' }}></th>
               </tr>
             </thead>
             <tbody>
@@ -821,19 +831,19 @@ function MockResultsPanel({ mocks, onAdd, onUpdate, onDelete }) {
                 }
                 const prev = idx > 0 ? mocks[idx - 1] : null;
                 return (
-                  <tr key={m.id} style={{ borderTop: '1px solid var(--border)' }}>
-                    <td style={{ padding: '10px 24px', whiteSpace: 'nowrap' }}>{m.mock_date}</td>
-                    <td style={{ padding: '10px 12px' }}>
+                  <tr key={m.id}>
+                    <td style={{ whiteSpace: 'nowrap' }}>{formatMockDate(m.mock_date)}</td>
+                    <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                         <span>{m.source_label}</span>
                         <SourceTypeChip type={m.source_type} />
                       </div>
                     </td>
-                    <td style={{ padding: '10px 12px' }}><ScoreCell score={m.total_score} pct={m.total_percentile} trend={trend(m, prev, 'total_score')} /></td>
-                    <td style={{ padding: '10px 12px' }}><ScoreCell score={m.quant_score} pct={m.quant_percentile} trend={trend(m, prev, 'quant_score')} /></td>
-                    <td style={{ padding: '10px 12px' }}><ScoreCell score={m.di_score} pct={m.di_percentile} trend={trend(m, prev, 'di_score')} /></td>
-                    <td style={{ padding: '10px 12px' }}><ScoreCell score={m.verbal_score} pct={m.verbal_percentile} trend={trend(m, prev, 'verbal_score')} /></td>
-                    <td style={{ padding: '10px 24px', textAlign: 'right' }}>
+                    <td><ScoreCell score={m.total_score} pct={m.total_percentile} trend={trend(m, prev, 'total_score')} /></td>
+                    <td><ScoreCell score={m.quant_score} pct={m.quant_percentile} trend={trend(m, prev, 'quant_score')} /></td>
+                    <td><ScoreCell score={m.di_score} pct={m.di_percentile} trend={trend(m, prev, 'di_score')} /></td>
+                    <td><ScoreCell score={m.verbal_score} pct={m.verbal_percentile} trend={trend(m, prev, 'verbal_score')} /></td>
+                    <td style={{ textAlign: 'right' }}>
                       {isScraped ? (
                         <span style={{ fontSize: 11, opacity: 0.5 }} title="Scraped from GMAT Official Practice — edit via the dashboard scrape flow">read-only</span>
                       ) : (
@@ -856,9 +866,9 @@ function MockResultsPanel({ mocks, onAdd, onUpdate, onDelete }) {
       )}
 
       {latest && (
-        <div style={{ padding: '12px 24px', borderTop: '1px solid var(--border)', fontSize: 12, color: 'var(--ink-2)' }}>
+        <div className="sp-mock-foot">
           {previous ? (
-            <>Latest: <strong>{latest.source_label}</strong> ({latest.mock_date}) — Total {latest.total_score} vs prev {previous.total_score} ({(latest.total_score - previous.total_score) >= 0 ? '+' : ''}{latest.total_score - previous.total_score}).</>
+            <>Latest: <strong>{latest.source_label}</strong> ({formatMockDate(latest.mock_date)}) — Total {latest.total_score} vs prev {previous.total_score} ({(latest.total_score - previous.total_score) >= 0 ? '+' : ''}{latest.total_score - previous.total_score}).</>
           ) : (
             <>Baseline established. Add more mocks to see trend.</>
           )}
@@ -1008,6 +1018,7 @@ function WeekSection({ week, days, today, weekOptions, onToggle, onSkip, onUpdat
 function DayCard({ day, isToday, isPast, weekOptions, onToggle, onSkip, onUpdate, onDelete, onAdd, onEditDay, onDeleteDay, draggingDay }) {
   const prog = progressFor(day.tasks);
   const totalMinutes = day.tasks.reduce((s, t) => s + (Number(t.est_minutes) || 0), 0);
+  const isComplete = prog.total > 0 && prog.done === prog.total && !isToday;
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState('');
   const [editingDay, setEditingDay] = useState(false);
@@ -1019,7 +1030,7 @@ function DayCard({ day, isToday, isPast, weekOptions, onToggle, onSkip, onUpdate
   const cardStyle = {
     transform: CSS.Transform.toString(transform),
     transition,
-    opacity: isDragging ? 0.45 : 1,
+    ...(isDragging ? { opacity: 0.45 } : {}),
   };
 
   function submitAdd() {
@@ -1031,7 +1042,7 @@ function DayCard({ day, isToday, isPast, weekOptions, onToggle, onSkip, onUpdate
   }
 
   return (
-    <div ref={setDayRef} style={cardStyle} className={`sp-day${isToday ? ' is-today' : ''}${draggingDay ? ' sp-day-dragmode' : ''}`}>
+    <div ref={setDayRef} style={cardStyle} className={`sp-day${isToday ? ' is-today' : ''}${isComplete ? ' is-complete' : ''}${draggingDay ? ' sp-day-dragmode' : ''}`}>
       <div className="sp-day-head">
         <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap', minWidth: 0 }}>
           <button
@@ -1053,6 +1064,7 @@ function DayCard({ day, isToday, isPast, weekOptions, onToggle, onSkip, onUpdate
             : <span className="sp-day-theme sp-day-theme-empty">Untitled day</span>}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <ProgressRing value={prog.done} total={prog.total} size={20} stroke={3} />
           <span style={{ fontSize: 11, color: 'var(--ink-2)', fontVariantNumeric: 'tabular-nums', marginRight: 2 }}>
             {prog.done}/{prog.total} · {formatMinutes(totalMinutes)}
           </span>

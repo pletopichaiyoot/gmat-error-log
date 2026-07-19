@@ -13,6 +13,12 @@ const LsatPractice = lazy(() => import('./LsatPractice'));
 const AiPractice = lazy(() => import('./AiPractice'));
 const StudyPlan = lazy(() => import('./StudyPlan'));
 
+import HeroBand from './components/HeroBand';
+import Sparkline from './components/Sparkline';
+import DifficultyMatrix from './components/DifficultyMatrix';
+import MiniBar from './components/MiniBar';
+import { buildAccuracyTrend, pickWeakestCategory, buildSubjectDifficultyMatrix } from './lib/trend.mjs';
+
 function RouteFallback() {
   return (
     <main className="page-shell">
@@ -1222,6 +1228,7 @@ function App() {
   const [customSince, setCustomSince] = useState('');
   const [sessions, setSessions] = useState([]);
   const [errors, setErrors] = useState([]);
+  const [activeSection, setActiveSection] = useState('today');
   const [patterns, setPatterns] = useState({
     bySubject: [],
     byDifficulty: [],
@@ -2124,6 +2131,28 @@ function App() {
     return Number(((correct * 100) / total).toFixed(1));
   }, [subjectCards]);
 
+  // heroTrend lives further below (after processedSessions is declared — it is
+  // the array this memo depends on, and referencing it here would be a TDZ
+  // error since `processedSessions` is a `const` declared later in this
+  // component's body). See the memo beside processedSessions.
+  const heroWeakest = useMemo(() => {
+    const row = pickWeakestCategory(categoryRows, { minTotal: 5 });
+    if (!row) return null;
+    return {
+      subject: normalizeSubjectFamilyDisplay(row.subject_family),
+      category: normalizedCategoryCode(row),
+      accuracy: row.accuracy_pct,
+    };
+  }, [categoryRows]);
+
+  const difficultyMatrix = useMemo(
+    () => buildSubjectDifficultyMatrix(categoryRows, {
+      subjects: ['Quant', 'Verbal', 'Data Insights'],
+      keyOf: (r) => normalizeSubjectFamilyDisplay(r.subject_family),
+    }),
+    [categoryRows],
+  );
+
   const wrongCategoryRows = useMemo(() => {
     const counts = new Map();
     for (const row of sessionAnalysis.data?.slowWrongQuestions || []) {
@@ -2140,6 +2169,30 @@ function App() {
     () => wrongCategoryRows.reduce((sum, row) => sum + Number(row?.mistakes || 0), 0),
     [wrongCategoryRows]
   );
+
+  const patternInsight = useMemo(() => {
+    const rows = patternDrilldown.rows || [];
+    const total = rows.length;
+    if (!total) return null;
+    const correctedCount = rows.filter((r) => Number(r.corrected_later) === 1).length;
+    const diffCounts = {};
+    for (const r of rows) { const d = (r.difficulty || '').trim(); if (d) diffCounts[d] = (diffCounts[d] || 0) + 1; }
+    const diffTop = Object.entries(diffCounts).sort((a, b) => b[1] - a[1])[0];
+    const tagCounts = {};
+    for (const r of rows) { for (const t of parseMistakeTags(r.mistake_type)) tagCounts[t] = (tagCounts[t] || 0) + 1; }
+    const tagTop = Object.entries(tagCounts).sort((a, b) => b[1] - a[1])[0];
+    const hasMajority = diffTop && diffTop[1] > total / 2;
+    return {
+      total,
+      correctedCount,
+      correctedPct: Math.round((correctedCount * 100) / total),
+      dominantDifficulty: diffTop ? diffTop[0] : null,
+      dominantDifficultyCount: diffTop ? diffTop[1] : 0,
+      dominantIsMixed: !hasMajority,
+      topMistake: tagTop ? tagTop[0] : null,
+      topMistakeCount: tagTop ? tagTop[1] : 0,
+    };
+  }, [patternDrilldown.rows]);
 
   const isOpeSession = useMemo(() => {
     const src = String(sessionAnalysis.data?.session?.source || '');
@@ -2443,6 +2496,15 @@ function App() {
 
     return list;
   }, [sessions, sessionSort]);
+
+  // Placed here (rather than beside overallMastery/heroWeakest above) because
+  // it depends on processedSessions, declared just above — hoisting it next
+  // to overallMastery would reference `processedSessions` before its `const`
+  // initializer runs (TDZ ReferenceError) on every render.
+  const heroTrend = useMemo(
+    () => buildAccuracyTrend(processedSessions, { limit: 12 }),
+    [processedSessions],
+  );
 
   function handleSessionSort(key) {
     setSessionSort((prev) => ({
@@ -2925,6 +2987,24 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFirstRun, appMode]);
 
+  // Scroll-spy: highlight the section-nav link for whichever section is
+  // currently in view. Re-observes when the nav (re)appears post-first-run.
+  useEffect(() => {
+    const ids = ['today', 'dashboard', 'categories', 'sessions', 'errors'];
+    const targets = ids.map((id) => document.getElementById(id)).filter(Boolean);
+    if (!targets.length) return undefined;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.filter((e) => e.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (visible?.target?.id) setActiveSection(visible.target.id);
+      },
+      { rootMargin: '-45% 0px -45% 0px', threshold: [0, 0.25, 0.5] },
+    );
+    targets.forEach((t) => obs.observe(t));
+    return () => obs.disconnect();
+  }, [isFirstRun]);
+
   if (appMode === 'lsat') {
     return (
       <Suspense fallback={<RouteFallback />}>
@@ -3001,11 +3081,19 @@ function App() {
       {/* Section nav — hidden on first run when there is nothing to jump to */}
       {!isFirstRun && (
         <nav className="section-nav" aria-label="Jump to section">
-          <a href="#today" className="section-nav-link">Today</a>
-          <a href="#dashboard" className="section-nav-link">Dashboard</a>
-          <a href="#categories" className="section-nav-link">Categories</a>
-          <a href="#sessions" className="section-nav-link">Sessions</a>
-          <a href="#errors" className="section-nav-link">Error Log</a>
+          {[
+            ['today', 'Today'], ['dashboard', 'Dashboard'], ['categories', 'Categories'],
+            ['sessions', 'Sessions'], ['errors', 'Error Log'],
+          ].map(([id, label]) => (
+            <a
+              key={id}
+              href={`#${id}`}
+              className={`section-nav-link${activeSection === id ? ' section-nav-link--active' : ''}`}
+              aria-current={activeSection === id ? 'true' : undefined}
+            >
+              {label}
+            </a>
+          ))}
         </nav>
       )}
 
@@ -3228,10 +3316,18 @@ function App() {
           <div className="dashboard-strip">
             {!subjectCards.length && <p className="muted">Sync a practice session to see subject performance here.</p>}
             {subjectCards.length > 0 && (
-              <div className="dashboard-overall">
-                <span className="dashboard-overall-label">Overall</span>
-                <strong className="dashboard-overall-value">{formatPercent(overallMastery)}</strong>
-              </div>
+              <HeroBand
+                overall={overallMastery}
+                delta={heroTrend.delta}
+                series={heroTrend.series}
+                weakest={heroWeakest}
+                onDrill={() => {
+                  if (!heroWeakest) return;
+                  const code = { Quant: 'Q', Verbal: 'V', 'Data Insights': 'DI' }[heroWeakest.subject];
+                  if (code) setFilters((prev) => ({ ...prev, subject: code }));
+                  document.getElementById('errors')?.scrollIntoView({ behavior: 'smooth' });
+                }}
+              />
             )}
             {subjectCards.map((card) => {
               const accuracy = Math.max(0, Math.min(100, Number(card.accuracy_pct || 0)));
@@ -3244,10 +3340,27 @@ function App() {
                   <div className="dashboard-subject-bar">
                     <div className="dashboard-subject-fill" style={{ width: `${accuracy}%` }} />
                   </div>
+                  <Sparkline
+                    points={buildAccuracyTrend(
+                      processedSessions.filter((s) => normalizeSubjectFamilyDisplay(s.subject) === normalizeSubjectFamilyDisplay(card.family)),
+                      { limit: 8 },
+                    ).series}
+                    width={120}
+                    height={22}
+                    ariaLabel={`${normalizeSubjectFamilyDisplay(card.family)} trend`}
+                    className="dashboard-subject-spark"
+                  />
                   <span className="dashboard-subject-meta">{card.correct}/{card.total} · {formatDurationSeconds(card.avg_time_sec)} avg</span>
                 </article>
               );
             })}
+          </div>
+        )}
+
+        {!collapsedSections.topicDashboard && subjectCards.length > 0 && (
+          <div className="diffmatrix-panel">
+            <span className="diffmatrix-title">Accuracy by Difficulty</span>
+            <DifficultyMatrix data={difficultyMatrix} />
           </div>
         )}
       </section>
@@ -3313,7 +3426,12 @@ function App() {
                         <td>{formatMaybe(row.total_questions)}</td>
                         <td>{formatMaybe(row.correct_count)}</td>
                         <td>{formatMaybe(row.incorrect_count)}</td>
-                        <td>{formatPercent(row.accuracy_pct)}</td>
+                        <td>
+                          <div className="acc-cell">
+                            <span className="acc-cell-pct">{formatPercent(row.accuracy_pct)}</span>
+                            <MiniBar value={row.accuracy_pct} />
+                          </div>
+                        </td>
                         <td>{formatDurationSeconds(row.avg_time_sec)}</td>
                         {showDifficultyCols && <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>}
                         {showDifficultyCols && <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>}
@@ -3397,7 +3515,12 @@ function App() {
                                           <td>{formatMaybe(subRow.total_questions)}</td>
                                           <td>{formatMaybe(subRow.correct_count)}</td>
                                           <td>{formatMaybe(subRow.incorrect_count)}</td>
-                                          <td>{formatPercent(subRow.accuracy_pct)}</td>
+                                          <td>
+                                            <div className="acc-cell">
+                                              <span className="acc-cell-pct">{formatPercent(subRow.accuracy_pct)}</span>
+                                              <MiniBar value={subRow.accuracy_pct} />
+                                            </div>
+                                          </td>
                                           <td>{formatDurationSeconds(subRow.avg_time_sec)}</td>
                                           <td>{formatDifficultyStat(subRow.hard_total, subRow.hard_accuracy_pct, subRow.hard_avg_time_sec)}</td>
                                           <td>{formatDifficultyStat(subRow.medium_total, subRow.medium_accuracy_pct, subRow.medium_avg_time_sec)}</td>
@@ -3641,7 +3764,7 @@ function App() {
                 filters.subject || filters.difficulty || filters.confidence ||
                 filters.search || filters.mistakeTag || filters.platform;
               return (
-                <div className="error-filter-bar">
+                <div className="error-filter-bar error-filter-sticky">
                   <div className="error-filter-primary">
                     <Select
                       className="filter-select"
@@ -4130,6 +4253,29 @@ function App() {
               {!patternDrilldown.loading && !patternDrilldown.error && (
                 <>
                   <p className="muted">{`${patternDrilldown.rows.length} matching errors`}</p>
+                  {patternInsight && (
+                    <div className="pattern-insight">
+                      <div className="pattern-insight-item">
+                        <span className="pattern-insight-label">Corrected</span>
+                        <span className="pattern-insight-value">{patternInsight.correctedCount}/{patternInsight.total} ({patternInsight.correctedPct}%)</span>
+                        <MiniBar value={patternInsight.correctedPct} />
+                      </div>
+                      <div className="pattern-insight-item">
+                        <span className="pattern-insight-label">Difficulty</span>
+                        <span className="pattern-insight-value">
+                          {patternInsight.dominantDifficulty
+                            ? (patternInsight.dominantIsMixed ? 'Mixed' : `Mostly ${patternInsight.dominantDifficulty} (${patternInsight.dominantDifficultyCount})`)
+                            : '—'}
+                        </span>
+                      </div>
+                      <div className="pattern-insight-item">
+                        <span className="pattern-insight-label">Top mistake</span>
+                        <span className="pattern-insight-value">
+                          {patternInsight.topMistake ? `${patternInsight.topMistake} (${patternInsight.topMistakeCount})` : 'No tags yet'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                   <div className="table-wrap">
                     <table className="review-table">
                       <thead>

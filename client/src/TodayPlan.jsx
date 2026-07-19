@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Plus, Pencil, Trash2, StickyNote, Ban, RotateCcw, ArrowRight } from 'lucide-react';
 import { Button } from './components/ui/button';
+import ProgressRing from './components/ProgressRing';
 
 // Self-contained "Today's Plan" dashboard panel. It reads and writes the same
 // study-plan store the full board uses (`/api/study-plan/*`), so every edit here
@@ -109,7 +110,6 @@ export default function TodayPlan({ collapsed, onToggleCollapse }) {
   const total = dayTasks.length;
   const done = dayTasks.filter((t) => t.status === 'done').length;
   const skipped = dayTasks.filter((t) => t.status === 'skipped').length;
-  const pct = total ? Math.round((done / total) * 100) : 0;
   const remainingMin = dayTasks
     .filter((t) => t.status === 'pending')
     .reduce((s, t) => s + (Number(t.est_minutes) || 0), 0);
@@ -260,9 +260,7 @@ export default function TodayPlan({ collapsed, onToggleCollapse }) {
                       <span className="today-progress-time">{formatMinutes(remainingMin)} left</span>
                     )}
                   </div>
-                  <div className="sp-progress" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="Today’s progress">
-                    <div className="sp-progress-fill" style={{ width: `${pct}%` }} />
-                  </div>
+                  <ProgressRing value={done} total={total} size={40} />
                 </div>
               )}
 
