@@ -13,6 +13,10 @@ const LsatPractice = lazy(() => import('./LsatPractice'));
 const AiPractice = lazy(() => import('./AiPractice'));
 const StudyPlan = lazy(() => import('./StudyPlan'));
 
+import HeroBand from './components/HeroBand';
+import Sparkline from './components/Sparkline';
+import { buildAccuracyTrend, pickWeakestCategory } from './lib/trend.mjs';
+
 function RouteFallback() {
   return (
     <main className="page-shell">
@@ -2065,6 +2069,20 @@ function App() {
     return Number(((correct * 100) / total).toFixed(1));
   }, [subjectCards]);
 
+  // heroTrend lives further below (after processedSessions is declared — it is
+  // the array this memo depends on, and referencing it here would be a TDZ
+  // error since `processedSessions` is a `const` declared later in this
+  // component's body). See the memo beside processedSessions.
+  const heroWeakest = useMemo(() => {
+    const row = pickWeakestCategory(categoryRows, { minTotal: 5 });
+    if (!row) return null;
+    return {
+      subject: normalizeSubjectFamilyDisplay(row.subject_family),
+      category: normalizedCategoryCode(row),
+      accuracy: row.accuracy_pct,
+    };
+  }, [categoryRows]);
+
   const wrongCategoryRows = useMemo(() => {
     const counts = new Map();
     for (const row of sessionAnalysis.data?.slowWrongQuestions || []) {
@@ -2384,6 +2402,15 @@ function App() {
 
     return list;
   }, [sessions, sessionSort]);
+
+  // Placed here (rather than beside overallMastery/heroWeakest above) because
+  // it depends on processedSessions, declared just above — hoisting it next
+  // to overallMastery would reference `processedSessions` before its `const`
+  // initializer runs (TDZ ReferenceError) on every render.
+  const heroTrend = useMemo(
+    () => buildAccuracyTrend(processedSessions, { limit: 12 }),
+    [processedSessions],
+  );
 
   function handleSessionSort(key) {
     setSessionSort((prev) => ({
@@ -3169,10 +3196,16 @@ function App() {
           <div className="dashboard-strip">
             {!subjectCards.length && <p className="muted">Sync a practice session to see subject performance here.</p>}
             {subjectCards.length > 0 && (
-              <div className="dashboard-overall">
-                <span className="dashboard-overall-label">Overall</span>
-                <strong className="dashboard-overall-value">{formatPercent(overallMastery)}</strong>
-              </div>
+              <HeroBand
+                overall={overallMastery}
+                delta={heroTrend.delta}
+                series={heroTrend.series}
+                weakest={heroWeakest}
+                onDrill={() => {
+                  if (!heroWeakest) return;
+                  document.getElementById('errors')?.scrollIntoView({ behavior: 'smooth' });
+                }}
+              />
             )}
             {subjectCards.map((card) => {
               const accuracy = Math.max(0, Math.min(100, Number(card.accuracy_pct || 0)));
@@ -3185,6 +3218,16 @@ function App() {
                   <div className="dashboard-subject-bar">
                     <div className="dashboard-subject-fill" style={{ width: `${accuracy}%` }} />
                   </div>
+                  <Sparkline
+                    points={buildAccuracyTrend(
+                      processedSessions.filter((s) => normalizeSubjectFamilyDisplay(s.subject) === normalizeSubjectFamilyDisplay(card.family)),
+                      { limit: 8 },
+                    ).series}
+                    width={120}
+                    height={22}
+                    ariaLabel={`${normalizeSubjectFamilyDisplay(card.family)} trend`}
+                    className="dashboard-subject-spark"
+                  />
                   <span className="dashboard-subject-meta">{card.correct}/{card.total} · {formatDurationSeconds(card.avg_time_sec)} avg</span>
                 </article>
               );

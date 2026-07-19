@@ -32,6 +32,7 @@
   --primary-md:   rgba(61, 122, 94, 0.13);
   --accent:       #c4a843;
   --accent-lt:    rgba(196, 168, 67, 0.13);
+  --accent-ink:   #8f7c35;
   --border:       #dcd8d0;
   --border-2:     #c8c3ba;
   --danger:       #b54a44;
@@ -3056,6 +3057,38 @@ th.sortable:hover {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+
+/* ── Overview hero band ──────────────────────────────────────── */
+.hero-band {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 24px; align-items: center;
+  padding: 20px 24px; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 14px;
+}
+.hero-eyebrow {
+  display: block; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.07em;
+  text-transform: uppercase; color: var(--ink-2); margin-bottom: 6px;
+}
+.hero-metric-row { display: flex; align-items: baseline; gap: 10px; }
+.hero-value {
+  font-family: 'Space Grotesk', system-ui, sans-serif; font-weight: 700;
+  font-size: clamp(2.2rem, 4vw, 3rem); line-height: 1; letter-spacing: -0.03em;
+  color: var(--ink); font-variant-numeric: tabular-nums;
+}
+.hero-delta { font-size: 0.85rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.hero-delta--up { color: var(--primary); }
+.hero-delta--down { color: var(--accent-ink); }   /* Two-Voice: decline = attention, not red */
+.hero-delta--flat { color: var(--muted); }
+.hero-weakness { text-align: left; min-width: 160px; }
+.hero-weakness-body { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.hero-weakness-label { font-weight: 600; color: var(--ink); }
+.hero-weakness-pct { font-weight: 700; color: var(--accent-ink); font-variant-numeric: tabular-nums; }
+.hero-drill {
+  margin-top: 8px; background: transparent; border: none; padding: 0; cursor: pointer;
+  color: var(--primary); font-weight: 600; font-size: 0.8rem;
+}
+.hero-drill:hover { text-decoration: underline; }
+.dashboard-subject-spark { margin-top: 8px; opacity: 0.9; }
+@media (max-width: 720px) { .hero-band { grid-template-columns: 1fr; gap: 16px; } }
 
 /* ─── Loading pulse ────────────────────────────────────────────── */
 .loading-pulse {
