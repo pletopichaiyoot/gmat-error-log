@@ -346,10 +346,16 @@ async function runCoachTool(name, args) {
     if (!Number.isInteger(sessionId) || sessionId <= 0) return { error: 'sessionId required (integer)' };
     const data = await getSessionAnalysis(sessionId);
     if (!data) return { error: `session ${sessionId} not found` };
-    const questions = Array.isArray(data.questions) ? data.questions.slice(0, 30) : [];
+    // getSessionAnalysis exposes the per-question rows as `slowWrongQuestions`
+    // (the coaching-relevant slow/incorrect misses), not `questions` — reading
+    // the latter always yielded [] so this tool returned zero questions. These
+    // rows carry `stimulus` (added to that SELECT), so the DI stimulusData below
+    // is populated.
+    const notableQuestions = Array.isArray(data.slowWrongQuestions) ? data.slowWrongQuestions : [];
+    const questions = notableQuestions.slice(0, 30);
     return {
       session: data.session,
-      questionCount: Array.isArray(data.questions) ? data.questions.length : 0,
+      questionCount: notableQuestions.length,
       questions: questions.map((q) => ({
         qCode: q.q_code,
         topic: q.topic,
