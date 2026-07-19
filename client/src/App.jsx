@@ -2111,6 +2111,30 @@ function App() {
     [wrongCategoryRows]
   );
 
+  const patternInsight = useMemo(() => {
+    const rows = patternDrilldown.rows || [];
+    const total = rows.length;
+    if (!total) return null;
+    const correctedCount = rows.filter((r) => Number(r.corrected_later) === 1).length;
+    const diffCounts = {};
+    for (const r of rows) { const d = (r.difficulty || '').trim(); if (d) diffCounts[d] = (diffCounts[d] || 0) + 1; }
+    const diffTop = Object.entries(diffCounts).sort((a, b) => b[1] - a[1])[0];
+    const tagCounts = {};
+    for (const r of rows) { for (const t of parseMistakeTags(r.mistake_type)) tagCounts[t] = (tagCounts[t] || 0) + 1; }
+    const tagTop = Object.entries(tagCounts).sort((a, b) => b[1] - a[1])[0];
+    const hasMajority = diffTop && diffTop[1] > total / 2;
+    return {
+      total,
+      correctedCount,
+      correctedPct: Math.round((correctedCount * 100) / total),
+      dominantDifficulty: diffTop ? diffTop[0] : null,
+      dominantDifficultyCount: diffTop ? diffTop[1] : 0,
+      dominantIsMixed: !hasMajority,
+      topMistake: tagTop ? tagTop[0] : null,
+      topMistakeCount: tagTop ? tagTop[1] : 0,
+    };
+  }, [patternDrilldown.rows]);
+
   const isOpeSession = useMemo(() => {
     const src = String(sessionAnalysis.data?.session?.source || '');
     return /official\s*practice\s*exam/i.test(src);
@@ -4170,6 +4194,29 @@ function App() {
               {!patternDrilldown.loading && !patternDrilldown.error && (
                 <>
                   <p className="muted">{`${patternDrilldown.rows.length} matching errors`}</p>
+                  {patternInsight && (
+                    <div className="pattern-insight">
+                      <div className="pattern-insight-item">
+                        <span className="pattern-insight-label">Corrected</span>
+                        <span className="pattern-insight-value">{patternInsight.correctedCount}/{patternInsight.total} ({patternInsight.correctedPct}%)</span>
+                        <MiniBar value={patternInsight.correctedPct} />
+                      </div>
+                      <div className="pattern-insight-item">
+                        <span className="pattern-insight-label">Difficulty</span>
+                        <span className="pattern-insight-value">
+                          {patternInsight.dominantDifficulty
+                            ? (patternInsight.dominantIsMixed ? 'Mixed' : `Mostly ${patternInsight.dominantDifficulty} (${patternInsight.dominantDifficultyCount})`)
+                            : '—'}
+                        </span>
+                      </div>
+                      <div className="pattern-insight-item">
+                        <span className="pattern-insight-label">Top mistake</span>
+                        <span className="pattern-insight-value">
+                          {patternInsight.topMistake ? `${patternInsight.topMistake} (${patternInsight.topMistakeCount})` : 'No tags yet'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                   <div className="table-wrap">
                     <table className="review-table">
                       <thead>
