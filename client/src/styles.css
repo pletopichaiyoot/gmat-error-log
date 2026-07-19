@@ -2185,6 +2185,7 @@ th.sortable:hover {
 
 .question-review-stats strong {
   font-size: 1rem;
+  font-variant-numeric: tabular-nums;
 }
 
 /* DI composite answer summary table */
@@ -2277,6 +2278,10 @@ th.sortable:hover {
   color: var(--ink);
 }
 
+.di-answer-summary strong {
+  font-variant-numeric: tabular-nums;
+}
+
 .question-review-section {
   display: grid;
   gap: var(--s3);
@@ -2288,6 +2293,9 @@ th.sortable:hover {
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
   background: var(--surface);
+  /* Cap reading measure so long stems don't stretch edge-to-edge in the wide
+     review-modal grid column; left-aligned (default block flow, no centering). */
+  max-width: 72ch;
 }
 
 .question-stem-card p {
@@ -2344,6 +2352,8 @@ th.sortable:hover {
   line-height: 1.7;
   color: var(--ink-dim, var(--ink));
   --passage-gutter-color: var(--ink-2);
+  /* Cap reading measure to match the stem card; left-aligned, not centered. */
+  max-width: 72ch;
 }
 
 .question-passage-card p {
@@ -2369,6 +2379,14 @@ th.sortable:hover {
   display: grid;
   gap: var(--s3);
   grid-template-columns: 1fr;
+}
+
+/* The section heading's own bottom margin (--s3, from the global h3 rule) would
+   stack with the parent .question-review-section grid gap (also --s3), doubling
+   the space above the annotation grid. Zero it out here so the rhythm matches
+   the rest of the review modal's --s3 spacing. */
+.question-annotation-section h3 {
+  margin-bottom: 0;
 }
 
 .answer-choice-list,
