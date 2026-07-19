@@ -435,6 +435,58 @@ function StemContent({ row }) {
   return <p>{text || 'No locally scraped stem yet.'}</p>;
 }
 
+// MSR items ship their multiple source passages as sibling `.tabcontent` divs
+// inside one "Passage:" reference block. Split them so the review panel shows
+// them as tabs (like the real test) instead of one stacked blob. Returns the
+// sanitized inner HTML of each tab, or null when there aren't ≥2 tabs.
+function extractStimulusTabs(html) {
+  if (!html || !/tabcontent/i.test(html)) return null;
+  const tpl = document.createElement('template');
+  tpl.innerHTML = sanitizeStimulusHtml(html);
+  const tabs = Array.from(tpl.content.querySelectorAll('.tabcontent'));
+  if (tabs.length < 2) return null;
+  return tabs.map((t) => t.innerHTML);
+}
+
+// Renders one captured stimulus source. Multi-tab MSR passages become a tab
+// strip (tab labels aren't in the captured DOM, so they're numbered "Source N").
+// Everything else renders as a single box, unchanged.
+function StimulusSource({ src }) {
+  const tabs = useMemo(() => extractStimulusTabs(src?.html), [src?.html]);
+  const [active, setActive] = useState(0);
+  if (tabs && tabs.length >= 2) {
+    const idx = Math.min(active, tabs.length - 1);
+    return (
+      <section className="question-stimulus-source">
+        {src.title && <h4>{src.title}</h4>}
+        <div className="stimulus-tabs">
+          <div className="stimulus-tablist" role="tablist">
+            {tabs.map((_, i) => (
+              <button
+                key={i}
+                type="button"
+                role="tab"
+                aria-selected={i === idx}
+                className={`stimulus-tab${i === idx ? ' active' : ''}`}
+                onClick={() => setActive(i)}
+              >
+                Source {i + 1}
+              </button>
+            ))}
+          </div>
+          <div className="stimulus-tabpanel" dangerouslySetInnerHTML={{ __html: tabs[idx] }} />
+        </div>
+      </section>
+    );
+  }
+  return (
+    <section className="question-stimulus-source">
+      {src?.title && <h4>{src.title}</h4>}
+      <div dangerouslySetInnerHTML={{ __html: sanitizeStimulusHtml(src?.html || '') }} />
+    </section>
+  );
+}
+
 // Split a passage into display paragraphs. Splits on blank lines (the paragraph
 // break both LSAT JSON and StartTest enrichment use), drops a leading "Passage:"
 // label, and collapses intra-paragraph whitespace so each <p> wraps cleanly.
@@ -5031,10 +5083,7 @@ function App() {
                       <div className="question-stimulus">
                         {html && <div className="question-stimulus-main" dangerouslySetInnerHTML={{ __html: html }} />}
                         {Array.isArray(s.sources) && s.sources.map((src, i) => (
-                          <section className="question-stimulus-source" key={i}>
-                            {src.title && <h4>{src.title}</h4>}
-                            <div dangerouslySetInnerHTML={{ __html: sanitizeStimulusHtml(src.html || '') }} />
-                          </section>
+                          <StimulusSource src={src} key={i} />
                         ))}
                       </div>
                     );
