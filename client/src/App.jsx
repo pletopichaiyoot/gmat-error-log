@@ -3203,6 +3203,8 @@ function App() {
                 weakest={heroWeakest}
                 onDrill={() => {
                   if (!heroWeakest) return;
+                  const code = { Quant: 'Q', Verbal: 'V', 'Data Insights': 'DI' }[heroWeakest.subject];
+                  if (code) setFilters((prev) => ({ ...prev, subject: code }));
                   document.getElementById('errors')?.scrollIntoView({ behavior: 'smooth' });
                 }}
               />

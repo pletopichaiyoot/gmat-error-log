@@ -3077,7 +3077,7 @@ th.sortable:hover {
 .hero-delta { font-size: 0.85rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 .hero-delta--up { color: var(--primary); }
 .hero-delta--down { color: var(--accent-ink); }   /* Two-Voice: decline = attention, not red */
-.hero-delta--flat { color: var(--muted); }
+.hero-delta--flat { color: var(--ink-2); }
 .hero-weakness { text-align: left; min-width: 160px; }
 .hero-weakness-body { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .hero-weakness-label { font-weight: 600; color: var(--ink); }
