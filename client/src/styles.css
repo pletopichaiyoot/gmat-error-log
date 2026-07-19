@@ -6538,6 +6538,9 @@ html {
 }
 .minibar-fill { display: block; height: 100%; border-radius: 999px; }
 
+.acc-cell { display: flex; align-items: center; gap: 8px; }
+.acc-cell-pct { font-variant-numeric: tabular-nums; min-width: 3.2em; }
+
 .progress-ring-arc { transition: stroke-dashoffset 0.5s ease; }
 @media (prefers-reduced-motion: reduce) { .progress-ring-arc { transition: none; } }
 

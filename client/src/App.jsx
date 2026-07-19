@@ -16,6 +16,7 @@ const StudyPlan = lazy(() => import('./StudyPlan'));
 import HeroBand from './components/HeroBand';
 import Sparkline from './components/Sparkline';
 import DifficultyMatrix from './components/DifficultyMatrix';
+import MiniBar from './components/MiniBar';
 import { buildAccuracyTrend, pickWeakestCategory, buildSubjectDifficultyMatrix } from './lib/trend.mjs';
 
 function RouteFallback() {
@@ -3342,7 +3343,12 @@ function App() {
                         <td>{formatMaybe(row.total_questions)}</td>
                         <td>{formatMaybe(row.correct_count)}</td>
                         <td>{formatMaybe(row.incorrect_count)}</td>
-                        <td>{formatPercent(row.accuracy_pct)}</td>
+                        <td>
+                          <div className="acc-cell">
+                            <span className="acc-cell-pct">{formatPercent(row.accuracy_pct)}</span>
+                            <MiniBar value={row.accuracy_pct} />
+                          </div>
+                        </td>
                         <td>{formatDurationSeconds(row.avg_time_sec)}</td>
                         {showDifficultyCols && <td>{formatDifficultyStat(row.hard_total, row.hard_accuracy_pct, row.hard_avg_time_sec)}</td>}
                         {showDifficultyCols && <td>{formatDifficultyStat(row.medium_total, row.medium_accuracy_pct, row.medium_avg_time_sec)}</td>}
@@ -3426,7 +3432,12 @@ function App() {
                                           <td>{formatMaybe(subRow.total_questions)}</td>
                                           <td>{formatMaybe(subRow.correct_count)}</td>
                                           <td>{formatMaybe(subRow.incorrect_count)}</td>
-                                          <td>{formatPercent(subRow.accuracy_pct)}</td>
+                                          <td>
+                                            <div className="acc-cell">
+                                              <span className="acc-cell-pct">{formatPercent(subRow.accuracy_pct)}</span>
+                                              <MiniBar value={subRow.accuracy_pct} />
+                                            </div>
+                                          </td>
                                           <td>{formatDurationSeconds(subRow.avg_time_sec)}</td>
                                           <td>{formatDifficultyStat(subRow.hard_total, subRow.hard_accuracy_pct, subRow.hard_avg_time_sec)}</td>
                                           <td>{formatDifficultyStat(subRow.medium_total, subRow.medium_accuracy_pct, subRow.medium_avg_time_sec)}</td>
