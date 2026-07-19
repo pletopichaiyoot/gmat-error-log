@@ -22,6 +22,8 @@
 // upsert will use to overwrite any prior value (the existing logic prefers a
 // truthy scraped `mistake_type` over the preserved one).
 
+const { sleep, jitter, hashSessionExternalId } = require('./scraper-utils');
+
 const TTP_HOST_RE = /gmat\.targettestprep\.com/i;
 
 const SECTION_PRESETS = Object.freeze({
@@ -52,35 +54,6 @@ class ScrapeAnomalyError extends Error {
     this.url = url || null;
     this.snippet = snippet || null;
   }
-}
-
-function jitter(minMs, maxMs) {
-  const lo = Math.max(0, Number(minMs) || 0);
-  const hi = Math.max(lo, Number(maxMs) || lo);
-  return Math.round(lo + Math.random() * (hi - lo));
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms | 0)));
-}
-
-// Deterministic 53-bit hash, used to mint a stable session_external_id from a
-// `${section}|${categoryId}` tuple. Output fits in a JS Number and a SQLite INTEGER.
-function hashSessionExternalId(input) {
-  const text = String(input || '');
-  let h1 = 0xdeadbeef ^ 0;
-  let h2 = 0x41c6ce57 ^ 0;
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
-  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
-  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  const out = 4294967296 * (2097151 & h2) + (h1 >>> 0);
-  return out; // up to 2^53 - 1
 }
 
 function parseTimeMmSs(raw) {

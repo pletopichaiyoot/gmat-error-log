@@ -12,6 +12,7 @@
 const { htmlToReadableText } = require('./mathml-text');
 const { splitStemAndPassage } = require('./question-stem-split');
 const { sanitizeStemHtml, stemHtmlToText, sanitizeStimulusHtml } = require('./ope-stem');
+const { sleep, jitter } = require('./scraper-utils');
 
 const STARTTEST_HOST_RE = /starttest\.com/i;
 const BOOK_SESSION_TABLE_SEL = 'table.PracticeSessionsTable-tbl tbody tr';
@@ -113,16 +114,6 @@ function absolutize(maybeRelative, base) {
   } catch (_e) {
     return null;
   }
-}
-
-function jitter(minMs, maxMs) {
-  const lo = Math.max(0, Number(minMs) || 0);
-  const hi = Math.max(lo, Number(maxMs) || lo);
-  return lo + Math.random() * (hi - lo);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms | 0)));
 }
 
 // "5 Seconds" / "2 Minutes 3 Seconds" → seconds
@@ -281,6 +272,41 @@ async function navigateToProduct(page, productId, type = 6) {
     );
   }
   await goto(page, productUrl);
+}
+
+// Ensure the tab sits on THIS preset's Practice Sessions home page. If it's on a
+// different product (or not on a product home at all), auto-navigate there via
+// the product switcher instead of failing. Callers used to throw "Switch
+// products first" and force a manual Open-in-GMAT step; now enrich/scrape
+// self-navigates to the right source. Re-verifies once after navigating.
+async function ensureOnProductHome(page, preset) {
+  const readState = () => page.evaluate(() => ({
+    hasTable: !!document.querySelector('table.PracticeSessionsTable-tbl'),
+    productHeading: (document.querySelector('#PgHdngPracticeDash')?.innerText || '').trim(),
+  }));
+  const matches = (state) => {
+    if (!state.hasTable) return false;
+    if (!preset.productName) return true;
+    return normalizeProductHeading(state.productHeading)
+      === normalizeProductHeading(preset.productName);
+  };
+  let state = await readState();
+  if (matches(state)) return state;
+  // Wrong product (or not a product home) — navigate to the right book, re-check.
+  await navigateToProduct(page, preset.productId, preset.type || 6);
+  state = await readState();
+  if (!state.hasTable) {
+    throw new ScrapeAnomalyError(
+      `Auto-navigated to product ${preset.productId} but landed on a page without the Practice Sessions table.`
+    );
+  }
+  if (preset.productName
+    && normalizeProductHeading(state.productHeading) !== normalizeProductHeading(preset.productName)) {
+    throw new ScrapeAnomalyError(
+      `Auto-navigated to product ${preset.productId} but heading "${state.productHeading}" still doesn't match preset "${preset.productName}".`
+    );
+  }
+  return state;
 }
 
 async function listSessionsOnHome(page) {
@@ -947,7 +973,7 @@ async function fetchReviewItemNames(page, firstReviewUrl) {
 // eagerly catches the dropdowns at their "Select..." default. Poll briefly for
 // any dropdown's value to leave default; if all stay default within budget,
 // accept that the user genuinely didn't answer.
-async function waitForDropdownsRestored(frame, { timeoutMs = 6000, pollMs = 300 } = {}) {
+async function waitForDropdownsRestored(frame, { timeoutMs = 3000, pollMs = 300 } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -983,7 +1009,7 @@ async function waitForDropdownsRestored(frame, { timeoutMs = 6000, pollMs = 300 
 // that produced wrong "my_answer=A" rows on Verbal items the user got right.
 //
 // On timeout proceed anyway (the question may genuinely be unanswered).
-async function waitForReviewHighlights(frame, { timeoutMs = 4000, pollMs = 200 } = {}) {
+async function waitForReviewHighlights(frame, { timeoutMs = 2000, pollMs = 200 } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -1466,7 +1492,12 @@ async function readReviewFrame(frame) {
   if (data.choicesType === 'single' && data.stem && Array.isArray(data.choices)) {
     const choiceTexts = data.choices.map((c) => c && c.label).filter(Boolean);
     const split = splitStemAndPassage(data.stem, choiceTexts);
-    if (split.stem) data.stem = split.stem;
+    // Always trust the split for single-choice items. When it strips to empty, the
+    // stem was ONLY the "This is a multiple choice question for which you need to
+    // select 1 answer from 5 choices." boilerplate (+ duplicated choices) with no
+    // real prompt — keep it null rather than persisting the instruction line as a
+    // fake stem (the old `if (split.stem)` guard retained the boilerplate).
+    data.stem = split.stem || null;
     if (split.passage && !data.passage) data.passage = split.passage;
   }
 
@@ -1617,53 +1648,6 @@ async function cleanupReturnToHome(page) {
   }
 }
 
-// Robust read of the `reviewitems` base URL from the current page. Tries the JS
-// variable first (set by PracticeNow scripts after page load), then falls back
-// to parsing the embedded `<script id="data_reviewtable">` JSON blob. Polls
-// because the JS variable initialization can race with iframe load completion.
-// Returns null if neither is available after the budget; on null, captures
-// diagnostic info on the page object for the caller to surface in errors.
-async function readReviewitemsBase(page, { attempts = 12, delayMs = 400 } = {}) {
-  for (let i = 0; i < attempts; i += 1) {
-    const result = await page.evaluate(() => {
-      // Path 1: the global JS variable, set by PracticeNow scripts.
-      try {
-        if (typeof jsondata_reviewtable !== 'undefined' && jsondata_reviewtable?.reviewitems) {
-          return jsondata_reviewtable.reviewitems;
-        }
-      } catch (_e) { /* ReferenceError if not defined yet */ }
-      // Path 2: the embedded <script type="application/json"> blob — present as
-      // soon as the DOM is parsed, doesn't depend on script execution timing.
-      const el = document.getElementById('data_reviewtable');
-      if (el && el.textContent) {
-        try {
-          const parsed = JSON.parse(el.textContent);
-          return parsed?.reviewitems || null;
-        } catch { return null; }
-      }
-      return null;
-    }).catch(() => null);
-    if (result) return result;
-    if (i < attempts - 1) await sleep(delayMs);
-  }
-  return null;
-}
-
-// Capture diagnostics about the page state for debugging Phase 2 stalls.
-async function snapshotPageState(page) {
-  return page.evaluate(() => ({
-    url: location.href.slice(0, 200),
-    title: document.title,
-    readyState: document.readyState,
-    scriptIds: Array.from(document.querySelectorAll('script[id]')).map((s) => s.id),
-    hasJsondataReviewtable: typeof jsondata_reviewtable !== 'undefined',
-    hasDataReviewtableScript: !!document.getElementById('data_reviewtable'),
-    hasExamIframe: !!document.getElementById('ExamIframe'),
-    examIframeSrc: (document.getElementById('ExamIframe')?.src || '').slice(0, 200),
-    bodyTextSample: (document.body?.innerText || '').slice(0, 250).replace(/\s+/g, ' '),
-  })).catch((e) => ({ err: e.message }));
-}
-
 // runPhase2 for a SINGLE session.
 //
 // options:
@@ -1693,25 +1677,8 @@ async function runPhase2({ page, options = {} }) {
     throw new ScrapeAnomalyError(`Tab URL has no StartTest session token.`);
   }
 
-  // Verify product (same trust-the-tab pattern as Phase 1).
-  const pageState = await page.evaluate(() => ({
-    hasTable: !!document.querySelector('table.PracticeSessionsTable-tbl'),
-    productHeading: (document.querySelector('#PgHdngPracticeDash')?.innerText || '').trim(),
-  }));
-  if (!pageState.hasTable) {
-    throw new ScrapeAnomalyError(
-      `Tab is not on the Practice Sessions home page. Open the product home first, then retry.`
-    );
-  }
-  if (preset.productName) {
-    const actual = normalizeProductHeading(pageState.productHeading);
-    const expected = normalizeProductHeading(preset.productName);
-    if (actual !== expected) {
-      throw new ScrapeAnomalyError(
-        `Tab heading "${pageState.productHeading}" doesn't match preset "${preset.productName}". Switch products first.`
-      );
-    }
-  }
+  // Verify product; auto-navigate to the right book if the tab is elsewhere.
+  await ensureOnProductHome(page, preset);
 
   // From Home, find this session's report link (fresh code).
   const reportUrl = await page.evaluate((id) => {
@@ -1730,8 +1697,6 @@ async function runPhase2({ page, options = {} }) {
   if (!reportInfo.jsondata_reviewtable?.getqhistoryurl) {
     throw new ScrapeAnomalyError(`Report for sid=${sid} did not expose jsondata_reviewtable.`);
   }
-  const labelIndex = new Map(reportInfo.labelIndexEntries);
-
   // QHistory to learn how many items we have and pick up the first Review URL.
   const qhUrlRel = buildQHistoryUrl(reportInfo.jsondata_reviewtable.getqhistoryurl, sid, totalQ);
   const qhUrl = await resolvePageRelative(page, qhUrlRel);
@@ -1752,12 +1717,10 @@ async function runPhase2({ page, options = {} }) {
   // the stable id, just without the FormQuestionID. Anomaly errors from the
   // navigation itself still throw and abort.
   let items;
-  let ajaxAvailable = false;
   try {
     const ajaxResult = await fetchReviewItemNames(page, firstReviewAbs);
     if (ajaxResult.items) {
       items = ajaxResult.items;
-      ajaxAvailable = true;
     } else {
       // eslint-disable-next-line no-console
       console.warn(

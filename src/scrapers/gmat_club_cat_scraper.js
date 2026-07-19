@@ -12,6 +12,8 @@
 
 /* global document, location */ // browser globals referenced inside page.evaluate() callbacks
 
+const { sleep, jitter } = require('./scraper-utils');
+
 const GMATCLUB_HOST_RE = /gmatclub\.com/i;
 const TESTS_URL = 'https://gmatclub.com/gmat-focus-tests/?page=tests';
 
@@ -28,13 +30,6 @@ class ScrapeAnomalyError extends Error {
     this.snippet = snippet || null;
   }
 }
-
-function jitter(minMs, maxMs) {
-  const lo = Math.max(0, Number(minMs) || 0);
-  const hi = Math.max(lo, Number(maxMs) || lo);
-  return Math.round(lo + Math.random() * (hi - lo));
-}
-function sleep(ms) { return new Promise((r) => setTimeout(r, Math.max(0, ms | 0))); }
 
 function mapSectionToSubject(section) {
   const s = String(section || '').trim().toLowerCase();

@@ -33,6 +33,7 @@
 //   - q_code namespace prefixed `ope-` to avoid collisions with practice books.
 
 const { sanitizeStemHtml, stemHtmlToText } = require('./ope-stem');
+const { sleep, jitter, hashSessionExternalId } = require('./scraper-utils');
 
 const STARTTEST_HOST_RE = /starttest\.com/i;
 const ITDSTART_HOST_RE = /ITDStart\.aspx/i;
@@ -78,10 +79,6 @@ function assertNotErrorPage(bodyText, url) {
   }
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms | 0)));
-}
-
 function parseDateMDY(raw) {
   const text = String(raw || '').trim();
   const m = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
@@ -119,22 +116,6 @@ function decodeDataBlob(b64) {
 
 // Deterministic 53-bit hash (same impl as ttp_scraper) — mints a stable
 // session_external_id from a `${productId}|${takeGuid}` tuple.
-function hashSessionExternalId(input) {
-  const text = String(input || '');
-  let h1 = 0xdeadbeef ^ 0;
-  let h2 = 0x41c6ce57 ^ 0;
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
-  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
-  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
-}
-
 // Recover the takeIdx from a session_external_id by inverting the hash. The
 // session_external_id is computed as hashSessionExternalId(`ope-${productId}
 // |take-${takeIdx}`); since takeIdx is a small positive integer we can just
@@ -1339,12 +1320,6 @@ async function scrapeAttemptPhase3(popup, {
     qhTotal: expectedTotal,
     extracted_at: new Date().toISOString(),
   };
-}
-
-function jitter(minMs, maxMs) {
-  const lo = Math.max(0, Number(minMs) || 0);
-  const hi = Math.max(lo, Number(maxMs) || lo);
-  return lo + Math.random() * (hi - lo);
 }
 
 module.exports = {
