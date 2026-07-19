@@ -110,7 +110,7 @@ const STIMULUS_ALLOWED_TAGS = new Set([
 const STIMULUS_ALLOWED_ATTRS = new Set([
   'class', 'colspan', 'rowspan', 'scope', 'aria-rowcount', 'border', 'style',
   'x', 'y', 'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'width', 'height',
-  'd', 'points', 'transform', 'viewBox', 'fill', 'stroke', 'stroke-width', 'text-anchor', 'font-size', 'dominant-baseline',
+  'd', 'points', 'transform', 'viewbox', 'fill', 'stroke', 'stroke-width', 'text-anchor', 'font-size', 'dominant-baseline',
 ]);
 
 function sanitizeStimulusHtml(raw) {
@@ -134,13 +134,14 @@ function sanitizeStimulusHtml(raw) {
     const re = /([a-zA-Z-]+)\s*=\s*"([^"]*)"/g;
     let a;
     while ((a = re.exec(attrs)) !== null) {
-      const name = a[1].toLowerCase();
+      const rawName = a[1];
+      const name = rawName.toLowerCase();
       const val = a[2];
       if (name.startsWith('on')) continue;
       if (!STIMULUS_ALLOWED_ATTRS.has(name)) continue;
       if (/javascript:/i.test(val)) continue;
       if (name === 'style' && /url\s*\(|expression\s*\(/i.test(val)) continue;
-      kept.push(`${name}="${escapeAttr(val)}"`);
+      kept.push(`${rawName}="${escapeAttr(val)}"`);
     }
     return kept.length ? `<${tag} ${kept.join(' ')}>` : `<${tag}>`;
   });

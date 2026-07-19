@@ -24,3 +24,8 @@ test('drops style with url()/expression() but keeps plain layout styles', () => 
   const ok = sanitizeStimulusHtml('<table style="text-align:center;width:600px"><tr><td>1</td></tr></table>');
   assert.ok(/text-align:center/.test(ok), 'plain layout style kept');
 });
+
+test('preserves svg viewBox attribute (camelCase) for chart scaling', () => {
+  const out = sanitizeStimulusHtml('<svg viewBox="0 0 100 50"><rect x="1" y="2"/></svg>');
+  assert.ok(/viewBox="0 0 100 50"/.test(out), 'viewBox kept with camelCase');
+});
