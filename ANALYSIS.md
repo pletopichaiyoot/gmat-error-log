@@ -258,7 +258,7 @@ The **AI Curated Practice** tab lets you redo previously-attempted questions you
 ```
 
 - `slug` must match `^[a-z0-9][a-z0-9-]*$` and doubles as the filename stem (by convention, though the loader doesn't enforce filename==slug).
-- `items` are **`question_attempts.id`** values (the DB row id of the *original* enriched attempt) — not `q_code`, not `q_id`. Get these straight out of the candidate query below.
+- `items` are **`q_code`s, written as JSON strings** (the stable per-question id — e.g. `"300263"`, `"ope-Q187_014330"`, `"ttp-q-3638"`). Use `q_code`, NOT the row `question_attempts.id`: Phase-1 rescrapes delete+reinsert attempts and **reassign the row id**, so an id-based set silently loses questions after any rescrape, while `q_code` survives. `resolveAiPracticeSetItems` accepts either (JSON string → `q_code`, resolved to the most-complete gradeable row; JSON number → legacy row id, still posted by `/grade`), but always curate with `q_code` strings — including numeric-looking StartTest q_codes, kept as strings so they route by `q_code` and not row id.
 - `title`/`focusNote`/`subject` are display-only; `subject` isn't validated against the Q/Verbal/DI enum.
 
 **Gradeability requirement (v1 is single-answer only):** an item is only servable if it has a non-empty `question_stem`, `answer_choices` that parse as a **flat** `[{label, text, ...}]` array, and a non-empty `correct_answer`. Multi-part DI (TPA/MSR/GI matrix items, which nest `options[]` inside each row) fail this check — `isFlatGradeableChoices()` in `src/ai-practice-sets.js` explicitly rejects any choice object carrying an `options` key. Don't put multi-part DI attempt ids in a set file; they'll be silently dropped.
@@ -271,6 +271,22 @@ AND (SELECT count(*) FROM json_array_elements(qa.answer_choices::json) e
 ```
 
 (Real example: attempt `14839` — "t = 2x + 1, in terms of t, 4x is" — has 5 choices with 3 blank; it must not go in a set.)
+
+**Never curate a question with an incomplete stem, either.** The same corruption drops math
+or figures from the *stem*: a dropped equation-image renders as a gap ("If 4 < , which…",
+"let . If the sum…"), a "the chart/table above shows…" question loses its figure, or the whole
+stem is just the OPE boilerplate ("This is a multiple choice question…") with no actual
+question. Such a row can pass every structural gradeability check (flat A–E choices, valid key)
+yet be unanswerable, because the checks inspect the *choices*, never the stem. There's no clean
+SQL test — **eyeball the served payload** (`GET /api/ai-practice/sets/<slug>`) and confirm each
+stem reads completely, and that any math-bearing stem carries a non-empty `question_stem_html`
+(that's what renders the equation; a text-only stem with `[math]` or a mid-sentence gap is
+broken). Prefer questions that have `question_stem_html`. **Roman-numeral-answer questions** ("I only /
+II only / I and II only / …") are the sneakiest case: the stem must contain the three I/II/III
+items (inline, or rendered via `question_stem_html`); when the scrape drops that list the row
+is still structurally gradeable but unanswerable, so verify the three items are present.
+(Whole-audit offenders: `7322`, `7674`, `7595`, `7707`, `14860`, `13446`, `13379`, `13498`,
+plus roman-numeral cases `13437`, `13511`.)
 
 Ungradeable or missing ids aren't an error — `GET /api/ai-practice/sets/:slug` returns them in a `missing: [id, ...]` array alongside the servable `questions`, so a set can be curated a little loosely and the UI just shows fewer questions than `items.length`.
 

@@ -52,8 +52,20 @@ function parseSetObject(obj) {
   if (!obj || typeof obj !== 'object') return { ok: false, error: 'not an object' };
   const slug = String(obj.slug || '').trim();
   if (!SLUG_RE.test(slug)) return { ok: false, error: 'missing/invalid slug' };
+  // Items may be q_codes (strings — stable across rescrapes) or legacy
+  // question_attempts.id (positive integers). Preserve each type as-is:
+  // a numeric-looking q_code ("300263") MUST stay a string so the resolver
+  // routes it by q_code, not by row id. (Do NOT Number.parseInt here — that
+  // both mislabels numeric q_codes as ids and silently drops prefixed q_codes
+  // like "ope-…"/"ttp-…".)
   const rawItems = Array.isArray(obj.items) ? obj.items : [];
-  const items = rawItems.map((n) => Number.parseInt(n, 10)).filter((n) => Number.isInteger(n) && n > 0);
+  const items = rawItems
+    .map((it) => {
+      if (typeof it === 'number' && Number.isInteger(it) && it > 0) return it;
+      if (typeof it === 'string' && it.trim()) return it.trim();
+      return null;
+    })
+    .filter((it) => it !== null);
   if (items.length === 0) return { ok: false, error: 'no valid items' };
   return {
     ok: true,
@@ -82,4 +94,40 @@ function readSetFiles(dir) {
   return sets;
 }
 
-module.exports = { isFlatGradeableChoices, correctAnswerInChoices, choiceHasContent, parseSetObject, readSetFiles, SLUG_RE };
+// Classify each `items` entry so a set file can reference questions two ways:
+//   - a JSON string  → a stable `q_code` (survives Phase-1 rescrapes, which
+//     delete+reinsert attempts and REASSIGN question_attempts.id).
+//   - a JSON number  → a legacy question_attempts.id (still used by old set
+//     files and by the per-question /grade endpoint, which posts a row id).
+// Order is preserved so the runner shows questions in the curated sequence.
+function classifySetItems(list) {
+  const order = [];
+  const ids = [];
+  const qCodes = [];
+  for (const it of Array.isArray(list) ? list : []) {
+    if (typeof it === 'number' && Number.isInteger(it) && it > 0) {
+      ids.push(it);
+      order.push({ type: 'id', key: it });
+    } else if (typeof it === 'string' && it.trim()) {
+      const key = it.trim();
+      qCodes.push(key);
+      order.push({ type: 'qcode', key });
+    }
+  }
+  return { ids, qCodes, order };
+}
+
+// A q_code can have several attempt rows (re-attempts across dates, or a
+// corrupted duplicate next to a clean one). Among the gradeable ones, prefer the
+// most-complete: a rendered-math stem (question_stem_html) wins big, then the
+// longest stem (most enriched). Returns null if none are gradeable.
+function pickBestGradeableRow(rows) {
+  const ok = (Array.isArray(rows) ? rows : []).filter(
+    (r) => r && isFlatGradeableChoices(r.answer_choices) && correctAnswerInChoices(r.answer_choices, r.correct_answer)
+  );
+  if (!ok.length) return null;
+  const score = (r) => (String(r.question_stem_html || '').trim() ? 1e7 : 0) + String(r.question_stem || '').length;
+  return ok.reduce((best, r) => (score(r) > score(best) ? r : best), ok[0]);
+}
+
+module.exports = { isFlatGradeableChoices, correctAnswerInChoices, choiceHasContent, parseSetObject, readSetFiles, SLUG_RE, classifySetItems, pickBestGradeableRow };

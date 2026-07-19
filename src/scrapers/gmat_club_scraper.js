@@ -73,6 +73,9 @@
     [/\b(must be true|could be true|inference|infer)/, 'CR'],
     [/\b(strengthen|weaken|flaw|assumption|evaluate|resolve|explain|boldface|argument|parallel)/, 'CR'],
     [/\b(main idea|purpose|author|detail|structure|application|organization)/, 'RC'],
+    // GMAT Club tags RC passages by subject + length, e.g. "Science,Short Passage",
+    // "Business,Long Passage" — none hit the keywords above, so match the passage tag.
+    [/\b(short|long)?\s*passages?\b/, 'RC'],
     [/\b(table analysis|tables?)\b/, 'TA'],
     [/\b(graphs?|graphics)/, 'GI'],
     [/\b(multi.?source|msr)\b/, 'MSR'],

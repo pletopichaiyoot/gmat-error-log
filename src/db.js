@@ -2,7 +2,7 @@ const { Pool, types } = require('pg');
 const { toPg } = require('./sql-util');
 const { runMigrations } = require('../scripts/migrate');
 const { deriveQuestionMetadata, enrichQuestionMetadata } = require('./question-metadata');
-const { isFlatGradeableChoices, correctAnswerInChoices } = require('./ai-practice-sets');
+const { isFlatGradeableChoices, correctAnswerInChoices, classifySetItems, pickBestGradeableRow } = require('./ai-practice-sets');
 
 // node-postgres returns int8/bigint (COUNT, SUM(int), session_external_id) and
 // numeric (ROUND results, computed percentages) as STRINGS to preserve precision.
@@ -1149,38 +1149,79 @@ async function listAiPracticeCandidates({ subject = '', wrongOnly = true, limit 
   return rows.filter((r) => isFlatGradeableChoices(r.answer_choices) && correctAnswerInChoices(r.answer_choices, r.correct_answer));
 }
 
-// Resolve set item ids to servable question payloads + prior-attempt summary.
-async function resolveAiPracticeSetItems(ids) {
-  const clean = (Array.isArray(ids) ? ids : []).map((n) => safeInt(n)).filter((n) => Number.isInteger(n) && n > 0);
-  if (clean.length === 0) return { items: [], missing: [] };
-  const placeholders = clean.map(() => '?').join(', ');
-  const rows = await all(
-    `SELECT qa.id, qa.q_code, s.source AS source, qa.subject_code, qa.category_code,
+// Resolve set items to servable question payloads + prior-attempt summary.
+// Items may be **q_codes** (strings — stable across Phase-1 rescrapes) or legacy
+// **question_attempts.id**s (numbers — still posted by the /grade endpoint).
+// READ-ONLY: only SELECTs; never writes to question_attempts/sessions. The output
+// `itemId` is always the CURRENT row id, so /grade and /submit keep resolving it.
+const AI_ITEM_COLS = `qa.id, qa.q_code, s.source AS source, qa.subject_code, qa.category_code,
             qa.subcategory, qa.topic, qa.difficulty, qa.question_url, qa.question_stem,
             qa.question_stem_html, qa.answer_choices, qa.response_format,
             qa.correct_answer, qa.correct AS prior_correct, qa.my_answer AS prior_my_answer,
-            s.session_date AS prior_session_date
-       FROM question_attempts qa JOIN sessions s ON s.id = qa.session_id
-      WHERE qa.id IN (${placeholders})`,
-    clean
-  );
-  const byId = new Map(rows.map((r) => [r.id, r]));
+            s.session_date AS prior_session_date`;
+
+function shapeAiItem(r) {
+  return {
+    itemId: r.id, qCode: r.q_code, source: r.source, subjectCode: r.subject_code,
+    categoryCode: r.category_code, subcategory: r.subcategory, topic: r.topic,
+    difficulty: r.difficulty, questionUrl: r.question_url, questionStem: r.question_stem,
+    questionStemHtml: r.question_stem_html, answerChoices: r.answer_choices,
+    responseFormat: r.response_format, correctAnswer: r.correct_answer,
+    priorAttempt: {
+      correct: r.prior_correct, myAnswer: r.prior_my_answer,
+      sessionDate: r.prior_session_date, source: r.source,
+    },
+  };
+}
+
+async function resolveAiPracticeSetItems(setItems) {
+  const { ids, qCodes, order } = classifySetItems(setItems);
+  if (order.length === 0) return { items: [], missing: [] };
+
+  // Legacy id path: exact row by id (also used by the /grade endpoint).
+  const byId = new Map();
+  if (ids.length) {
+    const rows = await all(
+      `SELECT ${AI_ITEM_COLS} FROM question_attempts qa JOIN sessions s ON s.id = qa.session_id
+        WHERE qa.id IN (${ids.map(() => '?').join(', ')})`,
+      ids
+    );
+    for (const r of rows) byId.set(r.id, r);
+  }
+
+  // q_code path: gather every non-AI-curated row for the q_codes, then pick the
+  // most-complete gradeable row per q_code (survives rescrapes / id churn).
+  const byQCode = new Map();
+  if (qCodes.length) {
+    const rows = await all(
+      `SELECT ${AI_ITEM_COLS} FROM question_attempts qa JOIN sessions s ON s.id = qa.session_id
+        WHERE qa.q_code IN (${qCodes.map(() => '?').join(', ')})
+          AND LOWER(COALESCE(s.source, '')) NOT LIKE '%ai curated%'`,
+      qCodes
+    );
+    const grouped = new Map();
+    for (const r of rows) {
+      if (!grouped.has(r.q_code)) grouped.set(r.q_code, []);
+      grouped.get(r.q_code).push(r);
+    }
+    for (const [qc, rs] of grouped) {
+      const best = pickBestGradeableRow(rs);
+      if (best) byQCode.set(qc, best);
+    }
+  }
+
   const items = [];
   const missing = [];
-  for (const id of clean) {           // preserve the set's item order
-    const r = byId.get(id);
-    if (!r || !isFlatGradeableChoices(r.answer_choices) || !correctAnswerInChoices(r.answer_choices, r.correct_answer)) { missing.push(id); continue; }
-    items.push({
-      itemId: r.id, qCode: r.q_code, source: r.source, subjectCode: r.subject_code,
-      categoryCode: r.category_code, subcategory: r.subcategory, topic: r.topic,
-      difficulty: r.difficulty, questionUrl: r.question_url, questionStem: r.question_stem,
-      questionStemHtml: r.question_stem_html, answerChoices: r.answer_choices,
-      responseFormat: r.response_format, correctAnswer: r.correct_answer,
-      priorAttempt: {
-        correct: r.prior_correct, myAnswer: r.prior_my_answer,
-        sessionDate: r.prior_session_date, source: r.source,
-      },
-    });
+  for (const o of order) {          // preserve the set's item order
+    let r = null;
+    if (o.type === 'id') {
+      const cand = byId.get(o.key);
+      if (cand && isFlatGradeableChoices(cand.answer_choices) && correctAnswerInChoices(cand.answer_choices, cand.correct_answer)) r = cand;
+    } else {
+      r = byQCode.get(o.key) || null;
+    }
+    if (!r) { missing.push(o.key); continue; }
+    items.push(shapeAiItem(r));
   }
   return { items, missing };
 }
@@ -1840,6 +1881,7 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
         q.question_stem,
         q.question_stem_html,
         q.passage_text,
+        q.stimulus,
         q.answer_choices,
         q.response_format,
         q.response_details,

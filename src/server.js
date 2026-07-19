@@ -1557,12 +1557,14 @@ app.post('/api/ai-practice/sets/:slug/grade', async (req, res) => {
     const set = loadAiPracticeSets().find((s) => s.slug === req.params.slug);
     if (!set) return res.status(404).json({ error: 'Set not found' });
     const itemId = Number(req.body?.itemId);
-    if (!Number.isInteger(itemId) || !set.items.includes(itemId)) {
-      return res.status(400).json({ error: 'Item not in set' });
-    }
-    const { items } = await resolveAiPracticeSetItems([itemId]);
-    const it = items[0];
-    if (!it) return res.status(404).json({ error: 'Item not gradeable' });
+    if (!Number.isInteger(itemId)) return res.status(400).json({ error: 'Bad itemId' });
+    // set.items references questions by q_code now (not row id), so the old
+    // `set.items.includes(itemId)` guard rejected EVERY review-mode grade (posted
+    // itemId is the resolved numeric row id). Resolve the whole set and match the
+    // posted row id against the resolved items — same scoping the /submit path uses.
+    const { items } = await resolveAiPracticeSetItems(set.items);
+    const it = items.find((x) => x.itemId === itemId);
+    if (!it) return res.status(404).json({ error: 'Item not in set' });
     const your = String(req.body?.answer || '').trim();
     const correct = gradeAnswer(your, it.correctAnswer, it.answerChoices) ? 1 : 0;
     res.json({ itemId, correct, correctAnswer: it.correctAnswer });

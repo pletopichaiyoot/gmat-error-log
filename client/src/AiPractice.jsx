@@ -30,17 +30,18 @@ const IconNext = () => (
 export default function AiPractice({ onExit }) {
   const [screen, setScreen] = useState('list');       // 'list' | 'runner' | 'result'
   const [activeSet, setActiveSet] = useState(null);
-  const [mode, setMode] = useState('exam');           // 'exam' | 'review'
+  const [mode, setMode] = useState('exam');           // 'exam' | 'review'  (feedback timing)
+  const [timed, setTimed] = useState(true);           // true = GMAT pace clock; false = untimed
   const [result, setResult] = useState(null);
   const [totalTimeSec, setTotalTimeSec] = useState(0);
 
-  const startSet = useCallback(async (slug, m) => {
+  const startSet = useCallback(async (slug, m, t) => {
     try {
       const r = await fetch(`${API}/sets/${slug}`);
       const data = await r.json();
       if (!r.ok) { alert(data.error || 'Could not load set'); return; }
       if (!data.questions?.length) { alert('This set has no gradeable questions.'); return; }
-      setActiveSet(data); setMode(m); setResult(null); setScreen('runner');
+      setActiveSet(data); setMode(m); setTimed(t); setResult(null); setScreen('runner');
     } catch (e) { alert('Could not load set: ' + e.message); }
   }, []);
 
@@ -60,7 +61,7 @@ export default function AiPractice({ onExit }) {
   const backToList = () => { setScreen('list'); setActiveSet(null); setResult(null); };
 
   if (screen === 'runner') {
-    return <Runner set={activeSet} mode={mode} onFinish={finish} onExit={backToList} />;
+    return <Runner set={activeSet} mode={mode} timed={timed} onFinish={finish} onExit={backToList} />;
   }
   if (screen === 'result') {
     return <Result set={activeSet} result={result} totalTimeSec={totalTimeSec} mode={mode} onBack={backToList} onExit={onExit} />;
@@ -72,6 +73,7 @@ export default function AiPractice({ onExit }) {
 function SetList({ onStart, onExit }) {
   const [sets, setSets] = useState(null);
   const [mode, setMode] = useState('exam');
+  const [timed, setTimed] = useState(true);
   useEffect(() => {
     fetch(`${API}/sets`).then((r) => r.json()).then((d) => setSets(d.sets || [])).catch(() => setSets([]));
   }, []);
@@ -96,15 +98,27 @@ function SetList({ onStart, onExit }) {
           <div className="ai-picker">
             <div className="ai-picker-head">
               <h2 className="ai-picker-title">Choose a set</h2>
-              <div className="ai-mode-toggle" role="radiogroup" aria-label="Feedback timing">
-                <button type="button" role="radio" aria-checked={mode === 'exam'} className={`ai-mode-opt ${mode === 'exam' ? 'is-active' : ''}`} onClick={() => setMode('exam')}>
-                  <span className="ai-mode-name">Exam</span>
-                  <span className="ai-mode-desc">Answers lock; score at the end</span>
-                </button>
-                <button type="button" role="radio" aria-checked={mode === 'review'} className={`ai-mode-opt ${mode === 'review' ? 'is-active' : ''}`} onClick={() => setMode('review')}>
-                  <span className="ai-mode-name">Review</span>
-                  <span className="ai-mode-desc">See the answer after each question</span>
-                </button>
+              <div className="ai-toggle-stack">
+                <div className="ai-mode-toggle" role="radiogroup" aria-label="Feedback timing">
+                  <button type="button" role="radio" aria-checked={mode === 'exam'} className={`ai-mode-opt ${mode === 'exam' ? 'is-active' : ''}`} onClick={() => setMode('exam')}>
+                    <span className="ai-mode-name">Exam</span>
+                    <span className="ai-mode-desc">Answers lock; score at the end</span>
+                  </button>
+                  <button type="button" role="radio" aria-checked={mode === 'review'} className={`ai-mode-opt ${mode === 'review' ? 'is-active' : ''}`} onClick={() => setMode('review')}>
+                    <span className="ai-mode-name">Review</span>
+                    <span className="ai-mode-desc">See the answer after each question</span>
+                  </button>
+                </div>
+                <div className="ai-mode-toggle" role="radiogroup" aria-label="Clock">
+                  <button type="button" role="radio" aria-checked={timed} className={`ai-mode-opt ${timed ? 'is-active' : ''}`} onClick={() => setTimed(true)}>
+                    <span className="ai-mode-name">Timed</span>
+                    <span className="ai-mode-desc">GMAT pace clock · ~2 min/question</span>
+                  </button>
+                  <button type="button" role="radio" aria-checked={!timed} className={`ai-mode-opt ${!timed ? 'is-active' : ''}`} onClick={() => setTimed(false)}>
+                    <span className="ai-mode-name">Untimed</span>
+                    <span className="ai-mode-desc">No pace pressure · time still tracked</span>
+                  </button>
+                </div>
               </div>
             </div>
             <div className="ai-set-grid">
@@ -116,7 +130,7 @@ function SetList({ onStart, onExit }) {
                   </div>
                   <h3>{s.title}</h3>
                   {s.focusNote && <p className="ai-set-note">{s.focusNote}</p>}
-                  <button type="button" className="ai-btn-primary ai-set-start" onClick={() => onStart(s.slug, mode)}>
+                  <button type="button" className="ai-btn-primary ai-set-start" onClick={() => onStart(s.slug, mode, timed)}>
                     {s.completedCount ? 'Practice again' : 'Start'}
                   </button>
                 </article>
@@ -130,7 +144,7 @@ function SetList({ onStart, onExit }) {
 }
 
 // ============================== RUNNER ==============================
-function Runner({ set, mode, onFinish, onExit }) {
+function Runner({ set, mode, timed = true, onFinish, onExit }) {
   const questions = set.questions;
   const isExam = mode === 'exam';
 
@@ -286,7 +300,7 @@ function Runner({ set, mode, onFinish, onExit }) {
           <button type="button" className="lsat-st-icon-btn" onClick={() => setNavOpen((v) => !v)} aria-label="Question navigator" title="All questions in this set"><IconGrid /></button>
         </div>
         <div className="lsat-st-topbar-right">
-          <span className="lsat-st-set-meta">{set.subject || 'Mixed'} · {questions.length} questions · {isExam ? 'Exam' : 'Review'}</span>
+          <span className="lsat-st-set-meta">{set.subject || 'Mixed'} · {questions.length} questions · {isExam ? 'Exam' : 'Review'}{timed ? '' : ' · Untimed'}</span>
           <button type="button" className="lsat-st-finish-btn" onClick={() => setShowFinish(true)} title="End now and save answered questions">End Session</button>
         </div>
 
@@ -323,14 +337,16 @@ function Runner({ set, mode, onFinish, onExit }) {
           ))}
         </div>
         <div className="lsat-st-subbar-right">
-          <span
-            className={`lsat-st-section-timer ${clockStopped ? 'is-paused' : ''} ${sectionLow ? 'is-low' : ''} ${isOvertime ? 'is-overtime' : ''}`}
-            aria-label={isOvertime ? 'Section time exceeded' : 'Section time remaining'}
-            title={reviewFrozen ? 'Paused while you review the answer' : isOvertime ? 'Past GMAT Focus target pace (~2 min/question). Wrap up when ready.' : 'Time remaining at GMAT Focus pace (~2 min/question)'}
-          >
-            <IconClock />{isOvertime ? '+' : ''}{pad2(secMin)}:{pad2(secSec)}{isOvertime && <span className="lsat-st-overtime-tag">OVER</span>}
-          </span>
-          <span className={`lsat-st-timer ${clockStopped ? 'is-paused' : ''}`} aria-label="Time on this question" title="Time on this question">{formatMs(qElapsed)}</span>
+          {timed && (
+            <span
+              className={`lsat-st-section-timer ${clockStopped ? 'is-paused' : ''} ${sectionLow ? 'is-low' : ''} ${isOvertime ? 'is-overtime' : ''}`}
+              aria-label={isOvertime ? 'Section time exceeded' : 'Section time remaining'}
+              title={reviewFrozen ? 'Paused while you review the answer' : isOvertime ? 'Past GMAT Focus target pace (~2 min/question). Wrap up when ready.' : 'Time remaining at GMAT Focus pace (~2 min/question)'}
+            >
+              <IconClock />{isOvertime ? '+' : ''}{pad2(secMin)}:{pad2(secSec)}{isOvertime && <span className="lsat-st-overtime-tag">OVER</span>}
+            </span>
+          )}
+          <span className={`lsat-st-timer ${clockStopped ? 'is-paused' : ''}`} aria-label="Time on this question" title={timed ? 'Time on this question' : 'Time on this question (untimed — recorded, no pace limit)'}>{formatMs(qElapsed)}</span>
           <span className="lsat-st-score">{answeredCount}<span className="lsat-st-score-of">/{questions.length}</span></span>
           <button type="button" className={`lsat-st-pause ${paused ? 'is-paused' : ''}`} onClick={togglePause} disabled={submitted} aria-label={paused ? 'Resume timer' : 'Pause timer'}>
             {paused ? 'Resume' : 'Pause'}

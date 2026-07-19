@@ -1455,6 +1455,7 @@ th.sortable:hover {
 .ai-picker { max-width: 1040px; margin: 0 auto; }
 .ai-picker-head { display: flex; flex-wrap: wrap; gap: var(--s4); align-items: flex-end; justify-content: space-between; margin-bottom: var(--s6); }
 .ai-picker-title { margin: 0; font-size: 1.22rem; letter-spacing: -0.02em; }
+.ai-toggle-stack { display: flex; flex-direction: column; gap: var(--s2); align-items: flex-end; }
 .ai-mode-toggle { display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: var(--r-s); overflow: hidden; background: var(--surface); }
 .ai-mode-opt {
   display: flex;
@@ -4311,6 +4312,26 @@ html {
   margin-bottom: var(--s5);
   color: var(--st-text);
   max-width: 60ch;
+  /* OPE stems often end "… value of E − S ?" with a space before the "?", so a
+     full line orphans the "?" onto its own line. pretty rebalances the last
+     line to avoid single-word orphans. */
+  text-wrap: pretty;
+}
+/* OPE stems/choices carry inline math as data: <img> GIFs. Tailwind Preflight
+   defaults every <img> to display:block, dropping each fraction onto its own
+   line and shattering the sentence — force inline flow so "is 1/2 mile long"
+   reads as one line. multiply drops the white matte onto the white surface
+   while keeping the black glyph. Collapse the empty <p></p>/<br> padding that
+   some OPE stems wrap figures in. (Mirrors .question-stem-html in the modal.) */
+.lsat-st-stem p { margin: 0 0 var(--s3); }
+.lsat-st-stem p:last-child { margin-bottom: 0; }
+.lsat-st-stem p:empty { display: none; }
+.lsat-st-stem img,
+.lsat-st-choice-text img {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: middle;
+  mix-blend-mode: multiply;
 }
 
 /* Choices — minimal: radio + text only */
