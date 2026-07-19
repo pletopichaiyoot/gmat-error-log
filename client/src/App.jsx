@@ -359,6 +359,58 @@ function sanitizeStemHtml(html) {
   return tpl.innerHTML.trim();
 }
 
+// DI stimulus (charts/tables/MSR sources) is stored as raw scraped HTML, wider
+// than a question stem: prose, tables, and inline SVG (bar/scatter charts) in
+// addition to sup/sub/img. Mirrors the allowlist in the Node-side
+// sanitizeStimulusHtml (src/scrapers/ope-stem.js) — App.jsx is ESM and can't
+// import that CJS module, so the logic is reimplemented here as a DOM walk
+// (same tree-walk shape as sanitizeStemHtmlNode above) instead of regex.
+const STIMULUS_ALLOWED_TAGS = new Set([
+  'P', 'BR', 'B', 'STRONG', 'I', 'EM', 'SUP', 'SUB', 'SPAN', 'DIV', 'H1', 'H2', 'H3', 'UL', 'OL', 'LI',
+  'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TH', 'TD', 'CAPTION', 'COLGROUP', 'COL',
+  'SVG', 'G', 'PATH', 'RECT', 'CIRCLE', 'ELLIPSE', 'LINE', 'POLYLINE', 'POLYGON', 'TEXT', 'TSPAN', 'DEFS', 'TITLE', 'DESC',
+  'IMG',
+]);
+const STIMULUS_ALLOWED_ATTRS = new Set([
+  'class', 'colspan', 'rowspan', 'scope', 'aria-rowcount', 'border', 'style',
+  'x', 'y', 'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'width', 'height',
+  'd', 'points', 'transform', 'viewbox', 'fill', 'stroke', 'stroke-width', 'text-anchor', 'font-size', 'dominant-baseline',
+]);
+function sanitizeStimulusHtmlNode(node) {
+  Array.from(node.childNodes).forEach((child) => {
+    if (child.nodeType === Node.TEXT_NODE) return;
+    if (child.nodeType !== Node.ELEMENT_NODE) { child.remove(); return; }
+    const tag = child.tagName.toUpperCase();
+    if (tag === 'SCRIPT' || tag === 'STYLE') { child.remove(); return; }
+    if (tag === 'IMG') {
+      const src = child.getAttribute('src') || '';
+      if (!/^data:image\//i.test(src)) { child.remove(); return; }
+      Array.from(child.attributes).forEach((a) => { if (a.name.toLowerCase() !== 'src') child.removeAttribute(a.name); });
+      return;
+    }
+    if (!STIMULUS_ALLOWED_TAGS.has(tag)) {
+      sanitizeStimulusHtmlNode(child);                       // clean subtree first
+      child.replaceWith(...Array.from(child.childNodes)); // then unwrap
+      return;
+    }
+    Array.from(child.attributes).forEach((a) => {
+      const name = a.name.toLowerCase();
+      if (name.startsWith('on') || !STIMULUS_ALLOWED_ATTRS.has(name)) { child.removeAttribute(a.name); return; }
+      if (/javascript:/i.test(a.value)) { child.removeAttribute(a.name); return; }
+      if (name === 'style' && /url\s*\(|expression\s*\(/i.test(a.value)) { child.removeAttribute(a.name); return; }
+    });
+    sanitizeStimulusHtmlNode(child);
+  });
+}
+function sanitizeStimulusHtml(html) {
+  const raw = String(html || '');
+  if (!raw.trim() || typeof document === 'undefined') return '';
+  const tpl = document.createElement('template');
+  tpl.innerHTML = raw;
+  sanitizeStimulusHtmlNode(tpl.content);
+  return tpl.innerHTML.trim();
+}
+
 // Renders a question stem: the math-image-bearing HTML (OPE) when present,
 // otherwise the plain-text stem. All non-OPE sources have no question_stem_html,
 // so they fall through to the original plain-text <p> render unchanged.
@@ -4816,6 +4868,24 @@ function App() {
                       <StemContent row={questionReview.row} />
                     </div>
                   </div>
+
+                  {(() => {
+                    let s = null;
+                    try { s = questionReview.row?.stimulus ? JSON.parse(questionReview.row.stimulus) : null; } catch { s = null; }
+                    if (!s) return null;
+                    const html = sanitizeStimulusHtml(s.html || '');
+                    return (
+                      <div className="question-stimulus">
+                        {html && <div className="question-stimulus-main" dangerouslySetInnerHTML={{ __html: html }} />}
+                        {Array.isArray(s.sources) && s.sources.map((src, i) => (
+                          <section className="question-stimulus-source" key={i}>
+                            {src.title && <h4>{src.title}</h4>}
+                            <div dangerouslySetInnerHTML={{ __html: sanitizeStimulusHtml(src.html || '') }} />
+                          </section>
+                        ))}
+                      </div>
+                    );
+                  })()}
 
                   <div className="question-review-section">
                   <h3>

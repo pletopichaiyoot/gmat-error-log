@@ -2336,6 +2336,46 @@ th.sortable:hover {
   font-size: 0.95rem;
 }
 
+/* DI stimulus (charts/tables/MSR sources), sanitized via sanitizeStimulusHtml
+   and rendered above the answer choices. Mirrors the boxed-surface treatment
+   of .question-stem-card / .question-passage-card above. */
+.question-stimulus {
+  margin: 0 0 var(--s4);
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-s);
+  background: var(--surface-2);
+  overflow-x: auto;
+}
+
+.question-stimulus table {
+  border-collapse: collapse;
+  margin: var(--s2) 0;
+}
+
+.question-stimulus th,
+.question-stimulus td {
+  border: 1px solid var(--border);
+  padding: var(--s1) var(--s2);
+  text-align: left;
+}
+
+.question-stimulus svg,
+.question-stimulus img {
+  max-width: 100%;
+  height: auto;
+}
+
+.question-stimulus-source {
+  margin-top: var(--s3);
+}
+
+.question-stimulus-source h4 {
+  margin: 0 0 var(--s1);
+  font-weight: 600;
+  color: var(--ink);
+}
+
 .question-review-layout {
   display: grid;
   gap: var(--s4);
