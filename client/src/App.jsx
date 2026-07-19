@@ -3329,7 +3329,7 @@ function App() {
                 }}
               />
             )}
-            {subjectCards.map((card) => {
+            {subjectCards.filter((card) => normalizeSubjectFamilyDisplay(card.family) !== 'Other').map((card) => {
               const accuracy = Math.max(0, Math.min(100, Number(card.accuracy_pct || 0)));
               return (
                 <article key={card.family} className="dashboard-subject">
