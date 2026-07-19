@@ -1340,7 +1340,6 @@ async function readReviewFrame(frame) {
     });
     const hasSvg = stimulusRoots.some((el) => el.querySelector('svg'));
     const hasTable = stimulusRoots.some((el) => el.querySelector('table.table, table[border]'));
-    const stimulusHtmlRaw = stimulusRoots.map((el) => el.innerHTML).join('\n');
     // Mark itdmedia <img>s for the Node side to screenshot: give each a data-shot
     // index so we can find and replace it after screenshotting.
     let shotIdx = 0;
@@ -1356,7 +1355,7 @@ async function readReviewFrame(frame) {
       });
     });
     const stimulusHtmlMarked = stimulusRoots.map((el) => el.innerHTML).join('\n');
-    const stimulusKind = referenceSources.length ? 'msr' : hasTable && !hasSvg ? 'table' : hasSvg ? 'graph' : (hasTable ? 'mixed' : null);
+    const stimulusKind = referenceSources.length ? 'msr' : (hasSvg && hasTable) ? 'mixed' : hasSvg ? 'graph' : hasTable ? 'table' : null;
 
     return {
       vItemName: window.vItemName || null,
@@ -1383,7 +1382,7 @@ async function readReviewFrame(frame) {
       stimulusKind,
       referenceSources,
       itdmediaSelectors,
-      itemStimulusPresent: !!(hasSvg || hasTable || referenceSources.length),
+      itemStimulusPresent: !!(hasSvg || hasTable || referenceSources.length || itdmediaSelectors.length),
     };
   });
 
@@ -1483,6 +1482,7 @@ async function readReviewFrame(frame) {
     data.stimulus = null;
   }
   // Drop the transient capture fields so they don't leak downstream.
+  // impeccable-disable broken-image
   delete data.stimulusHtmlMarked; delete data.itdmediaSelectors;
   delete data.referenceSources; delete data.itemStimulusPresent; delete data.stimulusKind;
 
