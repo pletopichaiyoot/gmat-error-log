@@ -1060,6 +1060,16 @@ async function waitForReviewFrame(page, expectedItemName, timeoutMs = 25000) {
   );
 }
 
+// Coach-readable flattening of a captured DI stimulus. stimulusText already
+// contains the stem + any chart <text> labels + table cell text (innerText of
+// the stimulus roots); sources are the MSR reference passages.
+function deriveStimulusDataText(stimulusText, sources) {
+  const parts = [];
+  if (stimulusText && stimulusText.trim()) parts.push(stimulusText.trim());
+  for (const s of sources || []) parts.push(`${s.title || ''}\n${s.text || ''}`.trim());
+  return parts.join('\n\n').trim();
+}
+
 // Read everything we want from the ITDReview frame's globals + DOM.
 //
 // StartTest's ITDReview DOM has TWO useful payloads we now exploit:
@@ -1334,6 +1344,10 @@ async function readReviewFrame(frame) {
     // MSR reference sources: titled blocks under ItemReferenceTitleText. Keep the
     // titled section HTML/text; the plain rationale (no ItemReferenceTitleText
     // sibling title) is excluded.
+    // Assumption: each ItemReferenceTitleText header sits in its own reference
+    // container distinct from the solution rationale (verified on live MSR
+    // items). If a future layout nests sources and the solution in one shared
+    // container, this closest() could pull in solution text too.
     const referenceSources = Array.from(document.querySelectorAll('h2.ItemReferenceTitleText')).map((h) => {
       const container = h.closest('.rationale, .passage-block, .ItemRationaleText') || h.parentElement;
       return { title: (h.innerText || '').trim(), html: container ? container.innerHTML : '', text: container ? (container.innerText || '').trim() : '' };
@@ -1355,7 +1369,12 @@ async function readReviewFrame(frame) {
       });
     });
     const stimulusHtmlMarked = stimulusRoots.map((el) => el.innerHTML).join('\n');
-    const stimulusKind = referenceSources.length ? 'msr' : (hasSvg && hasTable) ? 'mixed' : hasSvg ? 'graph' : hasTable ? 'table' : null;
+    const hasChart = hasSvg || itdmediaSelectors.length > 0;
+    const stimulusKind = referenceSources.length ? 'msr' : (hasChart && hasTable) ? 'mixed' : hasChart ? 'graph' : hasTable ? 'table' : null;
+    // Coach-readable dump of the stimulus roots' visible text: chart <text>
+    // labels and data-table cell text live here even though .ITSStemText (used
+    // for `stem`) doesn't capture them.
+    const stimulusText = stimulusRoots.map((el) => (el.innerText || '').trim()).filter(Boolean).join('\n\n');
 
     return {
       vItemName: window.vItemName || null,
@@ -1380,6 +1399,7 @@ async function readReviewFrame(frame) {
       choices,
       stimulusHtmlMarked,
       stimulusKind,
+      stimulusText,
       referenceSources,
       itdmediaSelectors,
       itemStimulusPresent: !!(hasSvg || hasTable || referenceSources.length || itdmediaSelectors.length),
@@ -1470,11 +1490,9 @@ async function readReviewFrame(frame) {
     const sources = (data.referenceSources || []).map((s) => ({
       title: s.title, html: sanitizeStimulusHtml(s.html), text: s.text,
     }));
-    // dataText for the coach: stem-region text + each source's text.
-    const dataText = [
-      ...(data.stem ? [data.stem] : []),
-      ...sources.map((s) => `${s.title}\n${s.text}`),
-    ].join('\n\n').trim();
+    // dataText for the coach: stimulus-root text (stem + chart labels + table
+    // cells) plus each MSR source's text.
+    const dataText = deriveStimulusDataText(data.stimulusText, sources);
     data.stimulus = safeHtml || sources.length
       ? { kind: data.stimulusKind || 'mixed', html: safeHtml, dataText, sources }
       : null;
@@ -1485,6 +1503,7 @@ async function readReviewFrame(frame) {
   // impeccable-disable broken-image
   delete data.stimulusHtmlMarked; delete data.itdmediaSelectors;
   delete data.referenceSources; delete data.itemStimulusPresent; delete data.stimulusKind;
+  delete data.stimulusText;
 
   return data;
 }
@@ -1876,6 +1895,7 @@ module.exports = {
   runPhase1,
   runPhase2,
   normalizeProductHeading,
+  deriveStimulusDataText,
   // Exposed for direct testing + for Phase 2 module to reuse navigation helpers.
   _internals: {
     goto,
