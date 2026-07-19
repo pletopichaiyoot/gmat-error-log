@@ -1030,7 +1030,7 @@ function DayCard({ day, isToday, isPast, weekOptions, onToggle, onSkip, onUpdate
   const cardStyle = {
     transform: CSS.Transform.toString(transform),
     transition,
-    opacity: isDragging ? 0.45 : 1,
+    ...(isDragging ? { opacity: 0.45 } : {}),
   };
 
   function submitAdd() {
