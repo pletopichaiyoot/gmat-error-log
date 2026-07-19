@@ -102,3 +102,20 @@ already flattens GI/TA/TPA/MSR, a single approach handles all four:
 - **Rationale/source separation** is heuristic (`ItemReferenceTitleText`); verify across a
   few MSR items during implementation.
 - **svg serialization** must inline any referenced styles/defs to stay self-contained.
+
+## As-built status (2026-07-19) — what shipped vs. known gap
+
+Verified live by enriching sessions 316 (MSR) and 314 (GI + TPA):
+
+- **GI charts — WORKS.** The chart is an `<img src="itdmedia…">`; the runner screenshots
+  it to a `data:` PNG and it renders in the stimulus block. (svgs on these pages are
+  toolbar icons, not the chart.)
+- **MSR source passages — WORKS.** Text passages render during the Phase-2 walk and are
+  captured as `sources[]`.
+- **TA / TPA data tables — KNOWN GAP, not captured.** The data table renders in the
+  ITDReview DOM only on **direct per-item navigation** (a `page.goto` of the item's review
+  URL), **not during the Phase-2 walk** (`processAction('Next')`) — in the walked flow the
+  `.passageContainer`/`.passage` stays empty. A `waitForReferenceContent` timing fix was
+  tried and reverted (the table is genuinely absent in the walk, so it only added latency).
+  **Capturing TA tables would require Phase-2 to direct-nav each item instead of the
+  Next-walk** — a larger change with more scrape footprint. Deferred by decision.
