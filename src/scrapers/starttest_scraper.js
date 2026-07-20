@@ -1377,6 +1377,15 @@ async function readReviewFrame(frame) {
     const referenceSources = Array.from(document.querySelectorAll('h2.ItemReferenceTitleText')).map((h) => {
       const container = h.closest('.rationale, .passage-block, .ItemRationaleText') || h.parentElement;
       return { title: (h.innerText || '').trim(), html: container ? container.innerHTML : '', text: container ? (container.innerText || '').trim() : '' };
+    }).filter((s) => {
+      // Drop empty "Passage:" placeholder blocks. Single-choice PS/DS/CR items
+      // carry a hidden <h2 class="ItemReferenceTitleText" style="display:none">
+      // Passage:</h2> with an EMPTY rationale body. Kept, it sets
+      // itemStimulusPresent=true and fabricates a bogus MSR stimulus that just
+      // echoes the stem ("14. … Passage:") in the review panel. A real source has
+      // body text beyond its (usually hidden) title.
+      const body = s.text.replace(s.title, '').replace(/^\s*passage\s*:?\s*/i, '').trim();
+      return body.length > 0;
     });
     const hasSvg = stimulusRoots.some((el) => el.querySelector('svg'));
     const hasTable = stimulusRoots.some((el) => el.querySelector('table.table, table[border]'));
