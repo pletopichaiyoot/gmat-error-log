@@ -272,6 +272,35 @@ AND (SELECT count(*) FROM json_array_elements(qa.answer_choices::json) e
 
 (Real example: attempt `14839` — "t = 2x + 1, in terms of t, 4x is" — has 5 choices with 3 blank; it must not go in a set.)
 
+**Never curate a "zero-width residue" row — the dropped-math fingerprint.** The most
+common OG/StartTest corruption is inline math (fractions, exponents, inequalities, coefficients)
+that came in as an image/MathML and was flattened to **zero-width characters** (U+200B/200C/200D,
+U+FEFF, U+00AD, U+2060, U+200E/200F), with **no `question_stem_html`** to render it. The stem
+then reads e.g. "produce ⟦⟧w widgets" or "If ⟦⟧, then ⟦⟧". Crucially this **defeats the
+blank-choice filter above**: `TRIM()` does not strip zero-width chars, so a choice like
+`"⟦⟧ and ⟦⟧"` (a range with the numbers dropped) survives as non-empty and passes. The bulletproof
+rule is: **reject if a zero-width char appears anywhere in the stem OR any choice text.** Add both
+clauses to the candidate query:
+
+```sql
+-- stem must have no zero-width / dropped-math residue
+AND qa.question_stem !~ E'[​‌‍﻿­⁠‎‏]'
+-- and no choice text may contain one either
+AND (SELECT count(*) FROM json_array_elements(qa.answer_choices::json) e
+     WHERE e->>'text' ~ E'[​‌‍﻿­⁠‎‏]') = 0
+-- optional: unrendered LaTeX leaked into text (GMAT Club CAT rows)
+AND qa.answer_choices NOT ILIKE '%frac{%' AND qa.question_stem NOT ILIKE '%frac{%'
+```
+
+Audit (2026-07-21): **165 distinct q_codes** carry this residue (mostly OG 2024-2025 Main/Quant/DI).
+Six that were live in set files or high-value were hand-repaired from the canonical OG wording,
+each back-checked against the stored answer key: `300263` (widgets → `5w/4`, ans E), `300247`
+(Jack → `1 1/2`, ans B), `101061` (Machine K → `1/4`, ans D), `700305` (overtime → `1 1/2`, ans A),
+`100710` (digits → `0.1X/0.02Y`, ans D), `300287` (addition puzzle — redundant figure stripped, ans E).
+The rest stay gated out (reconstructing their exact math isn't reliable — a wrong guess is worse than
+an obvious gap). `gcc-q-M39-74` (GMAT Club CAT, LaTeX leaked into stem+choices) is unrepairable and
+was removed from `quant-work-problems-01`.
+
 **Never curate a question with an incomplete stem, either.** The same corruption drops math
 or figures from the *stem*: a dropped equation-image renders as a gap ("If 4 < , which…",
 "let . If the sum…"), a "the chart/table above shows…" question loses its figure, or the whole
