@@ -16,6 +16,9 @@ const { sleep, jitter } = require('./scraper-utils');
 
 const STARTTEST_HOST_RE = /starttest\.com/i;
 const BOOK_SESSION_TABLE_SEL = 'table.PracticeSessionsTable-tbl tbody tr';
+// The table element itself, not its rows — a product with zero practice sessions
+// still renders the table, so this is what "we're on a product home" waits on.
+const BOOK_SESSION_TABLE_ROOT_SEL = 'table.PracticeSessionsTable-tbl';
 
 // Source preset → StartTest `OrderProductID`. 1:1 with the old Nuxt sources.
 // `productName` is the exact heading text StartTest shows in `h2#PgHdngPracticeDash`
@@ -280,20 +283,31 @@ async function navigateToProduct(page, productId, type = 6) {
 // products first" and force a manual Open-in-GMAT step; now enrich/scrape
 // self-navigates to the right source. Re-verifies once after navigating.
 async function ensureOnProductHome(page, preset) {
-  const readState = () => page.evaluate(() => ({
-    hasTable: !!document.querySelector('table.PracticeSessionsTable-tbl'),
+  // `goto` resolves on domcontentloaded, so the sessions table can still be a
+  // few hundred ms out when we read. Give it a bounded wait before concluding
+  // "not a product home" — otherwise a slow render either triggers a pointless
+  // re-navigation or, worse, fails the post-navigation verification below.
+  const settle = (timeoutMs) => page
+    .waitForSelector(BOOK_SESSION_TABLE_ROOT_SEL, { timeout: timeoutMs })
+    .catch(() => null);
+  const readState = () => page.evaluate((sel) => ({
+    hasTable: !!document.querySelector(sel),
     productHeading: (document.querySelector('#PgHdngPracticeDash')?.innerText || '').trim(),
-  }));
+  }), BOOK_SESSION_TABLE_ROOT_SEL);
   const matches = (state) => {
     if (!state.hasTable) return false;
     if (!preset.productName) return true;
     return normalizeProductHeading(state.productHeading)
       === normalizeProductHeading(preset.productName);
   };
+  // Short wait on the way in: a tab already parked on the right home answers
+  // immediately, and one still painting isn't misread as the wrong page.
+  await settle(3000);
   let state = await readState();
   if (matches(state)) return state;
   // Wrong product (or not a product home) — navigate to the right book, re-check.
   await navigateToProduct(page, preset.productId, preset.type || 6);
+  await settle(15000);
   state = await readState();
   if (!state.hasTable) {
     throw new ScrapeAnomalyError(
@@ -765,30 +779,17 @@ async function runPhase1({ page, options = {} }) {
     );
   }
 
-  // Trust the user's current tab. We expect them to have navigated to the right product
-  // already (manually, or via the /api/open-product helper). This gives us 0 Home navs
-  // in the scrape — every URL we go to is either Report or QHistory.
-  const pageState = await page.evaluate(() => ({
-    hasTable: !!document.querySelector('table.PracticeSessionsTable-tbl'),
-    productHeading: (document.querySelector('#PgHdngPracticeDash')?.innerText || '').trim(),
-  }));
-  if (!pageState.hasTable) {
-    throw new ScrapeAnomalyError(
-      `Tab is not on the Practice Sessions home page. Open the product's home page first (use the "Open in GMAT" button or navigate manually), then retry.`
-    );
+  // Put the tab on THIS preset's Practice Sessions home. When it's already there
+  // (the common case) this costs 0 navigations, so every URL the scrape visits is
+  // still just Report or QHistory. When it's on a different product — or not on a
+  // product home at all — we self-navigate via the product switcher instead of
+  // throwing "Switch products first" and making the user click Open in GMAT.
+  // Heading matching is exact after normalization, which disambiguates
+  // "GMAT™ Official Guide 2024-2025" from "… - Verbal".
+  if (options.onProgress) {
+    options.onProgress({ phase: 'phase1', event: 'ensure_product_home', productId: preset.productId });
   }
-  // Exact match after normalization. This disambiguates "GMAT™ Official Guide 2024-2025"
-  // from "GMAT™ Official Guide 2024-2025 - Verbal" which a loose contains-check would conflate.
-  if (preset.productName) {
-    const actual = normalizeProductHeading(pageState.productHeading);
-    const expected = normalizeProductHeading(preset.productName);
-    if (actual !== expected) {
-      throw new ScrapeAnomalyError(
-        `You selected source "${preset.label}" but the tab heading is "${pageState.productHeading}". ` +
-        `Switch products first (click "Open in GMAT" next to the source dropdown, or click the product in the GMAT menu), then retry.`
-      );
-    }
-  }
+  await ensureOnProductHome(page, preset);
 
   const sessionsOnHome = await listSessionsOnHome(page);
   const sessionSidFilter = Array.isArray(options.sessionSids) && options.sessionSids.length
