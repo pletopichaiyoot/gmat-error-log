@@ -2751,6 +2751,10 @@ th.sortable:hover {
   color: var(--ink-2);
   border: 1px solid var(--border);
   font-variant-numeric: tabular-nums;
+  /* Defensive: a mis-shaped scrape can put a whole option sentence in the
+     badge. Clip it inside the circle instead of letting it overflow the row. */
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .qr-choice-body {
@@ -6865,3 +6869,28 @@ html {
 .pattern-insight-item { display: flex; align-items: center; gap: 8px; }
 .pattern-insight-label { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-2); }
 .pattern-insight-value { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+/* Difficulty Breakdown, grouped-by-subject view.
+   A subject row is a rowgroup header: tinted, bold, with a colored left rule
+   matching the OPE scoreboard section colors. Difficulty rows below it are
+   indented so the hierarchy reads without extra nesting/borders. */
+.difficulty-subject-row {
+  --section-color: #6b5c3b;
+  --section-tint: rgba(63, 52, 32, 0.06);
+  background: var(--section-tint);
+}
+.difficulty-subject-row.section-Q  { --section-color: #4338ca; --section-tint: rgba(67, 56, 202, 0.08); }
+.difficulty-subject-row.section-V  { --section-color: #be185d; --section-tint: rgba(190, 24, 93, 0.08); }
+.difficulty-subject-row.section-DI { --section-color: #0f766e; --section-tint: rgba(15, 118, 110, 0.08); }
+
+.difficulty-subject-row > th,
+.difficulty-subject-row > td {
+  font-weight: 650;
+  color: var(--section-color);
+  text-align: left;
+}
+.difficulty-subject-row > th {
+  font-family: 'Manrope', 'Trebuchet MS', sans-serif;
+  letter-spacing: 0.01em;
+}
+.difficulty-table .difficulty-detail-row > td:first-child { padding-left: 28px; }

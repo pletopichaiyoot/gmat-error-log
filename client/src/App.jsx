@@ -691,6 +691,61 @@ function decodeFlatMatrix(choices) {
   return { colCount, rowCount, headers, rows };
 }
 
+// DI Graphics-Interpretation items scraped without response_details arrive as a
+// FLAT answer_choices array — one entry per (dropdown × option), value
+// "{dropdownNum}:{optionId}", label "dd{n}={option text}". Rendered through the
+// single-choice path each option text lands in the round "letter" badge, which
+// blows out of the circle (the same class of bug as the MSR flat-matrix one).
+// Detect the shape and regroup it into one option list per dropdown.
+// The "dd{n}=" label prefix is the reliable marker — the oldest scraped rows
+// carry no `value` field at all, only label + text.
+function isFlatDropdownChoices(choices) {
+  if (!Array.isArray(choices) || choices.length < 2) return false;
+  return choices.every((c) => /^\s*dd\d+\s*=/i.test(String(c?.label || '')));
+}
+
+// StartTest joins the per-dropdown answers into one " | "-separated string on
+// my_answer / correct_answer. Rows scraped before per-option color capture have
+// no isCorrect/isUserSelected flags at all, so fall back to matching the split
+// values positionally against each dropdown.
+function decodeFlatDropdowns(choices, correctJoined, myJoined) {
+  const list = Array.isArray(choices) ? choices : [];
+  const splitJoined = (v) => String(v || '').split('|').map((s) => normalizeQuestionText(s));
+  const correctParts = splitJoined(correctJoined);
+  const myParts = splitJoined(myJoined);
+  const anyFlagged = list.some((c) => c?.isCorrect === true || c?.isUserSelected === true);
+
+  const groups = new Map();
+  list.forEach((choice) => {
+    const label = String(choice?.label || '');
+    const fromValue = parseInt(String(choice?.value || '').split(':')[0], 10);
+    const labelMatch = label.match(/^\s*dd(\d+)\s*=/i);
+    const num = Number.isFinite(fromValue) && fromValue >= 1
+      ? fromValue
+      : (labelMatch ? Number(labelMatch[1]) : NaN);
+    if (!Number.isFinite(num) || num < 1) return;
+    const eq = label.indexOf('=');
+    const text = normalizeQuestionText(eq >= 0 ? label.slice(eq + 1) : label);
+    // "Select..." is the unselected placeholder in the dropdown, never an answer.
+    if (!text || /^select\.{0,3}$/i.test(text)) return;
+    if (!groups.has(num)) groups.set(num, []);
+    const partIndex = num - 1;
+    groups.get(num).push({
+      text,
+      isCorrect: anyFlagged
+        ? choice?.isCorrect === true
+        : normalizeQuestionText(correctParts[partIndex] || '') === text,
+      isUserSelected: anyFlagged
+        ? choice?.isUserSelected === true
+        : normalizeQuestionText(myParts[partIndex] || '') === text,
+    });
+  });
+  if (!groups.size) return null;
+  return Array.from(groups.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([num, options]) => ({ num, options }));
+}
+
 function formatResponseFormat(value) {
   const text = String(value || '').trim().toLowerCase();
   if (!text) return '';
@@ -973,6 +1028,46 @@ function normalizeSubjectFamilyDisplay(value) {
   if (normalized === 'V') return 'Verbal';
   if (normalized === 'DI') return 'Data Insights';
   return String(value || '').trim() || 'Other';
+}
+
+// Mirrors difficultyBucketExpr() in src/db.js — keep in sync. OPE rows store an
+// IRT theta string in `difficulty`; every other source stores a band label.
+const DIFFICULTY_BUCKET_ORDER = ['Hard', 'Medium', 'Easy', 'Unknown'];
+
+function difficultyBucketOf(row) {
+  const raw = String(row?.difficulty ?? '').trim();
+  if (!raw) return 'Unknown';
+  if (/^-?\.?[0-9]/.test(raw)) {
+    const theta = Number(raw);
+    if (!Number.isFinite(theta)) return 'Unknown';
+    if (theta < -0.43) return 'Easy';
+    if (theta > 0.43) return 'Hard';
+    return 'Medium';
+  }
+  return raw;
+}
+
+// Rolls a set of question rows into the same shape the server's byDifficulty
+// query returns, so both the flat and the per-subject tables render identically.
+function summarizeDifficultyRows(rows) {
+  const total = rows.length;
+  if (!total) return null;
+  const correctRows = rows.filter((r) => Number(r.correct) === 1);
+  const wrongRows = rows.filter((r) => Number(r.correct) !== 1);
+  const avg = (list) => {
+    const times = list.map((r) => Number(r.time_sec)).filter((n) => Number.isFinite(n));
+    if (!times.length) return null;
+    return Math.round(times.reduce((a, b) => a + b, 0) / times.length);
+  };
+  return {
+    total,
+    correct: correctRows.length,
+    wrong: wrongRows.length,
+    accuracy_pct: Math.round((1000 * correctRows.length) / total) / 10,
+    avg_time_sec: avg(rows),
+    avg_correct_time_sec: avg(correctRows),
+    avg_incorrect_time_sec: avg(wrongRows),
+  };
 }
 
 function truncateTableText(value, maxLength = 44) {
@@ -1463,6 +1558,8 @@ function App() {
   const [sessionAnalysisSubjectFilter, setSessionAnalysisSubjectFilter] = useState('');
   const [sessionAnalysisCategoryFilter, setSessionAnalysisCategoryFilter] = useState('');
   const [sessionAnalysisResultFilter, setSessionAnalysisResultFilter] = useState('');
+  // 'subject' = difficulty cross-tabbed per section; 'overall' = the flat server aggregate.
+  const [difficultyBreakdownView, setDifficultyBreakdownView] = useState('subject');
   const [errorSort, setErrorSort] = useState({ key: 'session_date', order: 'desc' });
   const [categoryBreakdownSort, setCategoryBreakdownSort] = useState({ key: 'subject_family', order: 'asc' });
   const [subcategoryBreakdownSort, setSubcategoryBreakdownSort] = useState({ key: 'total_questions', order: 'desc' });
@@ -2486,6 +2583,48 @@ function App() {
 
     return { examNumber, sections, suggestions };
   }, [isOpeSession, sessionAnalysis.data]);
+
+  // Difficulty × subject cross-tab for the OPE review. Computed client-side from
+  // slowWrongQuestions (already unanswered-filtered server-side, same row set the
+  // server's byDifficulty aggregate uses), so no extra API round-trip is needed.
+  const difficultyBySubject = useMemo(() => {
+    const rows = sessionAnalysis.data?.slowWrongQuestions || [];
+    if (!rows.length) return [];
+    const bySubject = new Map();
+    for (const row of rows) {
+      const code = normalizedSubjectCode(row) || 'Other';
+      if (!bySubject.has(code)) bySubject.set(code, []);
+      bySubject.get(code).push(row);
+    }
+    const subjectOrder = ['Q', 'V', 'DI'];
+    return Array.from(bySubject.entries())
+      .sort((a, b) => {
+        const ai = subjectOrder.indexOf(a[0]);
+        const bi = subjectOrder.indexOf(b[0]);
+        return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+      })
+      .map(([code, subjectRows]) => {
+        const buckets = new Map();
+        for (const row of subjectRows) {
+          const bucket = difficultyBucketOf(row);
+          if (!buckets.has(bucket)) buckets.set(bucket, []);
+          buckets.get(bucket).push(row);
+        }
+        const difficulties = Array.from(buckets.entries())
+          .sort((a, b) => {
+            const ai = DIFFICULTY_BUCKET_ORDER.indexOf(a[0]);
+            const bi = DIFFICULTY_BUCKET_ORDER.indexOf(b[0]);
+            return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+          })
+          .map(([difficulty, bucketRows]) => ({ difficulty, ...summarizeDifficultyRows(bucketRows) }));
+        return {
+          code,
+          label: normalizeSubjectFamilyDisplay(code),
+          summary: summarizeDifficultyRows(subjectRows),
+          difficulties,
+        };
+      });
+  }, [sessionAnalysis.data?.slowWrongQuestions]);
 
   // Distinct subjects present in this session's questions, used to populate the
   // subject filter dropdown (only offer subjects that actually appear, with counts).
@@ -4767,9 +4906,24 @@ function App() {
                 )}
 
                 <div className="analysis-block">
-                  <h3>Difficulty Breakdown</h3>
+                  <div className="analysis-block__head">
+                    <h3>Difficulty Breakdown</h3>
+                    {difficultyBySubject.length > 1 && (
+                      <div className="analysis-block__filters">
+                        <Select
+                          className="filter-select"
+                          value={difficultyBreakdownView}
+                          onChange={(event) => setDifficultyBreakdownView(event.target.value)}
+                          aria-label="Difficulty breakdown grouping"
+                        >
+                          <option value="subject">By subject</option>
+                          <option value="overall">Overall</option>
+                        </Select>
+                      </div>
+                    )}
+                  </div>
                   <div className="table-wrap">
-                    <table>
+                    <table className="difficulty-table">
                       <thead>
                         <tr>
                           <th>Difficulty</th>
@@ -4788,18 +4942,45 @@ function App() {
                             <td colSpan="8">No question-level data for this session.</td>
                           </tr>
                         )}
-                        {(sessionAnalysis.data.byDifficulty || []).map((row) => (
-                          <tr key={row.difficulty}>
-                            <td>{formatMaybe(row.difficulty)}</td>
-                            <td>{formatMaybe(row.total)}</td>
-                            <td>{formatMaybe(row.correct)}</td>
-                            <td>{formatMaybe(row.wrong)}</td>
-                            <td>{formatPercent(row.accuracy_pct)}</td>
-                            <td>{formatDurationSeconds(row.avg_time_sec)}</td>
-                            <td>{formatDurationSeconds(row.avg_correct_time_sec)}</td>
-                            <td>{formatDurationSeconds(row.avg_incorrect_time_sec)}</td>
-                          </tr>
-                        ))}
+                        {difficultyBreakdownView === 'subject' && difficultyBySubject.length > 1
+                          ? difficultyBySubject.map((group) => (
+                              <Fragment key={group.code}>
+                                <tr className={`difficulty-subject-row section-${group.code}`}>
+                                  <th scope="rowgroup">{group.label}</th>
+                                  <td>{formatMaybe(group.summary?.total)}</td>
+                                  <td>{formatMaybe(group.summary?.correct)}</td>
+                                  <td>{formatMaybe(group.summary?.wrong)}</td>
+                                  <td>{formatPercent(group.summary?.accuracy_pct)}</td>
+                                  <td>{formatDurationSeconds(group.summary?.avg_time_sec)}</td>
+                                  <td>{formatDurationSeconds(group.summary?.avg_correct_time_sec)}</td>
+                                  <td>{formatDurationSeconds(group.summary?.avg_incorrect_time_sec)}</td>
+                                </tr>
+                                {group.difficulties.map((row) => (
+                                  <tr key={`${group.code}-${row.difficulty}`} className="difficulty-detail-row">
+                                    <td>{formatMaybe(row.difficulty)}</td>
+                                    <td>{formatMaybe(row.total)}</td>
+                                    <td>{formatMaybe(row.correct)}</td>
+                                    <td>{formatMaybe(row.wrong)}</td>
+                                    <td>{formatPercent(row.accuracy_pct)}</td>
+                                    <td>{formatDurationSeconds(row.avg_time_sec)}</td>
+                                    <td>{formatDurationSeconds(row.avg_correct_time_sec)}</td>
+                                    <td>{formatDurationSeconds(row.avg_incorrect_time_sec)}</td>
+                                  </tr>
+                                ))}
+                              </Fragment>
+                            ))
+                          : (sessionAnalysis.data.byDifficulty || []).map((row) => (
+                              <tr key={row.difficulty}>
+                                <td>{formatMaybe(row.difficulty)}</td>
+                                <td>{formatMaybe(row.total)}</td>
+                                <td>{formatMaybe(row.correct)}</td>
+                                <td>{formatMaybe(row.wrong)}</td>
+                                <td>{formatPercent(row.accuracy_pct)}</td>
+                                <td>{formatDurationSeconds(row.avg_time_sec)}</td>
+                                <td>{formatDurationSeconds(row.avg_correct_time_sec)}</td>
+                                <td>{formatDurationSeconds(row.avg_incorrect_time_sec)}</td>
+                              </tr>
+                            ))}
                       </tbody>
                     </table>
                   </div>
@@ -5202,6 +5383,7 @@ function App() {
                     {getResponseSlots(questionReview.row).length
                       || ['matrix', 'dropdown'].includes(String(questionReview.row.response_format || '').toLowerCase())
                       || isFlatMatrixChoices(parseAnswerChoices(questionReview.row.answer_choices))
+                      || isFlatDropdownChoices(parseAnswerChoices(questionReview.row.answer_choices))
                       ? 'Your Responses'
                       : 'Answer Choices'}
                   </h3>
@@ -5367,6 +5549,56 @@ function App() {
                             })}
                           </div>
                         );
+                      }
+
+                      // GI flat-dropdown: one entry per (dropdown × option),
+                      // labelled "dd{n}={text}". Regroup into one option list per
+                      // dropdown so the option text stops being crammed into the
+                      // round letter badge.
+                      if (fmt !== 'matrix' && isFlatDropdownChoices(choices)) {
+                        const dropdowns = decodeFlatDropdowns(
+                          choices,
+                          questionReview.row.correct_answer,
+                          questionReview.row.my_answer
+                        );
+                        if (dropdowns) {
+                          return (
+                            <div className="response-slot-list">
+                              {dropdowns.map((dd) => (
+                                <article key={`dd-${dd.num}`} className="response-slot-card slot-dropdown">
+                                  <div className="response-slot-head">
+                                    <div>
+                                      <strong>{`Dropdown ${dd.num}`}</strong>
+                                      <span className="response-slot-type">Dropdown</span>
+                                    </div>
+                                  </div>
+                                  <ul className="qr-choices">
+                                    {dd.options.map((option, optionIndex) => {
+                                      const variant = option.isUserSelected && option.isCorrect ? 'right'
+                                        : option.isUserSelected ? 'wrong'
+                                        : option.isCorrect ? 'correct'
+                                        : '';
+                                      const stateLabel = option.isUserSelected && option.isCorrect ? 'Your pick · Correct'
+                                        : option.isUserSelected ? 'Your pick'
+                                        : option.isCorrect ? 'Correct answer'
+                                        : '';
+                                      return (
+                                        <li
+                                          key={`dd-${dd.num}-${optionIndex}`}
+                                          className={`qr-choice${variant ? ` qr-choice-${variant}` : ''}`}
+                                        >
+                                          <span className="qr-choice-letter">{String.fromCharCode(65 + optionIndex)}</span>
+                                          <div className="qr-choice-body"><p>{option.text}</p></div>
+                                          {stateLabel && <span className="qr-choice-state">{stateLabel}</span>}
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                </article>
+                              ))}
+                            </div>
+                          );
+                        }
                       }
 
                       // MSR flat-matrix: response_format is unset but the choices
