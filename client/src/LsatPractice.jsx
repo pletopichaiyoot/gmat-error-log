@@ -43,6 +43,71 @@ function formatRelative(iso) {
   return `${day}d ago`;
 }
 
+// ---- LR stem formatting ----------------------------------------------------
+// The PDF parser hands us Logical Reasoning stems as ONE flat blob: the
+// stimulus and the question prompt run together in a single paragraph
+// ("…packing the wound with sugar. Which one of the following, if true, …?").
+// On the real test they are visually separate, so split them here and give the
+// prompt its own line. Dialogue stimuli ("Ann: … Bill: …") also get one line
+// per speaker. RC stems are already prompt-only and are left untouched.
+
+// Sentence splitting must not break on abbreviations — "Mr. Blatt: …" and
+// "…through 6 P.M.?" both used to split mid-prompt.
+// Note: a lone capital + period ("… distinguishing X from Y.") is NOT treated as
+// an initial — LSAT stimuli end sentences on variable letters far more often than
+// they contain "J. Smith", and swallowing those merged whole stems into one line.
+const STEM_ABBREV = /\b(?:Mr|Mrs|Ms|Messrs|Dr|Prof|Sen|Rep|Gov|St|Jr|Sr|Inc|Co|Ltd|vs|etc|approx|Fig|No|Vol|e\.g|i\.e|a\.m|p\.m|A\.M|P\.M|U\.S|U\.K)\.$/;
+const STEM_SENTENCE_BREAK = /(?<=[.?!][”’"'])\s+|(?<=[.?!])\s+/;
+// A sentence that opens a dialogue turn: 1–3 capitalized words then a colon
+// ("Ann:", "Mr. Blatt:", "Council member Q:"). Periods are allowed inside the
+// label so honorifics survive the abbreviation merge above.
+const STEM_SPEAKER_START = /^[A-Z][A-Za-z’'.-]*(?:\s+[A-Za-z][A-Za-z’'.-]*){0,2}:\s/;
+
+function splitStemSentences(text) {
+  const out = [];
+  for (const part of String(text || '').split(STEM_SENTENCE_BREAK)) {
+    const prev = out.length ? out[out.length - 1] : null;
+    if (prev !== null && STEM_ABBREV.test(prev)) out[out.length - 1] = `${prev} ${part}`;
+    else out.push(part);
+  }
+  return out.map((s) => s.trim()).filter(Boolean);
+}
+
+// → { stimulus: string[] (paragraphs, possibly empty), prompt: string }
+function splitLrStem(stem) {
+  const text = String(stem || '').trim();
+  if (!text) return { stimulus: [], prompt: '' };
+  const sentences = splitStemSentences(text);
+  // The LSAT prompt is always the final sentence; everything before it is the
+  // stimulus. A one-sentence stem is a bare prompt (RC, or an LR question whose
+  // stimulus the parser dropped).
+  if (sentences.length <= 1) return { stimulus: [], prompt: text };
+  const prompt = sentences[sentences.length - 1];
+  const body = sentences.slice(0, -1);
+  // Group the stimulus into paragraphs at each speaker label. Only two or more
+  // speakers counts as a dialogue — a lone "Editorial:" stays one paragraph.
+  const turns = [];
+  let speakers = 0;
+  for (const sentence of body) {
+    if (STEM_SPEAKER_START.test(sentence)) { speakers += 1; turns.push(sentence); }
+    else if (turns.length) turns[turns.length - 1] += ` ${sentence}`;
+    else turns.push(sentence);
+  }
+  return { stimulus: speakers >= 2 ? turns : [body.join(' ')], prompt };
+}
+
+function StemBlock({ stem, split = true, className = 'lsat-st-stem' }) {
+  const { stimulus, prompt } = split ? splitLrStem(stem) : { stimulus: [], prompt: String(stem || '') };
+  return (
+    <div className={className}>
+      {stimulus.map((para, i) => (
+        <p key={i} className="lsat-st-stimulus">{para}</p>
+      ))}
+      <p className="lsat-st-prompt">{prompt}</p>
+    </div>
+  );
+}
+
 // A "set" of practice = the entire section. RC sections still contain multiple
 // passages; the SessionView swaps the displayed passage based on the current
 // question's passageIdx.
@@ -431,7 +496,7 @@ function LsatErrorLogView({ onExit, onTabChange }) {
                   </button>
                   {isOpen && e.question && (
                     <div className="lsat-err-detail">
-                      <div className="lsat-err-stem">{e.question.stem}</div>
+                      <StemBlock stem={e.question.stem} split={e.section_kind !== 'RC'} className="lsat-err-stem" />
                       <ul className="lsat-err-choices">
                         {e.question.choices.map((c) => {
                           let cls = 'lsat-err-choice';
@@ -954,7 +1019,7 @@ function SessionView({
               )
             )}
           </div>
-          <div className="lsat-st-stem">{currentQuestion.stem}</div>
+          <StemBlock stem={currentQuestion.stem} split={section.kind !== 'RC'} />
 
           <div className="lsat-st-choices" role="radiogroup" aria-label="Answer choices">
             {currentQuestion.choices.map((c) => {

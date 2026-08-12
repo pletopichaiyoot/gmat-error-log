@@ -546,6 +546,14 @@ app.get('/api/sources', (req, res) => {
   });
 });
 
+// Soft-excluded sessions (sessions.excluded, migration 0004 — currently the retired
+// pre-StartTest "GMAT Official" practice-book data) are hidden from every dashboard
+// read unless the caller opts in with ?includeExcluded=1.
+function wantsExcluded(req) {
+  const raw = String(req.query.includeExcluded ?? '').toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes';
+}
+
 app.get('/api/sessions', async (req, res) => {
   try {
     const runId = req.query.runId ? Number(req.query.runId) : null;
@@ -573,6 +581,7 @@ app.get('/api/sessions', async (req, res) => {
           subject: ['Q', 'V', 'DI'].includes(subject) ? subject : null,
           startDate,
           endDate,
+          includeExcluded: wantsExcluded(req),
         })
       : [];
     const lsatRows = includeLsat
@@ -653,6 +662,7 @@ app.get('/api/errors', async (req, res) => {
       platform: platform === 'lsat' ? null : platform,
       sortKey,
       sortOrder,
+      includeExcluded: wantsExcluded(req),
     };
 
     // GMAT subjects are Q/V/DI; LSAT subjects are RC/CR. A Q/V/DI subject filter
@@ -697,7 +707,7 @@ app.get('/api/errors', async (req, res) => {
 app.get('/api/patterns', async (req, res) => {
   try {
     const runId = req.query.runId ? Number(req.query.runId) : null;
-    const patterns = await getPatterns(runId);
+    const patterns = await getPatterns(runId, { includeExcluded: wantsExcluded(req) });
     res.json(patterns);
   } catch (error) {
     res.status(500).json({ error: error.message });

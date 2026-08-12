@@ -91,6 +91,37 @@ function detectSectionKindFromHeader(sectionLines) {
   return null;
 }
 
+// ---------- 4b. "Questions N–M" group headers ----------
+// Both Logical Reasoning and Analytical Reasoning print shared material under a
+// "Questions 15–16" header, with the stimulus BETWEEN the header and question N.
+// The per-question slicer starts at the "N." line, so that material used to be
+// dropped on the floor. Find the headers here so we can (a) re-attach the text
+// and (b) tell Logic Games apart from ordinary LR.
+const GROUP_HEADER = /^Questions\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})\s*$/;
+
+function findGroupHeaders(allLines) {
+  const headers = [];
+  for (let i = 0; i < allLines.length; i++) {
+    const m = allLines[i].trim().match(GROUP_HEADER);
+    if (!m) continue;
+    const from = parseInt(m[1], 10);
+    const to = parseInt(m[2], 10);
+    if (to <= from || to - from > 12) continue;
+    headers.push({ idx: i, from, to });
+  }
+  return headers;
+}
+
+// Analytical Reasoning (Logic Games) is structurally unmistakable: the whole
+// section is 3–4 groups of 4+ questions, each sharing one setup. Ordinary LR
+// pairs at most 2 questions per stimulus, and only for a handful of items.
+function looksLikeAnalyticalReasoning(headers, questionCount) {
+  const games = headers.filter((h) => h.to - h.from + 1 >= 4);
+  if (games.length < 2) return false;
+  const covered = games.reduce((sum, h) => sum + (h.to - h.from + 1), 0);
+  return questionCount > 0 && covered / questionCount > 0.6;
+}
+
 // ---------- 5. Parse questions in a section ----------
 function parseSectionContent(sectionText, sectionKind) {
   // Step 1: Convert form-feed page-break chars FIRST so subsequent line-level
@@ -100,7 +131,9 @@ function parseSectionContent(sectionText, sectionKind) {
   // Step 2: Strip page-noise lines that pdftotext emits between PDF pages.
   cleaned = cleaned
     .replace(/^GO ON TO THE NEXT PAGE\.?$/gm, '__PAGEBREAK__')
-    .replace(/^\d+\s*-\d+-\s*$/gm, '')
+    // Page footer, with any number of repeated section-marker digits in front:
+    // "-11-", "1 -11-", "1 1 -11-".
+    .replace(/^\s*(?:\d+\s+)*\d*\s*-\d+-\s*$/gm, '')
     .replace(/^[A-Z]\s*-\d+-\s*$/gm, '')
     .replace(/^\s*\[\s*\]\s*\d+\s*$/gm, '')
     .replace(/^PT\s+\d+\s+\d+\/\d+\/\d+.*?Page\s+\S+/gm, '')
@@ -118,11 +151,21 @@ function parseSectionContent(sectionText, sectionKind) {
 
   // Pre-process: split lines where boilerplate/directions are concatenated with a question start.
   // e.g. "DO NOT WORK ON ANY OTHER SECTION IN THE TEST. 1. It is..." -> two lines.
-  cleaned = cleaned.replace(/([a-z\.\)])\s*(\d{1,2}\.\s+[A-Z])/g, '$1\n$2');
+  // The `(?<!\d)` guard keeps decimals intact: "barite, a very heavy mineral of
+  // density 4.3 to 4.6. It is also used…" must NOT be cut into a bogus "6. It is
+  // also used…" question start, which swallowed a whole RC passage into PT54 SI Q6.
+  cleaned = cleaned.replace(/(?<!\d)([a-z.)])\s*(\d{1,2}\.\s+[A-Z])/g, '$1\n$2');
 
   // Pre-process: split lines where a question-start is concatenated to a footer or end-of-prior-question text.
   // e.g. "A A A A A -16- 19. It is unlikely..." -> "-16-" and "19. It is unlikely..."
   cleaned = cleaned.replace(/(-\d+-)\s*(\d{1,2}\.\s+[A-Z])/g, '$1\n$2');
+
+  // Pre-process: drop the section-number page marker that pdftotext sometimes
+  // glues to the front of a question line — "1 7. In 1955, legislation…". The
+  // `^N.` detector below would miss it, and the question would be swallowed into
+  // its predecessor (this cost PT55 SI seven questions). The trailing space in
+  // `\d\s+` is what keeps a real "10." from matching.
+  cleaned = cleaned.replace(/^(?:\d\s+)+(\d{1,2}\.\s+[A-Z])/gm, '$1');
 
   // Pre-process: split TOC lines that are concatenated with passage start.
   // e.g. "Logical Reasoning . . . SECTION IVFor the poet..." -> separate lines.
@@ -131,35 +174,65 @@ function parseSectionContent(sectionText, sectionKind) {
   const all = cleaned.split('\n');
 
   // Find question-start lines: "N. text..."
+  // Each line can have more than one plausible reading, because pdftotext glues
+  // the per-page section marker onto the number with no space: "115. Zack's
+  // Coffeehouse…" is marker 1 + question 15, not question 115. We offer both
+  // readings and let the sequencer below keep whichever continues the run.
   const candidates = [];
   for (let i = 0; i < all.length; i++) {
-    const m = all[i].match(/^(\d{1,2})\.\s+(.+)/);
+    const m = all[i].match(/^(\d{1,3})\.\s+(.+)/);
     if (!m) continue;
-    const n = parseInt(m[1], 10);
-    if (n < 1 || n > 35) continue;
     // Sanity check: rest of line should look like a question stem (not just "C" or "B" alone)
     const rest = m[2].trim();
     if (rest.length < 5) continue;
     // Reject lines like "1. C" or "1. B" (those are answer-key lines)
     if (/^[A-E]\s*$/.test(rest)) continue;
-    candidates.push({ idx: i, n });
+    const digits = m[1];
+    const readings = [];
+    const asIs = parseInt(digits, 10);
+    if (asIs >= 1 && asIs <= 35) readings.push({ n: asIs, strip: 0 });
+    if (digits.length >= 2) {
+      const stripped = parseInt(digits.slice(1), 10);
+      // A stripped reading must be a plausible section marker (1–4) up front.
+      if (stripped >= 1 && stripped <= 35 && Number(digits[0]) >= 1 && Number(digits[0]) <= 4) {
+        readings.push({ n: stripped, strip: 1 });
+      }
+    }
+    if (readings.length) candidates.push({ idx: i, readings });
   }
 
   // Greedily build a monotonically-increasing question sequence starting at 1
   const qs = [];
   for (const c of candidates) {
-    if (qs.length === 0) {
-      if (c.n === 1) qs.push(c);
-      continue;
-    }
-    const last = qs[qs.length - 1].n;
-    if (c.n === last + 1) {
-      qs.push(c);
-    } else if (c.n > last && c.n <= last + 3) {
-      // tolerate small skips (broken parsing of intervening question)
-      qs.push(c);
+    const last = qs.length ? qs[qs.length - 1].n : 0;
+    // Prefer the reading that continues the run exactly; fall back to a small
+    // forward skip (a question whose own line we failed to parse).
+    const pick = c.readings.find((r) => r.n === last + 1)
+      || (qs.length ? c.readings.find((r) => r.n > last && r.n <= last + 3) : null);
+    if (pick) {
+      qs.push({ idx: c.idx, n: pick.n, strip: pick.strip });
     }
     // else: ignore (likely false match within passage text or far away)
+  }
+
+  // Shared stimuli. A "Questions N–M" header is followed by material that
+  // belongs to every question in [N, M] but physically sits above question N's
+  // number line — so slice it out here and hand it to each of them.
+  const groupHeaders = findGroupHeaders(all);
+  const qIdxByNumber = new Map(qs.map((q) => [q.n, q.idx]));
+  const sharedStimulus = new Map();
+  for (const h of groupHeaders) {
+    const stopAt = qIdxByNumber.get(h.from);
+    if (stopAt == null || stopAt <= h.idx) continue;
+    const body = all
+      .slice(h.idx + 1, stopAt)
+      .map((ln) => ln.trim())
+      .filter((ln) => ln && ln !== '__PAGEBREAK__' && !/^STOP/.test(ln) && !/^\(?[A-E]\)?\s*$/.test(ln))
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (body.length < 40) continue;
+    for (let n = h.from; n <= h.to; n++) sharedStimulus.set(n, restoreSpacing(body));
   }
 
   // Stem-to-passage: lines BEFORE qs[0] are passage + section header.
@@ -280,6 +353,8 @@ function parseSectionContent(sectionText, sectionKind) {
     const end = qi + 1 < qs.length ? qs[qi + 1].idx : all.length;
     const qLines = all.slice(start, end);
 
+    // Drop the glued section marker before reading the question number.
+    if (qs[qi].strip) qLines[0] = qLines[0].slice(qs[qi].strip);
     const firstMatch = qLines[0].match(/^(\d{1,2})\.\s+(.+)/);
     if (!firstMatch) continue;
     const number = parseInt(firstMatch[1], 10);
@@ -349,9 +424,13 @@ function parseSectionContent(sectionText, sectionKind) {
     flush();
 
     if (choices.length >= 2) {
+      // Re-attach the group's shared stimulus ahead of this question's own text.
+      // RC keeps its stimulus in the passage pane, so it is exempt.
+      const shared = sectionKind === 'RC' ? null : sharedStimulus.get(number);
+      const fullStem = shared ? `${shared} ${restoreSpacing(stem)}`.trim() : restoreSpacing(stem);
       questions.push({
         number,
-        stem: restoreSpacing(stem),
+        stem: fullStem,
         choices: choices.map(c => ({ ...c, text: restoreSpacing(c.text) })),
       });
     }
@@ -390,7 +469,7 @@ function parseSectionContent(sectionText, sectionKind) {
     }
   }
 
-  return { passage: passageText, passages, questions };
+  return { passage: passageText, passages, questions, groupHeaders };
 }
 
 // Reflow a multi-line raw passage chunk into clean paragraphs (used for tail prose
@@ -422,16 +501,45 @@ function restoreSpacing(s) {
   return s
     .replace(/([a-z0-9])([,;:])([A-Za-z])/g, '$1$2 $3')
     .replace(/([a-z])\.([A-Z][a-z])/g, '$1. $2')
-    .replace(/(\w)([—–])(\w)/g, '$1$2 $3');
+    .replace(/(\w)([—–])(\w)/g, '$1$2 $3')
+    // A page footer that pdftotext ran onto the end of the last line rather than
+    // emitting standalone, so the line-level strippers above never saw it:
+    // "… examiners -5- 1", "… assumptions 1 --0-", "… paper will decrease. [] -3- 1".
+    .replace(/\s*(?:\[\s*\]\s*)?(?:\d+\s+)?-{1,2}\d{1,3}-{1,2}(?:\s+\d+)?\s*$/, '')
+    .trim();
 }
 
 // ---------- 6. Parse answer key ----------
-function parseAnswerKey(testLines) {
+// The PDF prints answer keys in TWO different layouts, and assuming the first
+// one silently mis-assigns every key in the second (see the `contiguous` branch
+// below). Both are detected from the shape of the number runs:
+//
+//   banded (PT1–59)      7,7,7,14,7,7,14,…   bands of 7 read column-major across
+//                                            the four sections
+//   contiguous (PT60–66) 27,25,23,26         each section's key printed whole,
+//                                            one after another, usually under a
+//                                            "Section II" header
+const ROMANS = ['I', 'II', 'III', 'IV', 'V'];
+
+// `counts` (optional) maps roman -> question count for EVERY section of the test,
+// including Analytical Reasoning sections we later discard — they still occupy a
+// slot in the printed key, so leaving them out would shift everything after them.
+function parseAnswerKey(testLines, counts) {
   const answerLines = [];
+  const sectionHeaders = [];
   for (let i = 0; i < testLines.length; i++) {
     // accept "1. C" and also "1. c" (some keys are lowercase due to OCR-like noise)
     const m = testLines[i].match(/^(\d{1,2})\.\s+([A-Ea-e])\s*$/);
     if (m) answerLines.push({ idx: i, n: parseInt(m[1], 10), letter: m[2].toUpperCase() });
+    // "9. *" — "Item removed from scoring". It has no letter but it DOES occupy a
+    // slot in the printed key, so it has to be kept or every later key in the
+    // section shifts up by one.
+    const v = testLines[i].match(/^(\d{1,2})\.\s+\*\s*$/);
+    if (v) answerLines.push({ idx: i, n: parseInt(v[1], 10), letter: null });
+    // "SECTION III" / "Section III" on its own line. The scoring worksheet's
+    // "SECTION I . . . . ." never matches because of the trailing dots.
+    const h = testLines[i].trim().match(/^SECTION\s+(I{1,3}V?|IV|V)\s*$/i);
+    if (h) sectionHeaders.push({ idx: i, roman: h[1].toUpperCase() });
   }
   if (!answerLines.length) return null;
 
@@ -467,7 +575,33 @@ function parseAnswerKey(testLines) {
   }
   if (curG.length) rawGroups.push(curG);
 
-  // PDF answer-key layout: 4 sections × N columns, read column-major.
+  // ---- Layout A: contiguous, one whole section per run (PT60–66) ----
+  // A run as long as a whole section (>=19) can only be a full section key, never
+  // a band of 7. Feeding these to the banded logic below shreds them and assigns
+  // section IV's letters to section I — the keys come out WRONG, not just sparse.
+  if (rawGroups.filter((g) => g.length >= 19).length >= 3) {
+    // Re-join fragments: a new section begins only where the numbering restarts
+    // at 1. (PT60 section I breaks at its void "19. *" entry.)
+    const perSection = [];
+    for (const g of rawGroups) {
+      if (!perSection.length || g[0].n === 1) perSection.push([...g]);
+      else perSection[perSection.length - 1].push(...g);
+    }
+    const key = {};
+    perSection.forEach((entries, i) => {
+      // Prefer an explicit "Section N" header immediately above the run; fall
+      // back to position, which matches on the tests that print no headers.
+      const header = sectionHeaders.filter((h) => h.idx < entries[0].idx && entries[0].idx - h.idx <= 3).pop();
+      const roman = header ? header.roman : ROMANS[i];
+      if (!roman) return;
+      const merged = {};
+      for (const al of entries) if (al.letter) merged[al.n] = al.letter;
+      key[roman] = merged;
+    });
+    return key;
+  }
+
+  // ---- Layout B: banded, 4 sections × N columns, read column-major ----
   // Sequence: S1col0, S2col0, S3col0, S4col0, S1col1, S2col1, S3col1, S4col1, ...
   // Within S(k)col(c) → S(k+1)col(c) the question numbers reset (e.g. 7→1) — clean split.
   // BUT S4col(c) → S1col(c+1) is consecutive (e.g. 7→8) so two groups get merged.
@@ -484,6 +618,36 @@ function parseAnswerKey(testLines) {
     }
   }
 
+  // Exact banded assignment, when we know how many questions each section has.
+  // The printed order is fully determined: band 0 = section I's Q1–7, section
+  // II's Q1–7, …; band 1 = each section's Q8–14; and so on, with the final band
+  // ragged because sections differ in length. Generating that expected number
+  // sequence and zipping it against the block is self-checking — if the lengths
+  // disagree we learned nothing and fall through to the old heuristic.
+  const assignBandedExact = () => {
+    if (!counts) return null;
+    const romans = ROMANS.filter((r) => counts[r] > 0);
+    if (romans.length < 3) return null;
+    const bandSize = rawGroups[0] ? rawGroups[0].length : 7;
+    if (bandSize < 5 || bandSize > 10) return null;
+    const maxQ = Math.max(...romans.map((r) => counts[r]));
+    const expected = [];
+    for (let start = 1; start <= maxQ; start += bandSize) {
+      for (const r of romans) {
+        for (let n = start; n < start + bandSize && n <= counts[r]; n++) expected.push({ roman: r, n });
+      }
+    }
+    if (expected.length !== block.length) return null;
+    // Every printed number must land on the number the layout predicts.
+    for (let i = 0; i < expected.length; i++) if (expected[i].n !== block[i].n) return null;
+    const key = {};
+    for (const r of romans) key[r] = {};
+    expected.forEach((e, i) => { if (block[i].letter) key[e.roman][e.n] = block[i].letter; });
+    return key;
+  };
+  const exact = assignBandedExact();
+  if (exact) return exact;
+
   const tryAssign = (sectionCount) => {
     if (groups.length % sectionCount !== 0) return null;
     const numCols = Math.floor(groups.length / sectionCount);
@@ -494,7 +658,7 @@ function parseAnswerKey(testLines) {
       for (let c = 0; c < numCols; c++) {
         const grp = groups[c * sectionCount + s];
         if (!grp) continue;
-        for (const al of grp) merged[al.n] = al.letter;
+        for (const al of grp) if (al.letter) merged[al.n] = al.letter;
       }
       key[roman] = merged;
     }
@@ -507,6 +671,7 @@ function parseAnswerKey(testLines) {
 // ---------- Main ----------
 const out = { tests: [] };
 const skipped = [];
+const droppedAr = [];
 
 for (let ti = 0; ti < tests.length; ti++) {
   const t = tests[ti];
@@ -514,7 +679,6 @@ for (let ti = 0; ti < tests.length; ti++) {
   try {
     const sectionTypes = findSectionTypes(tLines);
     const stopIdxs = findSections(tLines);
-    const answerKey = parseAnswerKey(tLines);
 
     if (stopIdxs.length < 3) {
       skipped.push({ num: t.num, reason: `only ${stopIdxs.length} STOP markers` });
@@ -539,7 +703,10 @@ for (let ti = 0; ti < tests.length; ti++) {
       prevEnd = sectionEnds[si] + 1;
     }
 
-    const sections = [];
+    // Pass 1: parse every section, INCLUDING Analytical Reasoning. AR sections are
+    // discarded from the output but still occupy a slot in the printed answer key,
+    // so the key parser needs their question counts to align the banded layout.
+    const parsedSections = [];
     for (let si = 0; si < sectionRegions.length; si++) {
       const r = sectionRegions[si];
       const secLines = tLines.slice(r.start, r.end);
@@ -551,24 +718,39 @@ for (let ti = 0; ti < tests.length; ti++) {
         // fallback: try to infer from question count or content
         kind = 'LR'; // assume LR if unknown
       }
+      if (kind !== 'RC' && kind !== 'LR' && kind !== 'AR') continue;
 
-      // We only want RC and LR
-      if (kind !== 'RC' && kind !== 'LR') continue;
+      const parsed = parseSectionContent(secLines.join('\n'), kind);
 
-      const secText = secLines.join('\n');
-      const parsed = parseSectionContent(secText, kind);
+      // Analytical Reasoning (Logic Games) sections have no cover-page TOC entry
+      // in some printings, so they used to fall through the `kind = 'LR'` default
+      // and pollute the LR pool. Catch them structurally: games left the LSAT in
+      // 2024 and have no GMAT analogue, so they are dropped below — after their
+      // question count has been handed to the key parser.
+      if (kind === 'LR' && looksLikeAnalyticalReasoning(parsed.groupHeaders || [], parsed.questions.length)) {
+        kind = 'AR';
+      }
+      parsedSections.push({ roman, kind, parsed });
+    }
+
+    const counts = {};
+    for (const ps of parsedSections) counts[ps.roman] = ps.parsed.questions.length;
+    const answerKey = parseAnswerKey(tLines, counts);
+
+    // Pass 2: attach keys and drop the AR sections.
+    const sections = [];
+    for (const { roman, kind, parsed } of parsedSections) {
+      if (kind === 'AR') {
+        droppedAr.push(`PT${t.num} S${roman} (${parsed.questions.length} Qs)`);
+        continue;
+      }
       const keys = (answerKey && answerKey[roman]) || {};
-      const questionsWithKeys = parsed.questions.map(q => ({
-        ...q,
-        correct: keys[q.number] || null,
-      }));
-
       sections.push({
         roman,
         kind,
         passage: parsed.passage,
         passages: parsed.passages || [],
-        questions: questionsWithKeys,
+        questions: parsed.questions.map((q) => ({ ...q, correct: keys[q.number] || null })),
       });
     }
 
@@ -610,6 +792,9 @@ for (const t of out.tests) {
 console.log(`Parsed ${out.tests.length} tests, ${totalQ} questions (RC ${totalRC}, LR ${totalLR}), ${totalWithAnswer} with answer keys`);
 console.log(`Skipped ${skipped.length} tests:`);
 skipped.slice(0, 20).forEach(s => console.log(`  - PrepTest ${s.num}: ${s.reason}`));
+if (droppedAr.length) {
+  console.log(`Dropped ${droppedAr.length} Analytical Reasoning (Logic Games) sections: ${droppedAr.join(', ')}`);
+}
 
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, JSON.stringify(out, null, 2));

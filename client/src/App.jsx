@@ -1122,17 +1122,47 @@ function getSourcePlatform(sourceLabel) {
   return 'starttest';
 }
 
+// Compact per-book label so the seven StartTest sources (and the six OPE mocks,
+// and TTP's three section trackers) stay distinguishable instead of collapsing
+// into one "Official Guide" chip. Falls back to the platform name.
+function shortSourceLabel(source, platform) {
+  const raw = String(source || '').replace(/GMAT\s*(™|®)?\s*/i, '').trim();
+  const section = (text) =>
+    /verbal/i.test(text) ? 'Verbal' :
+    /quant/i.test(text) ? 'Quant' :
+    /data\s*insights?|\bDI\b/i.test(text) ? 'DI' :
+    null;
+
+  if (platform === 'starttest') {
+    if (/official\s*guide/i.test(raw)) {
+      const sec = section(raw.replace(/official\s*guide/i, ''));
+      return sec ? `OG ${sec}` : 'OG Main';
+    }
+    if (/official\s*practice/i.test(raw)) {
+      const sec = section(raw.replace(/official\s*practice/i, ''));
+      return sec ? `Focus ${sec}` : 'Focus Practice';
+    }
+    return raw || 'Official Guide';
+  }
+  if (platform === 'ope-mock') {
+    const num = raw.match(/exam\s*#?\s*(\d+)/i);
+    return num ? `Practice Exam ${num[1]}` : 'Practice Exam';
+  }
+  if (platform === 'ttp') {
+    const sec = section(raw);
+    return sec ? `TTP ${sec}` : 'Target Test Prep';
+  }
+  if (platform === 'lsat') return 'LSAT';
+  if (platform === 'ai-curated') return 'AI Curated';
+  if (platform === 'gmatclub-cat') return 'GMAT Club CAT';
+  if (platform === 'gmatclub') return 'GMAT Club';
+  return raw || null;
+}
+
 function SourceBadge({ source }) {
   const platform = getSourcePlatform(source);
   if (!platform) return <span className="muted">-</span>;
-  const label =
-    platform === 'lsat' ? 'LSAT' :
-    platform === 'ai-curated' ? 'AI Curated' :
-    platform === 'gmatclub-cat' ? 'GMAT Club CAT' :
-    platform === 'gmatclub' ? 'GMAT Club' :
-    platform === 'ttp' ? 'Target Test Prep' :
-    platform === 'ope-mock' ? 'Practice Exam' :
-    'Official Guide';
+  const label = shortSourceLabel(source, platform);
   return (
     <span className={`source-chip source-${platform}`} title={source || ''}>
       {label}
@@ -1551,6 +1581,15 @@ function App() {
     row: null,
   });
   const [openingQuestionKey, setOpeningQuestionKey] = useState('');
+  // Legacy = the retired pre-StartTest "GMAT Official" practice-book scrape
+  // (sessions.excluded = 1 server-side). Hidden by default across every view;
+  // the toggle re-requests with includeExcluded=1. Persisted so a reload keeps it.
+  const [showLegacyData, setShowLegacyData] = useState(
+    () => {
+      try { return window.localStorage.getItem('gmat.showLegacyData') === '1'; }
+      catch { return false; }
+    }
+  );
   const [sessionSubjectFilter, setSessionSubjectFilter] = useState('');
   const [sessionPlatformFilter, setSessionPlatformFilter] = useState('');
   const [sessionSort, setSessionSort] = useState({ key: 'session_date', order: 'desc' });
@@ -1581,6 +1620,13 @@ function App() {
   const [chatSessions, setChatSessions] = useState([]);
   const [showSessionList, setShowSessionList] = useState(false);
   const aiChatEndRef = useRef(null);
+  // Message-history navigator: null = pinned to the newest message ("current"),
+  // otherwise the index into aiMessages the user has stepped back to.
+  const [chatNavIndex, setChatNavIndex] = useState(null);
+  const coachLogRef = useRef(null);
+  const aiMessageRefs = useRef([]);
+  // Guards the showLegacyData effect so it doesn't double-load during boot.
+  const hasBootedRef = useRef(false);
 
   const [showDifficultyCols, setShowDifficultyCols] = useState(false);
   const [showSessionDifficultyCols, setShowSessionDifficultyCols] = useState(false);
@@ -1713,8 +1759,11 @@ function App() {
       loadSessions(1, runId),
       loadErrors(1, runId),
       (async () => {
-        const runQuery = runId ? `?runId=${runId}` : '';
-        const patternsRes = await fetchJson(`/api/patterns${runQuery}`);
+        const patternParams = new URLSearchParams();
+        if (runId) patternParams.set('runId', runId);
+        if (showLegacyData) patternParams.set('includeExcluded', '1');
+        const patternQuery = patternParams.toString();
+        const patternsRes = await fetchJson(`/api/patterns${patternQuery ? `?${patternQuery}` : ''}`);
         setPatterns({
           bySubject: patternsRes.bySubject || [],
           byDifficulty: patternsRes.byDifficulty || [],
@@ -1742,6 +1791,7 @@ function App() {
     if (subject) params.set('subject', subject);
     if (dateRange?.start) params.set('startDate', dateRange.start);
     if (dateRange?.end) params.set('endDate', dateRange.end);
+    if (showLegacyData) params.set('includeExcluded', '1');
     const data = await fetchJson(`/api/sessions?${params.toString()}`);
     setSessions(data.sessions || []);
     setSessionPagination({
@@ -1766,6 +1816,7 @@ function App() {
     if (customFilters.platform) params.set('platform', customFilters.platform);
     params.set('sortKey', customSort.key);
     params.set('sortOrder', customSort.order);
+    if (showLegacyData) params.set('includeExcluded', '1');
 
     const data = await fetchJson(`/api/errors?${params.toString()}`);
     const rows = Array.isArray(data.errors) ? data.errors : [];
@@ -1793,6 +1844,7 @@ function App() {
       setStatus({ message: formatRequestError(error), isError: true });
     } finally {
       setIsDashboardLoading(false);
+      hasBootedRef.current = true;
     }
   }
 
@@ -1845,7 +1897,47 @@ function App() {
     // container's own scrollTop keeps the chat pinned to the bottom without moving the page.
     const log = aiChatEndRef.current?.closest('.coach-chat-log');
     if (log) log.scrollTo({ top: log.scrollHeight, behavior: 'smooth' });
+    // A new message always snaps the navigator back to "current".
+    setChatNavIndex(null);
   }, [aiMessages, isAskingAi]);
+
+  // --- Coach chat message-history navigator -------------------------------
+  // Same rationale as the auto-scroll above: never use scrollIntoView() here,
+  // it would drag the whole page. Scroll the log's own scrollTop instead.
+  function scrollCoachLogToMessage(idx) {
+    const log = coachLogRef.current;
+    const el = aiMessageRefs.current[idx];
+    if (!log || !el) return;
+    const top = el.getBoundingClientRect().top
+      - log.getBoundingClientRect().top
+      + log.scrollTop
+      - 8;
+    log.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+  }
+
+  function handleChatNavPrev() {
+    const total = aiMessages.length;
+    if (!total) return;
+    // From "current", the first Prev lands on the last message.
+    const from = chatNavIndex === null ? total : chatNavIndex;
+    const next = Math.max(0, from - 1);
+    setChatNavIndex(next);
+    scrollCoachLogToMessage(next);
+  }
+
+  function handleChatNavNext() {
+    const total = aiMessages.length;
+    if (chatNavIndex === null || chatNavIndex >= total - 1) return;
+    const next = chatNavIndex + 1;
+    setChatNavIndex(next);
+    scrollCoachLogToMessage(next);
+  }
+
+  function handleChatNavReturn() {
+    setChatNavIndex(null);
+    const log = coachLogRef.current;
+    if (log) log.scrollTo({ top: log.scrollHeight, behavior: 'smooth' });
+  }
 
   // Auto-apply error log filters on change (debounced for search input)
   useEffect(() => {
@@ -1854,6 +1946,15 @@ function App() {
     }, filters.search ? 350 : 0);
     return () => clearTimeout(id);
   }, [filters.subject, filters.difficulty, filters.confidence, filters.search, filters.mistakeTag, filters.topic, filters.platform]);
+
+  // Legacy toggle changes the row set for sessions, error log, AND patterns, so
+  // it re-runs the whole dashboard load rather than just the sessions list.
+  useEffect(() => {
+    try { window.localStorage.setItem('gmat.showLegacyData', showLegacyData ? '1' : '0'); } catch { /* private mode */ }
+    if (!hasBootedRef.current) return;
+    loadDashboard(selectedRunId).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showLegacyData]);
 
   // Reload sessions list when any server-side filter changes — resets to page 1
   // so pagination totals stay in sync with what's rendered.
@@ -2787,10 +2888,15 @@ function App() {
       if (valA < valB) return order === 'asc' ? -1 : 1;
       if (valA > valB) return order === 'asc' ? 1 : -1;
 
-      // Deterministic tie-break: most-recently-recorded first, then id.
+      // Deterministic tie-break: most-recently-recorded first, then the platform's
+      // own session id (monotonic for StartTest/OPE, so an exact created_at tie —
+      // same scrape batch — resolves to true practice order), then row id.
       const tA = a.created_at ? new Date(a.created_at).getTime() : 0;
       const tB = b.created_at ? new Date(b.created_at).getTime() : 0;
       if (tA !== tB) return order === 'asc' ? tA - tB : tB - tA;
+      const sidA = Number(a.session_external_id) || 0;
+      const sidB = Number(b.session_external_id) || 0;
+      if (sidA !== sidB) return order === 'asc' ? sidA - sidB : sidB - sidA;
       const idA = Number(a.id) || 0;
       const idB = Number(b.id) || 0;
       return order === 'asc' ? idA - idB : idB - idA;
@@ -3344,6 +3450,18 @@ function App() {
           )}
         </div>
         <div className="top-bar-actions">
+          {/* Global scope switch: legacy rows are hidden from sessions, error log,
+              and pattern analysis at once, so it lives here rather than in one
+              table's filter row. */}
+          <button
+            type="button"
+            className={`legacy-toggle ${showLegacyData ? 'legacy-toggle--active' : ''}`}
+            onClick={() => setShowLegacyData((v) => !v)}
+            aria-pressed={showLegacyData}
+            title="Pre-StartTest GMAT Official practice data (retired scraper). Hidden by default across sessions, error log, and pattern analysis."
+          >
+            {showLegacyData ? 'Hide' : 'Show'} Legacy Data
+          </button>
           <Button size="sm" type="button" onClick={() => setSyncCenterOpen(true)}>
             Sync Practice
           </Button>
@@ -3499,9 +3617,48 @@ function App() {
         <div className="coach-panel-body">
           {coachTab === 'chat' && (
             <>
-              <div className="coach-chat-log" role="log" aria-live="polite">
+              {aiMessages.length > 3 && (
+                <div className="coach-chat-nav" role="group" aria-label="Message history">
+                  <button
+                    type="button"
+                    className="coach-chat-nav-btn"
+                    onClick={handleChatNavPrev}
+                    disabled={chatNavIndex === 0}
+                    aria-label="Previous message"
+                    title="Previous message"
+                  >
+                    {'↑'} Prev
+                  </button>
+                  <button
+                    type="button"
+                    className="coach-chat-nav-btn"
+                    onClick={handleChatNavNext}
+                    disabled={chatNavIndex === null || chatNavIndex >= aiMessages.length - 1}
+                    aria-label="Next message"
+                    title="Next message"
+                  >
+                    Next {'↓'}
+                  </button>
+                  <span className="coach-chat-nav-status" aria-live="polite">
+                    {chatNavIndex === null ? 'Latest' : `${chatNavIndex + 1} / ${aiMessages.length}`}
+                  </span>
+                  <button
+                    type="button"
+                    className="coach-chat-nav-return"
+                    onClick={handleChatNavReturn}
+                    disabled={chatNavIndex === null}
+                  >
+                    Return to current
+                  </button>
+                </div>
+              )}
+              <div className="coach-chat-log" role="log" aria-live="polite" ref={coachLogRef}>
                 {aiMessages.map((message, idx) => (
-                  <article key={`ai-${idx}`} className={`ai-message ${message.role === 'assistant' ? 'assistant' : 'user'}`}>
+                  <article
+                    key={`ai-${idx}`}
+                    ref={(el) => { aiMessageRefs.current[idx] = el; }}
+                    className={`ai-message ${message.role === 'assistant' ? 'assistant' : 'user'} ${chatNavIndex === idx ? 'ai-message--focused' : ''}`}
+                  >
                     <strong>{message.role === 'assistant' ? 'Coach' : 'You'}</strong>
                     <p>{message.content}</p>
                   </article>

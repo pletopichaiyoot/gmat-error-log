@@ -1125,13 +1125,17 @@ function hash53(input) {
 
 // Curation helper: gradeable redo candidates for Claude Cowork to pick from.
 // subject is a subject_code ('Q'|'V'|'DI') or falsy for all. wrongOnly defaults true.
-async function listAiPracticeCandidates({ subject = '', wrongOnly = true, limit = 40 } = {}) {
+async function listAiPracticeCandidates({ subject = '', wrongOnly = true, limit = 40, includeExcluded = false } = {}) {
   const conds = [
     "qa.question_stem IS NOT NULL AND length(qa.question_stem) > 10",
     "qa.answer_choices IS NOT NULL AND qa.answer_choices NOT IN ('', '[]')",
     "qa.correct_answer IS NOT NULL AND qa.correct_answer <> ''",
     "LOWER(COALESCE(s.source, '')) NOT LIKE '%ai curated%'",
   ];
+  // Soft-excluded sessions don't surface as redo candidates. resolveAiPracticeSetItems
+  // is deliberately NOT filtered — sets already curated from those rows keep serving.
+  const excludedClause = excludedSessionClause('s', includeExcluded);
+  if (excludedClause) conds.push(excludedClause);
   const params = [];
   if (wrongOnly) conds.push('qa.correct = 0');
   if (subject) { conds.push('qa.subject_code = ?'); params.push(subject); }
@@ -1315,6 +1319,23 @@ function platformWhereClause(platform, alias = 's') {
   return null;
 }
 
+// Soft-exclusion (sessions.excluded, migration 0004): rows stay in the DB but
+// drop out of every dashboard read unless the caller opts back in. Currently
+// carries the retired pre-StartTest "GMAT Official" practice-book data.
+//
+// Two shapes because some queries have `sessions` joined and some only have
+// `question_attempts`; the subquery form avoids forcing a join for the sake of
+// one flag (sessions is a few hundred rows).
+function excludedSessionClause(alias = 's', includeExcluded = false) {
+  if (includeExcluded) return null;
+  return `COALESCE(${alias ? `${alias}.excluded` : 'excluded'}, 0) = 0`;
+}
+
+function excludedAttemptClause(alias = 'q', includeExcluded = false) {
+  if (includeExcluded) return null;
+  return `${alias}.session_id NOT IN (SELECT id FROM sessions WHERE COALESCE(excluded, 0) = 1)`;
+}
+
 // Buckets the `difficulty` text column into Easy/Medium/Hard. OPE rows are
 // already pre-labeled by recomputeIrtCutoffs() (empirical per-section/per-DI-
 // topic terciles of the seen theta distribution), so they hit the ELSE branch
@@ -1347,13 +1368,15 @@ function subjectNormalizationExpr(prefix) {
   END`;
 }
 
-async function listSessions(runId, { limit, offset, platform, subject, startDate, endDate } = {}) {
+async function listSessions(runId, { limit, offset, platform, subject, startDate, endDate, includeExcluded = false } = {}) {
   const params = [];
   const conditions = [];
   if (runId) {
     conditions.push('s.run_id = ?');
     params.push(runId);
   }
+  const excludedClause = excludedSessionClause('s', includeExcluded);
+  if (excludedClause) conditions.push(excludedClause);
   const platformClause = platformWhereClause(platform);
   if (platformClause) conditions.push(platformClause);
   if (subject) {
@@ -1527,21 +1550,29 @@ async function listSessions(runId, { limit, offset, platform, subject, startDate
       ${whereClause}
       GROUP BY s.id
       -- Date is the primary key; within a day, created_at (scrape/record time, the
-      -- only real timestamp we capture — platforms give date-only) then id break ties.
-      ORDER BY s.session_date DESC NULLS LAST, s.created_at DESC, s.id DESC
+      -- only real timestamp we capture — platforms give date-only) breaks ties.
+      -- Rows scraped in one batch share created_at to the microsecond, so the next
+      -- key is session_external_id: for StartTest/OPE that's the platform's own
+      -- monotonically-increasing session id, i.e. true practice order. Safe to
+      -- compare only because an exact created_at tie implies the same platform
+      -- (hash-based sids from GMAT Club / TTP never sort against StartTest sids).
+      ORDER BY s.session_date DESC NULLS LAST, s.created_at DESC,
+               s.session_external_id DESC, s.id DESC
       ${limitClause}
     `,
     params
   );
 }
 
-async function countSessions(runId, { platform, subject, startDate, endDate } = {}) {
+async function countSessions(runId, { platform, subject, startDate, endDate, includeExcluded = false } = {}) {
   const params = [];
   const conditions = [];
   if (runId) {
     conditions.push('run_id = ?');
     params.push(runId);
   }
+  const excludedClause = excludedSessionClause('', includeExcluded);
+  if (excludedClause) conditions.push(excludedClause);
   // Route through the shared platformWhereClause on the bare table (no `s.`
   // alias here) so this count stays in lockstep with listSessions/listErrors
   // — including the ai-curated and gmatclub-cat sources.
@@ -1564,7 +1595,7 @@ async function countSessions(runId, { platform, subject, startDate, endDate } = 
   return row ? row.total : 0;
 }
 
-async function listErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag, platform, sortKey, sortOrder, limit, offset }) {
+async function listErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag, platform, sortKey, sortOrder, limit, offset, includeExcluded = false }) {
   const ALLOWED_SORT = {
     session_date: 's.session_date',
     session_external_id: 's.session_external_id',
@@ -1581,6 +1612,8 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
   const sortDir = sortOrder === 'asc' ? 'ASC' : 'DESC';
   const params = [];
   const where = ['q.correct = 0', `NOT (${unansweredPlaceholderExpr('q')})`];
+  const excludedClause = excludedSessionClause('s', includeExcluded);
+  if (excludedClause) where.push(excludedClause);
   const normalizedSubExpr = `
     CASE
       WHEN UPPER(COALESCE(NULLIF(q.category_code, ''), '')) IN ('QUANT', 'PS') THEN 'PS'
@@ -1922,9 +1955,11 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
   return rows.map((row) => enrichQuestionMetadata(row));
 }
 
-async function countErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag, platform }) {
+async function countErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag, platform, includeExcluded = false }) {
   const params = [];
   const where = ['q.correct = 0', `NOT (${unansweredPlaceholderExpr('q')})`];
+  const excludedClause = excludedSessionClause('s', includeExcluded);
+  if (excludedClause) where.push(excludedClause);
   // Re-use expressions for subject and topic logic to ensure consistency
   const normalizedSubExpr = `
     CASE
@@ -2177,10 +2212,16 @@ async function countErrors({ runId, subject, difficulty, topic, confidence, sear
   return row ? row.total : 0;
 }
 
-async function getPatterns(runId) {
-  const runClause = runId ? 'q.run_id = ? AND ' : '';
+async function getPatterns(runId, { includeExcluded = false } = {}) {
+  // Every pattern query prefixes its WHERE with runClause/runJoinClause, so the
+  // soft-exclusion predicate rides along there (no params, so runParams below
+  // stays a pure run-id list). Attempt-level form: not all of these queries have
+  // `sessions` joined.
+  const scopeParts = [runId ? 'q.run_id = ?' : null, excludedAttemptClause('q', includeExcluded)]
+    .filter(Boolean);
+  const runClause = scopeParts.length ? `${scopeParts.join(' AND ')} AND ` : '';
   const runParams = runId ? [runId] : [];
-  const runJoinClause = runId ? 'q.run_id = ? AND ' : '';
+  const runJoinClause = runClause;
   const answeredWhere = `NOT (${unansweredPlaceholderExpr('q')})`;
   const normalizedSubExpr = `
     CASE

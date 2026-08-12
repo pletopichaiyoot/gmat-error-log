@@ -3398,6 +3398,36 @@ th.sortable:hover {
   background: var(--primary-lt);
 }
 
+/* Global legacy-data scope switch in the top bar. Sized to match Button size="sm"
+   (h-8) so it sits flush with the neighbouring actions. */
+.legacy-toggle {
+  height: 32px;
+  padding: 0 12px;
+  border: 1px dashed var(--border-2);
+  border-radius: var(--r-xs);
+  background: none;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--t) var(--ease);
+}
+
+.legacy-toggle:hover {
+  border-color: var(--primary);
+  color: var(--ink-2);
+}
+
+/* Active = legacy rows ARE included, i.e. the dashboard is showing more than its
+   default scope. Solid accent border so that non-default state is obvious. */
+.legacy-toggle--active {
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  background: var(--accent-lt);
+}
+
 /* ─── Section nav ──────────────────────────────────────────────── */
 .section-nav {
   position: sticky;
@@ -3743,6 +3773,59 @@ html {
 .coach-chat-log .ai-message {
   max-width: 88%;
   font-size: 0.88rem;
+}
+
+/* Message-history navigator (Prev / Next / Return to current). */
+.coach-chat-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px var(--s3);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  flex: 0 0 auto;
+}
+
+.coach-chat-nav-btn,
+.coach-chat-nav-return {
+  min-height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink-2);
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.coach-chat-nav-return {
+  margin-left: auto;
+  border-color: rgba(61, 122, 94, 0.25);
+  color: var(--primary);
+}
+
+.coach-chat-nav-btn:hover:not(:disabled),
+.coach-chat-nav-return:hover:not(:disabled) {
+  background: var(--surface);
+}
+
+.coach-chat-nav-btn:disabled,
+.coach-chat-nav-return:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.coach-chat-nav-status {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+}
+
+.ai-message--focused {
+  outline: 2px solid var(--accent, #c4a843);
+  outline-offset: 2px;
 }
 
 .coach-quick-prompts {
@@ -4330,6 +4413,25 @@ html {
 .lsat-st-stem p { margin: 0 0 var(--s3); }
 .lsat-st-stem p:last-child { margin-bottom: 0; }
 .lsat-st-stem p:empty { display: none; }
+
+/* LR stems arrive as one flat blob (stimulus + prompt). StemBlock splits them:
+   the stimulus renders as normal paragraphs (one per speaker for dialogue) and
+   the question prompt gets its own line, set apart so the eye finds the task
+   before re-reading the argument. RC stems are prompt-only — the .is-* rules
+   below collapse to just the prompt with no leading gap. */
+.lsat-st-stimulus,
+.lsat-err-stem .lsat-st-stimulus { margin: 0 0 var(--s3); }
+.lsat-st-prompt,
+.lsat-err-stem .lsat-st-prompt {
+  margin: var(--s4) 0 0;
+  font-weight: 600;
+  color: var(--st-text);
+}
+.lsat-st-prompt:first-child,
+.lsat-err-stem .lsat-st-prompt:first-child { margin-top: 0; }
+.lsat-st-prompt:empty { display: none; }
+.lsat-err-stem p { margin: 0 0 var(--s3); }
+.lsat-err-stem p:last-child { margin-bottom: 0; }
 .lsat-st-stem img,
 .lsat-st-choice-text img {
   display: inline-block;
