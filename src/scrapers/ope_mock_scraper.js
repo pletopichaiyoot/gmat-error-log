@@ -260,9 +260,10 @@ async function listOpeAttemptsForProduct(page, { productId, type = 1 } = {}) {
 // tab with a fresh SVC. Caller owns the returned popup lifecycle.
 async function openTakeScoreReportPopup(landingPage, { takeIdx, timeoutMs = 30000 } = {}) {
   const ctx = landingPage.context();
-  const popupPromise = ctx.waitForEvent('page', { timeout: timeoutMs });
-
-  await landingPage.evaluate((wantTakeIdx) => {
+  // The launcher is an `href="#OnClickHandledByScript"` anchor: right after a
+  // landing navigation its click handler may not be bound yet, so the click is
+  // a silent no-op and no popup ever opens. Retry until one does.
+  const clickLauncher = () => landingPage.evaluate((wantTakeIdx) => {
     const anchors = Array.from(document.querySelectorAll('a.launchitdwindow'));
     const reportAnchors = anchors.filter((a) => /view score report/i.test(a.innerText || ''));
     const matched = reportAnchors.find((a) => {
@@ -275,7 +276,20 @@ async function openTakeScoreReportPopup(landingPage, { takeIdx, timeoutMs = 3000
     matched.click();
   }, takeIdx);
 
-  const popup = await popupPromise;
+  const deadline = Date.now() + timeoutMs;
+  // An already-open popup is reused rather than clicked again — retrying a
+  // click that DID work would open a second Score Report window.
+  let popup = ctx.pages().find((p) => /ITDStart\.aspx/i.test(p.url())) || null;
+  while (!popup && Date.now() < deadline) {
+    const popupPromise = ctx.waitForEvent('page', { timeout: 8000 }).catch(() => null);
+    await clickLauncher();
+    popup = (await popupPromise) || ctx.pages().find((p) => /ITDStart\.aspx/i.test(p.url())) || null;
+  }
+  if (!popup) {
+    throw new ScrapeAnomalyError(
+      `Take #${takeIdx} Score Report popup did not open within ${timeoutMs}ms (launcher click had no effect).`,
+    );
+  }
   await popup.waitForSelector('iframe[src*="cmd=item"]', { timeout: timeoutMs });
   return popup;
 }
@@ -287,7 +301,10 @@ async function openTakeScoreReportPopup(landingPage, { takeIdx, timeoutMs = 3000
 // detailsTable content; accept either.
 const SCORE_CARD_FRAME_CMDS = new Set(['item', 'review']);
 function findScoreCardFrame(popupPage) {
-  return popupPage.frames().find((f) => {
+  // LAST match, not first: returning to the Score Card mid-walk (#Return) adds
+  // a fresh cmd=review frame while the popup's original cmd=item frame lingers
+  // in the frame list. Evaluating in the stale one makes anchor clicks no-ops.
+  const matches = popupPage.frames().filter((f) => {
     const url = f.url();
     if (!/\/itd\.aspx\?/i.test(url)) return false;
     try {
@@ -297,7 +314,8 @@ function findScoreCardFrame(popupPage) {
     } catch {
       return false;
     }
-  }) || null;
+  });
+  return matches.length ? matches[matches.length - 1] : null;
 }
 
 async function waitForScoreCardReady(popupPage, { timeoutMs = 30000, pollMs = 500 } = {}) {
@@ -308,11 +326,14 @@ async function waitForScoreCardReady(popupPage, { timeoutMs = 30000, pollMs = 50
       try {
         // The Score Card renders all 3 sections × 2 views (Performance +
         // Time-Pressure) = 6 detailsTable instances. Accept once at least 3
-        // exist; that covers the "Performance" view for all sections.
-        const detailsCount = await frame.evaluate(() => {
-          return document.querySelectorAll('table.table-table.type-\\%detailsTable\\%').length;
-        });
-        if (detailsCount >= 3) return frame;
+        // exist; that covers the "Performance" view for all sections. Also
+        // require the per-question .navigate anchors — a half-rendered card
+        // has the tables before it has the links we click to enter review.
+        const ready = await frame.evaluate(() => (
+          document.querySelectorAll('table.table-table.type-\\%detailsTable\\%').length >= 3
+          && document.querySelectorAll('table.table-table.type-\\%detailsTable\\% a.navigate').length > 0
+        ));
+        if (ready) return frame;
       } catch {
         // frame may detach during ITD bootstrap; retry
       }
@@ -1136,17 +1157,50 @@ async function clickPhase3Next(popupPage, prevItemName, prevTitle, { timeoutMs =
   return waitForReviewAllItem(popupPage, prevItemName, prevTitle, { timeoutMs });
 }
 
-async function enterPhase3Mode(popupPage, { timeoutMs = 60000 } = {}) {
+// Enter REVIEW-ALL mode at the FIRST item of Score Card section table `tableIdx`
+// (index into the raw detailsTable list, matching readScoreCardSectionTables'
+// `tables[].tableIdx`). Entry must be per-section: the review sequence follows
+// the order the sections were TAKEN and #Next only moves forward, so a single
+// entry at table 0 (always Quant — the Score Card lists sections canonically
+// Q/V/DI regardless of test order) can never reach a section taken earlier.
+async function enterPhase3Mode(popupPage, { tableIdx = 0, timeoutMs = 60000 } = {}) {
   const scoreCardFrame = await waitForScoreCardReady(popupPage);
   const prevTitle = await popupPage.title().catch(() => null);
-  await scoreCardFrame.evaluate(() => {
-    const a = document.querySelector(
-      'table.table-table.type-\\%detailsTable\\% a.navigate',
-    );
-    if (!a) throw new Error('No .navigate anchor in Score Card to enter REVIEW-ALL mode');
+  await scoreCardFrame.evaluate((idx) => {
+    const t = document.querySelectorAll('table.table-table.type-\\%detailsTable\\%')[idx];
+    const a = t && Array.from(t.rows).slice(1)[0]?.querySelector('a.navigate');
+    if (!a) throw new Error(`No .navigate anchor in Score Card section table ${idx}`);
     a.click();
-  });
+  }, tableIdx);
   return waitForReviewAllItem(popupPage, null, prevTitle, { timeoutMs });
+}
+
+// Leave review mode and go back to the Score Card ("Return to Score Report" is
+// the only route back — the Score Card frame is destroyed on entering review).
+async function returnToScoreCard(popupPage, { timeoutMs = 60000, pollMs = 500 } = {}) {
+  const prevTitle = await popupPage.title().catch(() => null);
+  const clicked = await popupPage.evaluate(() => {
+    const btn = document.querySelector('button.cpButton.Return, #Return');
+    if (!btn || btn.disabled || btn.offsetParent === null) return false;
+    btn.click();
+    return true;
+  });
+  if (!clicked) {
+    throw new ScrapeAnomalyError('Phase 3: "Return to Score Report" button unavailable');
+  }
+  // Gate on the popup title, not on frame readiness: the pre-Return Score Card
+  // frame lingers with its tables intact until the navigation lands, and every
+  // .navigate anchor in it carries a single-use `code` token that is already
+  // spent — clicking one is a silent no-op that then times out 60s later.
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const title = await popupPage.title().catch(() => null);
+    if (title && title !== prevTitle) return waitForScoreCardReady(popupPage, { timeoutMs });
+    await sleep(pollMs);
+  }
+  throw new ScrapeAnomalyError(
+    `Phase 3: popup did not return to the Score Card within ${timeoutMs}ms (title stuck at "${prevTitle}")`,
+  );
 }
 
 // Main Phase 3 loop. Returns one enriched record per question. Caller (the
@@ -1198,113 +1252,118 @@ async function scrapeAttemptPhase3(popup, {
   let aborted = false;
   let abortReason = null;
 
-  // Detect starting state: poll generously because iframes are enumerated
-  // lazily after attaching via CDP — first reads can return an empty frames
-  // list even when frames are loaded. If a REVIEW-ALL frame appears, start
-  // scraping from the current item. Otherwise (popup is on Score Card),
-  // click the first .navigate anchor to enter Phase 3 mode.
-  // NOTE: Caller should ensure the popup is on item 1 of Quantitative section
-  // OR on the Score Card for a full 64-question scrape. Otherwise the runner
-  // scrapes from wherever the popup is and misses earlier items.
+  // Normalize the popup to the Score Card, then walk each section from its own
+  // entry anchor. Never resume "from wherever the popup happens to be" — that
+  // silently truncates the walk (a popup left on Quant item 1 re-runs the old
+  // Quant-only bug).
   try { await popup.waitForLoadState('domcontentloaded', { timeout: 5000 }); } catch { /* best effort */ }
-  // Decide entry path: if popup is on Score Card (a cmd=item or cmd=review
-  // frame with detailsTable rows), click .navigate to enter REVIEW-ALL mode.
-  // Otherwise assume popup is already on a question view and find the active
-  // item frame. We probe content rather than URL alone because both Score Card
-  // and item views can carry cmd=item.
-  let frame = null;
-  const scoreCardCandidate = findScoreCardFrame(popup);
-  let isOnScoreCard = false;
-  if (scoreCardCandidate) {
-    try {
-      isOnScoreCard = await scoreCardCandidate.evaluate(() => (
-        document.querySelectorAll('table.table-table.type-\\%detailsTable\\%').length >= 3
-      ));
-    } catch { /* frame may detach during poll */ }
+  // The popup title is the only trustworthy state signal — "Score Report N of M"
+  // on the card, "<Section> N of M" on an item. Frame content is not: an item
+  // view keeps a stale Score Card frame around whose anchors are dead.
+  const startTitle = await popup.title().catch(() => null);
+  const scoreCardFrame = /^\s*score\s+report/i.test(startTitle || '')
+    ? await waitForScoreCardReady(popup)
+    : await returnToScoreCard(popup);
+  const card = await readScoreCardSectionTables(scoreCardFrame);
+  // Performance-view tables only (each section also renders a Time-Pressure
+  // view with no .navigate anchors). Row counts here are authoritative for the
+  // walk length — `expectedTotal` only sizes the error budget.
+  const sections = (card.tables || []).filter((t) => !t.isTimePressureView && t.rowCount > 0);
+  if (!sections.length) {
+    throw new ScrapeAnomalyError('Phase 3: Score Card has no section tables to walk');
   }
-  if (isOnScoreCard) {
-    frame = await enterPhase3Mode(popup);
-  } else {
-    // Try to attach to an already-loaded item view. Short timeout so we fall
-    // back to enterPhase3Mode if the popup is in some other state.
-    frame = await waitForReviewAllItem(popup, null, null, { timeoutMs: 8000 })
-      .catch(() => null);
-    if (!frame) frame = await enterPhase3Mode(popup);
-  }
+  const plannedTotal = sections.reduce((n, t) => n + t.rowCount, 0);
 
-  let prevItemName = null;
-
-  for (let seq = 0; seq < expectedTotal; seq += 1) {
-    const currentTitle = await popup.title().catch(() => null);
-    const titleInfo = parsePopupTitle(currentTitle);
-    let data;
+  let seq = 0;
+  for (let si = 0; si < sections.length && !aborted; si += 1) {
+    const section = sections[si];
+    let frame;
     try {
-      data = await readReviewAllFrame(frame);
-      // .ITSStemText path returns raw container HTML in data.stemHtml. Sanitize
-      // it to a render-safe subset (inline data: equation images preserved) and
-      // derive the clean text stem from it. The body-innerText fallback path
-      // leaves stemHtml null and keeps its pre-baked text stem untouched.
-      if (data && data.stemHtml != null) {
-        const safeHtml = sanitizeStemHtml(data.stemHtml);
-        data.stemHtml = safeHtml || null;
-        data.stem = stemHtmlToText(safeHtml) || data.stem || '';
-      }
-      // Same treatment for single-choice answer options whose math renders as an
-      // inline image: keep the equation image in choice.textHtml, derive a clean
-      // text label. Choices without textHtml (plain text / DI matrix / dropdown)
-      // are untouched.
-      if (data && Array.isArray(data.choices)) {
-        for (const c of data.choices) {
-          if (c && c.textHtml != null) {
-            const safe = sanitizeStemHtml(c.textHtml);
-            c.textHtml = safe || null;
-            const t = stemHtmlToText(safe);
-            if (t) c.text = t;
+      if (si > 0) await returnToScoreCard(popup);
+      frame = await enterPhase3Mode(popup, { tableIdx: section.tableIdx });
+    } catch (e) {
+      errors.push({ seq, message: `section table ${section.tableIdx} entry failed: ${e.message}` });
+      aborted = true; abortReason = e.message;
+      break;
+    }
+
+    let prevItemName = null;
+
+    for (let i = 0; i < section.rowCount; i += 1, seq += 1) {
+      // Never press Next on a section's last item — the next section is entered
+      // from the Score Card instead, and on the test's final section Next is
+      // disabled anyway.
+      const isLastInSection = i === section.rowCount - 1;
+      const currentTitle = await popup.title().catch(() => null);
+      const titleInfo = parsePopupTitle(currentTitle);
+      let data;
+      try {
+        data = await readReviewAllFrame(frame);
+        // .ITSStemText path returns raw container HTML in data.stemHtml. Sanitize
+        // it to a render-safe subset (inline data: equation images preserved) and
+        // derive the clean text stem from it. The body-innerText fallback path
+        // leaves stemHtml null and keeps its pre-baked text stem untouched.
+        if (data && data.stemHtml != null) {
+          const safeHtml = sanitizeStemHtml(data.stemHtml);
+          data.stemHtml = safeHtml || null;
+          data.stem = stemHtmlToText(safeHtml) || data.stem || '';
+        }
+        // Same treatment for single-choice answer options whose math renders as an
+        // inline image: keep the equation image in choice.textHtml, derive a clean
+        // text label. Choices without textHtml (plain text / DI matrix / dropdown)
+        // are untouched.
+        if (data && Array.isArray(data.choices)) {
+          for (const c of data.choices) {
+            if (c && c.textHtml != null) {
+              const safe = sanitizeStemHtml(c.textHtml);
+              c.textHtml = safe || null;
+              const t = stemHtmlToText(safe);
+              if (t) c.text = t;
+            }
           }
         }
+      } catch (e) {
+        errors.push({ seq, message: `read failed: ${e.message}` });
+        if (e instanceof ScrapeAnomalyError) { aborted = true; abortReason = e.message; break; }
+        if (errors.length >= errorBudget) { aborted = true; abortReason = 'too-many-errors'; break; }
+        if (!isLastInSection) {
+          try {
+            await sleep(jitter(minDelayMs, maxDelayMs));
+            frame = await clickPhase3Next(popup, prevItemName, currentTitle);
+          } catch (ne) {
+            errors.push({ seq, message: `next failed during recovery: ${ne.message}` });
+            aborted = true; abortReason = ne.message; break;
+          }
+        }
+        continue;
       }
-    } catch (e) {
-      errors.push({ seq, message: `read failed: ${e.message}` });
-      if (e instanceof ScrapeAnomalyError) { aborted = true; abortReason = e.message; break; }
-      if (errors.length >= errorBudget) { aborted = true; abortReason = 'too-many-errors'; break; }
-      if (seq < expectedTotal - 1) {
+
+      enriched.push({
+        seq,
+        section: titleInfo?.sectionCode || subjectFromItemName(data.itemName),
+        positionInSection: titleInfo?.position || null,
+        sectionTotal: titleInfo?.sectionTotal || null,
+        ...data,
+      });
+      prevItemName = data.itemName || prevItemName;
+      if (onProgress) onProgress({
+        event: 'item_done',
+        seq,
+        total: plannedTotal,
+        itemName: data.itemName,
+        section: titleInfo?.sectionCode || null,
+        position: titleInfo?.position || null,
+      });
+
+      if (!isLastInSection) {
         try {
           await sleep(jitter(minDelayMs, maxDelayMs));
           frame = await clickPhase3Next(popup, prevItemName, currentTitle);
-        } catch (ne) {
-          errors.push({ seq, message: `next failed during recovery: ${ne.message}` });
-          aborted = true; abortReason = ne.message; break;
+        } catch (e) {
+          errors.push({ seq, message: `next failed: ${e.message}` });
+          if (e instanceof ScrapeAnomalyError) { aborted = true; abortReason = e.message; break; }
+          if (errors.length >= errorBudget) { aborted = true; abortReason = 'too-many-errors'; break; }
         }
-      }
-      continue;
-    }
-
-    enriched.push({
-      seq,
-      section: titleInfo?.sectionCode || subjectFromItemName(data.itemName),
-      positionInSection: titleInfo?.position || null,
-      sectionTotal: titleInfo?.sectionTotal || null,
-      ...data,
-    });
-    prevItemName = data.itemName || prevItemName;
-    if (onProgress) onProgress({
-      event: 'item_done',
-      seq,
-      total: expectedTotal,
-      itemName: data.itemName,
-      section: titleInfo?.sectionCode || null,
-      position: titleInfo?.position || null,
-    });
-
-    // Advance to next item (except after the last)
-    if (seq < expectedTotal - 1) {
-      try {
-        await sleep(jitter(minDelayMs, maxDelayMs));
-        frame = await clickPhase3Next(popup, prevItemName, currentTitle);
-      } catch (e) {
-        errors.push({ seq, message: `next failed: ${e.message}` });
-        if (e instanceof ScrapeAnomalyError) { aborted = true; abortReason = e.message; break; }
-        if (errors.length >= errorBudget) { aborted = true; abortReason = 'too-many-errors'; break; }
       }
     }
   }
@@ -1317,7 +1376,7 @@ async function scrapeAttemptPhase3(popup, {
     errors,
     aborted,
     abortReason,
-    qhTotal: expectedTotal,
+    qhTotal: plannedTotal,
     extracted_at: new Date().toISOString(),
   };
 }
@@ -1355,6 +1414,7 @@ module.exports = {
     readReviewAllFrame,
     clickPhase3Next,
     enterPhase3Mode,
+    returnToScoreCard,
     jitter,
   },
 };

@@ -1493,6 +1493,19 @@ async function runOpeListAttemptsFromOpenBrowser(options = {}) {
   }
 }
 
+// An unfinished take (never started, in progress, or paused) has no Score
+// Report to read — scraping or enriching one either times out waiting for a
+// popup that never opens or walks a partial exam. Fail fast with a 400 instead.
+function assertTakeIsCompleted(takes, takeIdx, sourceLabel) {
+  const take = (takes || []).find((t) => t.takeIdx === takeIdx) || null;
+  if (take && take.status === 'completed' && take.hasReport) return take;
+  const err = new Error(
+    `Take #${takeIdx} of ${sourceLabel} has no score report yet (status: ${take?.status || 'not-found'}${take?.actionText ? `, action: "${take.actionText}"` : ''}). Finish the exam first.`,
+  );
+  err.statusCode = 400;
+  throw err;
+}
+
 async function runOpeMockScrapeFromOpenBrowser(options = {}) {
   const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
   const sourceId = String(options.sourceId || '').trim();
@@ -1545,6 +1558,7 @@ async function runOpeMockScrapeFromOpenBrowser(options = {}) {
       productId: preset.productId,
       type: preset.type,
     });
+    assertTakeIsCompleted(takes, takeIdx, preset.label);
     const completedDateISO = takes.find((t) => t.takeIdx === takeIdx)?.completedAt || null;
 
     // Verify any existing ITDStart popup against the requested takeIdx. The
@@ -1672,6 +1686,15 @@ async function runOpePhase3FromOpenBrowser(options = {}) {
       throw new Error('No starttest.com tab found. Sign in and open the OPE area first.');
     }
     await landing.bringToFront();
+
+    assertTakeIsCompleted(
+      await opeScraper.listOpeAttemptsForProduct(landing, {
+        productId: preset.productId,
+        type: preset.type,
+      }),
+      takeIdx,
+      preset.label,
+    );
 
     // Identify any already-open ITDStart popups. We either reuse one that
     // matches the requested take, or close all of them before opening a
