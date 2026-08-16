@@ -3,6 +3,7 @@ const { toPg } = require('./sql-util');
 const { runMigrations } = require('../scripts/migrate');
 const { deriveQuestionMetadata, enrichQuestionMetadata } = require('./question-metadata');
 const { isFlatGradeableChoices, correctAnswerInChoices, classifySetItems, pickBestGradeableRow } = require('./ai-practice-sets');
+const { canonicalizeMistakeTypeValue } = require('./mistake-tags');
 
 // node-postgres returns int8/bigint (COUNT, SUM(int), session_external_id) and
 // numeric (ROUND results, computed percentages) as STRINGS to preserve precision.
@@ -206,9 +207,8 @@ async function updateLsatAttemptAnnotation(attemptId, { mistakeType, notes }) {
     throw new Error('Invalid error id.');
   }
 
-  const nextMistakeType = String(mistakeType || '').trim();
   const nextNotes = String(notes || '').trim();
-  const storedMistakeType = nextMistakeType === '[]' ? null : nextMistakeType || null;
+  const storedMistakeType = canonicalizeMistakeTypeValue(mistakeType);
 
   await run(
     `
@@ -984,8 +984,16 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     for (const q of attempts) {
       const preserved = pickPreservedAnnotation(preservedAnnotationIndex, q);
       const preservedSnapshot = pickAttemptSnapshot(preservedSnapshotIndex, q);
+      // A scraped mistake_type wins over the preserved annotation (TTP is
+      // authoritative — see CLAUDE.md), but TTP writes its OWN taxonomy as
+      // plain-English sentences, so canonicalize onto the picker vocabulary
+      // before it lands. Without this, every TTP rescrape re-pollutes the column
+      // with out-of-vocabulary values that migration 0005 just cleaned up.
+      // Canonicalizing can also yield null (e.g. TTP's "I guessed correctly",
+      // which is a self-report on a correct answer, not an error tag) — in which
+      // case we correctly fall through to the preserved annotation.
       const mistakeType =
-        normalizedTextOrNull(q.mistake_type) ||
+        canonicalizeMistakeTypeValue(q.mistake_type) ||
         preserved?.mistake_type ||
         preservedSnapshot?.mistake_type ||
         null;
@@ -2942,9 +2950,11 @@ async function updateErrorAnnotation(errorId, { mistakeType, notes }) {
     throw new Error('Invalid error id.');
   }
 
-  const nextMistakeType = String(mistakeType || '').trim();
   const nextNotes = String(notes || '').trim();
-  const storedMistakeType = nextMistakeType === '[]' ? null : nextMistakeType || null;
+  // Route the picker's payload through the canonicalizer too: it enforces the
+  // deterministic tag order (so a given tag SET always serializes to the same
+  // string) and folds any legacy pill the user re-saved from an old row.
+  const storedMistakeType = canonicalizeMistakeTypeValue(mistakeType);
 
   await run(
     `
