@@ -65,6 +65,8 @@ const DEFAULT_CDP_URL = 'http://localhost:9222';
 //   Pre-phrase Mismatch (Skipped Pre-phrasing)          -> dropped (not a workflow Pleto uses)
 // Restored: "Concept Gap" (was retired in v2 but real entries still ask for it).
 // "Trap: Plausible-but-Unstated" is new in v3 — the world-knowledge-leak trap.
+// NOTE: the v3 trap names in the table above were themselves retired in v4
+// (2026-08-23, Manhattan Prep vocabulary) — see the Trap Type comment below.
 //
 // Old/legacy rows that didn't get migrated still render in the chips list
 // (free-text); they just won't appear pre-selected in the picker.
@@ -82,13 +84,27 @@ const MISTAKE_TYPES = {
   ],
   // Trap Type = what the wrong answer was doing (a descriptor, not a fix). Verbal/
   // verbal-DI only via TAG_SUBJECTS.
+  // v4 (2026-08-23): renamed onto Manhattan Prep's trap vocabulary (GMAT All the
+  // Verbal — RC ch. 13–14, CR ch. 18–22). Stored rows rewritten by
+  // migrations/0006_manhattan_trap_names.sql; old names fold via mistake-tags.js:
+  //   Trap: Scope/Strength   -> Trap: Extreme (strength) / Trap: Out of Scope (scope)
+  //   Trap: Half-Right       -> Trap: One Word Off
+  //   Trap: Reversed         -> Trap: Reverse Logic
+  //   Trap: Plausible-but-Unstated       -> Trap: Real-World Distraction
+  //   Trap: True-but-Irrelevant          -> Trap: True but Not Right
+  //   Trap: Distortion/Familiar-Language -> Trap: Mix-Up
+  // 'Trap: No Tie to Argument' is new in v4 — Manhattan's #1 CR trap family
+  // (No Tie to the Conclusion / No Effect / Irrelevant Distinction or Comparison).
+  // 'Trap: Premise Repeat' is kept: not a Manhattan name, but a real CR trap.
   'Trap Type': [
-    'Trap: Scope/Strength',
-    'Trap: Half-Right',
-    'Trap: Reversed',
-    'Trap: Plausible-but-Unstated',
-    'Trap: True-but-Irrelevant',
-    'Trap: Distortion/Familiar-Language',
+    'Trap: One Word Off',
+    'Trap: Extreme',
+    'Trap: Out of Scope',
+    'Trap: True but Not Right',
+    'Trap: Reverse Logic',
+    'Trap: Mix-Up',
+    'Trap: Real-World Distraction',
+    'Trap: No Tie to Argument',
     'Trap: Premise Repeat',
   ],
   // Timing & Process — the clock decision or workflow failure. 'Time Trap' was split
@@ -118,19 +134,23 @@ const TAG_DESCRIPTIONS = {
     'Reasoning chain broke: wrong inference, missed implication, premise/conclusion confusion, paragraph-role miss, scope error in your own logic. Fix: write the chain step-by-step instead of jumping.',
   'Calc/Casework Slip':
     'Computation, sign, unit, or casework error — including only testing favorable cases or making a careless arithmetic mistake. Fix: enumerate cases systematically; double-check signs and units.',
-  // Trap Type — what the wrong answer was doing
-  'Trap: Scope/Strength':
-    'The wrong answer added an unstated qualifier or pushed strength too far — "constant", "always", "only", "primarily". Common on RC Inference and CR Scope shifts. Fix: reject any choice that adds an unstated quality the passage never claims.',
-  'Trap: Half-Right':
-    'The wrong answer was partially correct but one element was off — right idea, wrong scope/agent/object/timeframe. Fix: verify every clause of the answer choice, not just the first half.',
-  'Trap: Reversed':
-    'Wrong direction, polarity, or causation — answer flipped cause/effect, increased vs. decreased, supports vs. weakens. Fix: explicitly note the direction of the relationship before reading choices.',
-  'Trap: Plausible-but-Unstated':
-    "The wrong answer sounded right from real-world intuition or general knowledge but wasn't supported by the passage/stem. Fix: ask 'where does the text say this?' for every candidate answer.",
-  'Trap: True-but-Irrelevant':
-    'The choice is accurate per the passage but doesn\'t answer the question asked — a real detail offered for an inference or main-idea question. Distinct from Half-Right (on-task but partly wrong) and Plausible-but-Unstated (unsupported): this one IS supported, just off-task. Fix: after confirming a choice is true, ask "does it answer THIS stem?"',
-  'Trap: Distortion/Familiar-Language':
-    'Reuses the passage\'s exact words but recombines or subtly twists their meaning so it rings a bell. Fix: don\'t reward familiar wording — re-check that the relationship the choice asserts is the one the text actually states.',
+  // Trap Type — what the wrong answer was doing (Manhattan Prep names)
+  'Trap: One Word Off':
+    'Mostly right, but one or two words sink it — often the very LAST word ("...the position the argument seeks to reject" vs. "establish"). Covers Manhattan\'s Half Right (boldface: one statement described correctly, the other not) and Half Way (Discrepancy: touches one premise but never resolves the conflict). Fix: read every word to the end; verify every clause, not just the first half.',
+  'Trap: Extreme':
+    'Contains an extreme word — all, never, only, unique — that the text never supports. Extreme wording CAN be correct, but only with direct textual support. Fix: circle extreme words in choices and demand a matching line in the passage/argument.',
+  'Trap: Out of Scope':
+    'Goes beyond what the text actually discusses — sometimes just a bit too broad, sometimes way off. Includes Manhattan\'s Too Broad inference trap (flu → "all illness"). Fix: reject any choice that needs information the passage/argument never gave.',
+  'Trap: True but Not Right':
+    'Accurate per the passage, but answers a different question than the one asked — a real detail offered for a main-idea or inference stem. Distinct from One Word Off (on-task but partly wrong) and Real-World Distraction (unsupported): this one IS supported, just off-task. Fix: after confirming a choice is true, ask "does it answer THIS stem?"',
+  'Trap: Reverse Logic':
+    'Does the opposite of the job — weakens when asked to strengthen (or vice versa), heightens the discrepancy on an Explain question, flips cause/effect, or (RC) directly contradicts the passage. Fix: explicitly note the direction you need BEFORE reading choices.',
+  'Trap: Mix-Up':
+    'Reuses the passage\'s exact words but recombines them into a different meaning — it rings a bell, so you jump on it without checking. Fix: don\'t reward familiar wording — re-check that the relationship the choice asserts is the one the text actually states.',
+  'Trap: Real-World Distraction':
+    'Reasonable in the real world, but doesn\'t HAVE to be true from the given text ("biggest client → most revenue"). The trickiest ones seem very reasonable until you ask whether the answer MUST be true. Fix: ask "where does the text force this?" for every candidate answer.',
+  'Trap: No Tie to Argument':
+    'New information that never touches the conclusion — neither strengthens nor weakens, addresses a premise without affecting the chain, discusses the wrong group, or makes an irrelevant distinction/comparison the argument doesn\'t hinge on. Manhattan\'s #1 CR trap (No Tie to the Conclusion / No Effect on the Conclusion / Irrelevant Distinction or Comparison). Fix: restate the exact conclusion first; test each choice against IT, not the topic.',
   'Trap: Premise Repeat':
     'A CR choice that restates a premise you were already given instead of supplying the assumption, new support, or inference the question needs — true, straight from the argument, but does no work. Fix: ask "does this ADD something, or just echo a given?"',
   // Timing & Process
@@ -164,12 +184,14 @@ const SUBJECT_TAG_PRIORITY = {
 const TAG_SUBJECTS = {
   'Wrong Setup': ['Q', 'DI'],
   'Calc/Casework Slip': ['Q', 'DI'],
-  'Trap: Scope/Strength': ['V', 'DI'],
-  'Trap: Half-Right': ['V', 'DI'],
-  'Trap: Reversed': ['V', 'DI'],
-  'Trap: Plausible-but-Unstated': ['V', 'DI'],
-  'Trap: True-but-Irrelevant': ['V', 'DI'],
-  'Trap: Distortion/Familiar-Language': ['V', 'DI'],
+  'Trap: One Word Off': ['V', 'DI'],
+  'Trap: Extreme': ['V', 'DI'],
+  'Trap: Out of Scope': ['V', 'DI'],
+  'Trap: True but Not Right': ['V', 'DI'],
+  'Trap: Reverse Logic': ['V', 'DI'],
+  'Trap: Mix-Up': ['V', 'DI'],
+  'Trap: Real-World Distraction': ['V', 'DI'],
+  'Trap: No Tie to Argument': ['V', 'DI'],
   'Trap: Premise Repeat': ['V', 'DI'],
 };
 

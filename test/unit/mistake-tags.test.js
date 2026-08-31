@@ -36,7 +36,26 @@ test("TTP's plain-English taxonomy maps onto picker tags", () => {
     ['Wrong Setup']
   );
   assert.deepStrictEqual(canonicalizeMistakeTags('I did not understand the concept tested.'), ['Concept Gap']);
-  assert.deepStrictEqual(canonicalizeMistakeTags('I fell for a trap answer.'), ['Trap: Plausible-but-Unstated']);
+  assert.deepStrictEqual(canonicalizeMistakeTags('I fell for a trap answer.'), ['Trap: Real-World Distraction']);
+});
+
+test('v3 trap names fold onto the v4 Manhattan vocabulary', () => {
+  assert.deepStrictEqual(canonicalizeMistakeTags('["Trap: Half-Right"]'), ['Trap: One Word Off']);
+  assert.deepStrictEqual(canonicalizeMistakeTags('["Trap: Reversed"]'), ['Trap: Reverse Logic']);
+  assert.deepStrictEqual(canonicalizeMistakeTags('["Trap: Plausible-but-Unstated"]'), ['Trap: Real-World Distraction']);
+  assert.deepStrictEqual(canonicalizeMistakeTags('["Trap: True-but-Irrelevant"]'), ['Trap: True but Not Right']);
+  assert.deepStrictEqual(canonicalizeMistakeTags('["Trap: Distortion/Familiar-Language"]'), ['Trap: Mix-Up']);
+  // Scope/Strength lumped two tells; the write-path fallback is Out of Scope
+  // (migration 0006 split the tagged rows row-by-row using their notes).
+  assert.deepStrictEqual(canonicalizeMistakeTags('["Trap: Scope/Strength"]'), ['Trap: Out of Scope']);
+  // Pre-v3 chains re-point at v4 directly.
+  assert.deepStrictEqual(canonicalizeMistakeTags('["RC Trap: Too Extreme"]'), ['Trap: Extreme']);
+  assert.deepStrictEqual(canonicalizeMistakeTags('["RC Trap: Opposite Direction"]'), ['Trap: Reverse Logic']);
+  // v4 names are canonical: unchanged, and trap tags sort between cause and timing.
+  assert.deepStrictEqual(
+    canonicalizeMistakeTags('["Ran Out of Time","Trap: No Tie to Argument","Misread"]'),
+    ['Misread', 'Trap: No Tie to Argument', 'Ran Out of Time']
+  );
 });
 
 test('"I guessed correctly" is dropped — a self-report, not an error tag', () => {

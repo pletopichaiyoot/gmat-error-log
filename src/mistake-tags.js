@@ -30,13 +30,18 @@ const CANONICAL_ORDER = [
   'Wrong Setup',
   'Logic Slip',
   'Calc/Casework Slip',
-  // Trap Type — what the wrong answer was doing
-  'Trap: Scope/Strength',
-  'Trap: Half-Right',
-  'Trap: Reversed',
-  'Trap: Plausible-but-Unstated',
-  'Trap: True-but-Irrelevant',
-  'Trap: Distortion/Familiar-Language',
+  // Trap Type — what the wrong answer was doing. v4 (2026-08-23): Manhattan
+  // Prep's trap vocabulary (GMAT All the Verbal, RC ch. 13–14 + CR ch. 18–22).
+  // Old v3 names fold via the legacy map below; stored rows were rewritten by
+  // migrations/0006_manhattan_trap_names.sql.
+  'Trap: One Word Off',
+  'Trap: Extreme',
+  'Trap: Out of Scope',
+  'Trap: True but Not Right',
+  'Trap: Reverse Logic',
+  'Trap: Mix-Up',
+  'Trap: Real-World Distraction',
+  'Trap: No Tie to Argument',
   'Trap: Premise Repeat',
   // Timing & Process — the clock decision or workflow failure
   'No Plan / Stuck',
@@ -99,12 +104,23 @@ const LEGACY_TO_CANONICAL = {
     'Calc/Casework Slip',
 
   // ---- Trap Type ----
-  'RC Trap: Too Extreme': 'Trap: Scope/Strength',
-  'RC Trap: Out of Scope': 'Trap: Scope/Strength',
-  'CR: Scope Shift (Premise vs Conclusion)': 'Trap: Scope/Strength',
-  'RC Trap: Half-Right': 'Trap: Half-Right',
-  'RC Trap: Opposite Direction': 'Trap: Reversed',
-  'I fell for a trap answer.': 'Trap: Plausible-but-Unstated',
+  // Pre-v3 names, re-pointed at the v4 (Manhattan) vocabulary.
+  'RC Trap: Too Extreme': 'Trap: Extreme',
+  'RC Trap: Out of Scope': 'Trap: Out of Scope',
+  'CR: Scope Shift (Premise vs Conclusion)': 'Trap: Out of Scope',
+  'RC Trap: Half-Right': 'Trap: One Word Off',
+  'RC Trap: Opposite Direction': 'Trap: Reverse Logic',
+  'I fell for a trap answer.': 'Trap: Real-World Distraction',
+  // v3 canonical names retired 2026-08-23 in favor of Manhattan Prep's trap
+  // vocabulary. 'Trap: Scope/Strength' lumped two different tells (unsupported
+  // strength vs. beyond-the-text scope); the generic fallback is Out of Scope,
+  // and migration 0006 split the handful of tagged rows by their notes.
+  'Trap: Scope/Strength': 'Trap: Out of Scope',
+  'Trap: Half-Right': 'Trap: One Word Off',
+  'Trap: Reversed': 'Trap: Reverse Logic',
+  'Trap: Plausible-but-Unstated': 'Trap: Real-World Distraction',
+  'Trap: True-but-Irrelevant': 'Trap: True but Not Right',
+  'Trap: Distortion/Familiar-Language': 'Trap: Mix-Up',
 
   // ---- Timing & Process ----
   'Could Not Start / No Plan': 'No Plan / Stuck',

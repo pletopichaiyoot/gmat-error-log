@@ -34,12 +34,11 @@ const GMAT_REFERENCE = `GMAT Focus reference (use these as authoritative when ju
 - Section scale: 60–90 per section. Total: 205–805. Each section ~45 min, 21 questions (Q/V), DI 20 questions.
 - Per-question pacing targets: Quant ≈ 2:09, Verbal ≈ 1:53, DI ≈ 2:15 (excluding multi-part). Flag any topic where avg time exceeds target by >25%.
 - "Hard" / 705+ scorer benchmarks: section accuracy ≥ 80% AND avg time within target.
-- Mistake-tag taxonomy v2 — 23 consolidated tags (use exact labels when categorizing root causes):
-  • Core Reasoning / Process: Misread (Passage / Question / Condition); Wrong Setup (Variable / Equation / Structure); Invalid Assumption; Incomplete Casework; Calculation Slip (Computation / Unit / Sign / Careless); Logic Breakdown (Wrong Inference or Relationship).
-  • Data Handling / DI-Specific: Chart/Table Misread; Multi-Source: Missed Cross-Link; Two-Part: Pairing/Order Error; Composite / Multi-Select: Wrong Slot.
-  • Verbal / Reading (RC traps first, then CR): RC Trap: Too Extreme; RC Trap: Out of Scope; RC Trap: Opposite Direction; RC Trap: Half-Right; RC Trap: Wrong Paragraph; CR: Missed Negation/Qualifier; CR: Scope Shift (Premise vs Conclusion); CR: Confused Author Tone; Pre-phrase Mismatch (Skipped Pre-phrasing).
-  • Test Strategy / Process: Chose Too Early; Could Not Start / No Plan; Overinvested Time (>2x median); Re-read Loop (Got Stuck Re-reading).
-- When you encounter older entries tagged with retired labels (e.g., Calculation Error, Misread Passage, Wrong Logical Relationship, Stuck in Algebra), translate them to the closest v2 tag in your reasoning, but preserve the original string when quoting historical data.`;
+- Mistake-tag taxonomy v4 — three orthogonal dimensions (use exact labels when categorizing root causes):
+  • Why I Missed It (cause): Misread; Modifier/Connective Miss; Concept Gap; Wrong Setup; Logic Slip; Calc/Casework Slip.
+  • Trap Type (what the wrong answer was doing — Manhattan Prep's names): Trap: One Word Off; Trap: Extreme; Trap: Out of Scope; Trap: True but Not Right; Trap: Reverse Logic; Trap: Mix-Up; Trap: Real-World Distraction; Trap: No Tie to Argument; Trap: Premise Repeat.
+  • Timing & Process: No Plan / Stuck; Chose Too Early / Rushed-Guess; Overinvested (>2× median); Ran Out of Time.
+- When you encounter older entries tagged with retired labels (e.g., Calculation Error, RC Trap: Too Extreme, Trap: Scope/Strength, Time Trap), translate them to the closest v4 tag in your reasoning, but preserve the original string when quoting historical data.`;
 
 function parseOptionalRunId(value) {
   if (value === null || value === undefined || value === '') return null;
