@@ -927,6 +927,14 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
   const scraperSource = await loadScraperSource(
     path.resolve(__dirname, 'scrapers', 'gmat_club_question_scraper.js')
   );
+  // GMAT Club renders math with MathJax v2; the page scraper converts each
+  // expression's `data-mathml` with the same converter StartTest uses. It is a
+  // plain CJS module, so wrap it in a scoped `module` shim before injecting.
+  const mathTextSource = await loadScraperSource(
+    path.resolve(__dirname, 'scrapers', 'mathml-text.js')
+  );
+  const mathTextBundle = `(function(){var module={exports:{}};${mathTextSource}
+;window.__mathText=module.exports;})();`;
 
   try {
     const cdpConnection = await connectBrowserOverCdp(requestedCdpUrl);
@@ -1002,7 +1010,22 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
         // Wait for the OP body to materialize. GMAT Club lazy-loads inline.
         await page.waitForSelector('.item.text', { timeout: 10000 }).catch(() => null);
-        // Make sure the script is loaded (re-inject after each navigation).
+        // Wait for MathJax to actually render. The page scraper reads each
+        // expression from the rendered frame's `data-mathml`; before MathJax
+        // runs there are no frames at all, so waiting only on the absence of
+        // `.MJXc-processing` returns instantly and we silently degrade to the
+        // raw-LaTeX fallback. Wait for one frame per `math/tex` source script.
+        await page.waitForFunction(
+          () => {
+            const sources = document.querySelectorAll('script[type^="math/tex"]').length;
+            if (!sources) return true;
+            return document.querySelectorAll('[data-mathml]').length >= sources
+              && !document.querySelector('.MJXc-processing');
+          },
+          { timeout: 8000 }
+        ).catch(() => null);
+        // Make sure the scripts are loaded (re-inject after each navigation).
+        await page.addScriptTag({ content: mathTextBundle });
         await page.addScriptTag({ content: scraperSource });
         const result = await page.evaluate(() => {
           if (typeof window.gmatClubEnrichCurrentPage !== 'function') {
@@ -1023,18 +1046,29 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
         if (layout === 'rc' && Array.isArray(result.questions) && result.questions.length) {
           const passage = result.passage || '';
           const qs = result.questions;
-          // Pair attempt rows (sorted oldest→newest) to questions 1..N. If
-          // the row count exceeds the question count, extra rows still get
-          // the passage but no per-question stem/choices (better than nothing).
+          // Pair attempt rows (sorted oldest→newest) to questions 1..N. GMAT
+          // Club suffixes the analytics-table title of an RC sub-question with
+          // its position ("... can lead to epidemi (№5)"), and Phase 1 stored
+          // that as the row's stem — so when it is there, trust it. Index
+          // pairing alone is wrong the moment a question was attempted twice:
+          // the group then has more rows than the page has questions and every
+          // row after the duplicate shifts by one.
+          const positionFromTitle = (title) => {
+            const m = String(title || '').match(/\(\u2116\s*(\d+)\)\s*$/);
+            return m ? parseInt(m[1], 10) : null;
+          };
           for (let j = 0; j < group.length; j += 1) {
             const t = group[j];
-            const q = qs[j] || null;
+            const titled = positionFromTitle(t.title);
+            const q = (titled && qs.find((x) => x.position === titled)) || qs[j] || null;
             items.push({
               q_id: t.q_id || null,
               q_code: t.q_code || null,
               source_url: url,
               final_url: finalUrl,
               title: result.title || '',
+              format_forum: result.format_forum || null,
+              format_code: result.format_code || null,
               passage_text: passage,
               rc_position: q ? q.position : null,
               rc_question_count: qs.length,
@@ -1059,6 +1093,8 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
               source_url: url,
               final_url: finalUrl,
               title: result.title || '',
+              format_forum: result.format_forum || null,
+              format_code: result.format_code || null,
               passage_text: '',
               rc_position: null,
               rc_question_count: null,

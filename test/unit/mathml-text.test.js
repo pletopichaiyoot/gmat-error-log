@@ -84,3 +84,14 @@ test('htmlToReadableText: empty/null', () => {
   assert.equal(htmlToReadableText(''), '');
   assert.equal(htmlToReadableText(null), '');
 });
+
+test('a bracket as superscript base is not re-parenthesized', () => {
+  // GMAT Club (MathJax v2) writes "2(26)^5" with the closing bracket as the
+  // msup base; wrapping it produced "2(26())^5".
+  const ml = wrap('<mn>2</mn><mo stretchy="false">(</mo><mn>26</mn><msup><mo stretchy="false">)</mo><mn>5</mn></msup>');
+  assert.equal(mathmlToText(ml), '2(26)^5');
+});
+
+test('an empty superscript base renders nothing rather than "()"', () => {
+  assert.equal(mathmlToText(wrap('<msup><mrow></mrow><mn>2</mn></msup>')), '^2');
+});

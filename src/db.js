@@ -3459,6 +3459,16 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
       }))
       .filter((c) => c.label || c.text);
 
+    // Question format (PS vs DS) from the topic page title — see
+    // extractFormat() in gmat_club_question_scraper.js. Phase 1 CANNOT know
+    // this (the analytics table has no format column and defaults every quant
+    // row to PS), so Phase 2 is the only place GMAT Club DS gets labelled
+    // correctly. Only overwrite category_code when we positively detected a
+    // format; never blank an existing value.
+    const formatCode = ['PS', 'DS'].includes(String(item?.format_code || '').trim().toUpperCase())
+      ? String(item.format_code).trim().toUpperCase()
+      : '';
+
     try {
       await tx.run(
         `
@@ -3468,7 +3478,8 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
               correct_answer = COALESCE(NULLIF(?, ''), correct_answer),
               my_answer = COALESCE(NULLIF(?, ''), my_answer),
               question_url = COALESCE(NULLIF(?, ''), question_url),
-              passage_text = COALESCE(NULLIF(?, ''), passage_text)
+              passage_text = COALESCE(NULLIF(?, ''), passage_text),
+              category_code = COALESCE(NULLIF(?, ''), category_code)
           WHERE id = ?
         `,
         [
@@ -3479,6 +3490,7 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
           item.my_answer || '',
           item.final_url || item.source_url || '',
           item.passage_text || '',
+          formatCode,
           targetRow.id,
         ]
       );

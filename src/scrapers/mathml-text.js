@@ -57,7 +57,15 @@ function mathmlToText(markup) {
 
   const norm = (s) => s.replace(/\s+/g, ' ').trim();
   const isAtom = (s) => /^[A-Za-z0-9.]+$/.test(s);
-  const wrap = (s) => { const t = norm(s); return isAtom(t) ? t : `(${t})`; };
+  const wrap = (s) => {
+    const t = norm(s);
+    // A single character (or nothing) never needs grouping. MathJax emits the
+    // MathML for "2(26)^5" as <mn>2</mn><mo>(</mo><mn>26</mn><msup><mo>)</mo>
+    // <mn>5</mn></msup> — the closing bracket IS the superscript base — which
+    // used to render as "2(26())^5".
+    if (t.length <= 1) return t;
+    return isAtom(t) ? t : `(${t})`;
+  };
   const elems = (node) => node.children.filter((c) => c.tag);
   const R = (node) => render(node || { children: [] });
   const renderChildren = (node) => node.children.map(render).join('');

@@ -1141,7 +1141,11 @@ app.post('/api/sessions/:sessionId/enrich', async (req, res) => {
       }
       phase2 = await runGmatClubPhase2FromOpenBrowser({
         cdpUrl: validatedCdpUrl,
-        targets: targets.map((t) => ({ q_id: t.q_id, q_code: t.q_code, url: t.question_url })),
+        // `title` carries the Phase-1 analytics-table text, whose "(№N)" suffix
+        // is how the runner pins an RC sub-question to its position on the page.
+        targets: targets.map((t) => ({
+          q_id: t.q_id, q_code: t.q_code, url: t.question_url, title: t.question_stem,
+        })),
       });
       dbResult = await enrichGmatClubSessionAttempts({
         sessionExternalId: sessionRow.session_external_id,
