@@ -17,6 +17,7 @@ import HeroBand from './components/HeroBand';
 import Sparkline from './components/Sparkline';
 import DifficultyMatrix from './components/DifficultyMatrix';
 import MiniBar from './components/MiniBar';
+import { buildStartTestSearchPhrase } from './lib/starttestSearchPhrase.mjs';
 import { buildAccuracyTrend, pickWeakestCategory, buildSubjectDifficultyMatrix } from './lib/trend.mjs';
 
 function RouteFallback() {
@@ -5477,18 +5478,40 @@ function App() {
                 <div className="qr-meta-bar">
                   <div className="qr-meta-group">
                     <SourceBadge source={questionReview.row.source} />
-                    {questionReview.row.q_code ? (
-                      <button
-                        type="button"
-                        className="qr-meta-chip qr-chip-code"
-                        title="Copy question code (paste into the StartTest search panel)"
-                        onClick={() => handleCopyQCode(questionReview.row.q_code)}
-                      >
-                        {copiedQCode === String(questionReview.row.q_code).trim()
-                          ? 'Copied'
-                          : `Q ${questionReview.row.q_code}`}
-                      </button>
-                    ) : null}
+                    {(() => {
+                      // What this chip copies depends on what will actually find
+                      // the question again in StartTest:
+                      //   • search_item_id — the portal's own Item ID, the only
+                      //     value its "Search by Item ID" box resolves.
+                      //   • otherwise, for a StartTest book, a quoted phrase from
+                      //     the stem for the panel's "Search by Text" mode.
+                      //   • q_code last: it is the ITD item key, which that search
+                      //     rejects, so the tooltip says so rather than implying
+                      //     it works.
+                      const row = questionReview.row;
+                      const searchId = String(row.search_item_id || '').trim();
+                      const phrase = getSourcePlatform(row.source) === 'starttest'
+                        ? buildStartTestSearchPhrase(row.question_stem)
+                        : '';
+                      const chip = searchId
+                        ? { value: searchId, label: `ID ${searchId}`, title: 'Copy StartTest Item ID — paste into Search → Search by Item ID' }
+                        : phrase
+                          ? { value: phrase, label: 'Search text', title: `Copy an exact phrase for StartTest → Search → Search by Text: ${phrase}` }
+                          : String(row.q_code || '').trim()
+                            ? { value: String(row.q_code).trim(), label: `Q ${String(row.q_code).trim()}`, title: 'Copy internal question code (not searchable in StartTest)' }
+                            : null;
+                      if (!chip) return null;
+                      return (
+                        <button
+                          type="button"
+                          className="qr-meta-chip qr-chip-code"
+                          title={chip.title}
+                          onClick={() => handleCopyQCode(chip.value)}
+                        >
+                          {copiedQCode === chip.value ? 'Copied' : chip.label}
+                        </button>
+                      );
+                    })()}
                     <span className="qr-meta-chip qr-chip-subject">{formatMaybe(normalizeSubjectFamilyDisplay(normalizedSubjectCode(questionReview.row)))}</span>
                     {formatMaybe(normalizedCategoryCode(questionReview.row)) !== '-' && (
                       <span className="qr-meta-chip">{normalizedCategoryCode(questionReview.row)}</span>

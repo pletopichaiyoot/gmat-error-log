@@ -1,4 +1,5 @@
 const fs = require('fs/promises');
+const fsSync = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 
@@ -508,6 +509,8 @@ const {
   _internals: startTestInternals,
 } = require('./scrapers/starttest_scraper');
 
+const { harvestSearchItemIds } = require('./scrapers/starttest_search_scraper');
+
 const {
   SECTION_PRESETS: TTP_SECTION_PRESETS,
   ScrapeAnomalyError: TtpAnomalyError,
@@ -526,6 +529,29 @@ const GMATCLUB_HOME_URL = 'https://gmatclub.com/forum/analytics.php#error_log';
 function findStartTestPage(browser) {
   const pages = browser.contexts().flatMap((ctx) => ctx.pages());
   return pages.find((p) => STARTTEST_TAB_RE.test(p.url())) || null;
+}
+
+// Every StartTest `code` is single-use, so a tab left on a spent link is dead:
+// navigating it lands on an expired page (which then redirects to mba.com) even
+// though its URL still matches STARTTEST_TAB_RE. When several starttest tabs are
+// open, hand back the plausible ones — newest-looking first — so a caller can
+// try the next after one turns out to be stale.
+function findStartTestPages(browser) {
+  return browser
+    .contexts()
+    .flatMap((ctx) => ctx.pages())
+    .filter((p) => STARTTEST_TAB_RE.test(p.url()))
+    .sort((a, b) => scoreStartTestTab(b) - scoreStartTestTab(a));
+}
+
+function scoreStartTestTab(page) {
+  const url = page.url();
+  let score = 0;
+  if (/[?&]session=\d+/.test(url)) score += 2;
+  if (/[?&]code=[0-9a-f-]{36}/i.test(url)) score += 2;
+  if (/[?&]cmd=/i.test(url)) score += 1;
+  if (/\/(null|undefined)$/.test(url)) score -= 5;
+  return score;
 }
 
 // Best-effort post-run navigation back to the platform's "home" so the user's
@@ -891,6 +917,100 @@ async function runStartTestPhase2FromOpenBrowser(options = {}) {
     if (startTestPage && onPageError) startTestPage.off('pageerror', onPageError);
     // Same no-close discipline.
   }
+}
+
+// StartTest Item-ID harvest: drives the book's own Search panel to read back
+// the portal-side Item Names (the only ids its "Search by Item ID" box accepts
+// — q_code holds the ITD key, which it rejects). Read-only for the account:
+// searches only, no items taken. Same no-close discipline as every other
+// StartTest path — the browser is the user's logged-in Chrome.
+async function runStartTestSearchHarvestFromOpenBrowser(options = {}) {
+  const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
+  const sourceId = String(options.sourceId || '').trim();
+  const preset = STARTTEST_SOURCE_PRODUCTS[sourceId];
+  if (!preset) {
+    const err = new Error(`Unknown StartTest sourceId "${sourceId}".`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const progressEvents = [];
+  let browser = null;
+  let startTestPage = null;
+  try {
+    const cdpConnection = await connectBrowserOverCdp(requestedCdpUrl);
+    browser = cdpConnection.browser;
+
+    const candidates = findStartTestPages(browser);
+    if (!candidates.length) {
+      throw new Error('No starttest.com tab found. Open GMAT practice in your logged-in tab first.');
+    }
+
+    const onProgress = (evt) => {
+      progressEvents.push({ at: new Date().toISOString(), ...evt });
+      if (typeof options.onProgress === 'function') options.onProgress(evt);
+    };
+
+    // HARVEST_DEBUG=1 traces every main-frame navigation + its status, so a
+    // session that dies mid-run can be pinned to the exact request that did it.
+    const netLogPath = process.env.HARVEST_DEBUG ? (process.env.HARVEST_NET_LOG || 'tmp/harvest-net.log') : null;
+    const traceNet = (page) => {
+      if (!netLogPath) return;
+      const line = (text) => { try { fsSync.appendFileSync(netLogPath, `${new Date().toISOString()} ${text}\n`); } catch { /* tracing is best-effort */ } };
+      page.on('framenavigated', (frame) => {
+        if (frame === page.mainFrame()) line(`NAV   ${frame.url()}`);
+      });
+      page.on('response', (response) => {
+        const url = response.url();
+        if (!/starttest\.com|services\.gmac\.com|mba\.com/.test(url)) return;
+        if (response.request().resourceType() !== 'document' && !/router\?/.test(url)) return;
+        line(`${String(response.status()).padEnd(5)} ${response.request().method()} ${url}`);
+      });
+    };
+
+    let harvest = null;
+    let lastError = null;
+    for (const candidate of candidates) {
+      startTestPage = candidate;
+      // Unlike Phase 2 (which disables timeouts because a single review item can
+      // legitimately take minutes), every harvest step is a plain page load — so
+      // keep a real ceiling, otherwise a dead tab hangs the run silently.
+      startTestPage.setDefaultTimeout(60000);
+      await startTestPage.bringToFront();
+      await startTestPage.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+      attachDialogAutoHandler(startTestPage);
+      traceNet(startTestPage);
+      try {
+        harvest = await harvestSearchItemIds(startTestPage, sourceId, {
+          onProgress,
+          seedsOnly: Boolean(options.seedsOnly),
+        });
+        break;
+      } catch (error) {
+        lastError = error;
+        onProgress({ event: 'tab-rejected', tabUrl: startTestPage.url(), message: error?.message || String(error) });
+        if (!STARTTEST_TAB_RE.test(startTestPage.url())) continue; // spent code → tab bounced off StartTest
+        throw error;
+      }
+    }
+    if (!harvest) {
+      throw lastError || new Error('No usable starttest.com tab (every candidate had a spent session code).');
+    }
+
+    await navigateStartTestHomeSafe(startTestPage);
+
+    return {
+      ...harvest,
+      sourceId,
+      productLabel: preset.label,
+      tabUrl: startTestPage.url(),
+      progressEvents,
+    };
+  } catch (error) {
+    error.scrapeDebug = { sourceId, progressEvents, tabUrl: startTestPage?.url?.() || null };
+    throw error;
+  }
+  // No browser.close() — the tab belongs to the user.
 }
 
 // Phase 2 for GMAT Club: visits each topic URL one at a time on the existing
@@ -1845,6 +1965,7 @@ module.exports = {
   runScrapeFromOpenBrowser,
   runStartTestScrapeFromOpenBrowser,
   runStartTestPhase2FromOpenBrowser,
+  runStartTestSearchHarvestFromOpenBrowser,
   runGmatClubPhase2FromOpenBrowser,
   openStartTestProductInOpenBrowser,
   runTtpScrapeFromOpenBrowser,
