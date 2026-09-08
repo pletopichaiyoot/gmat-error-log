@@ -5479,27 +5479,22 @@ function App() {
                   <div className="qr-meta-group">
                     <SourceBadge source={questionReview.row.source} />
                     {(() => {
-                      // What this chip copies depends on what will actually find
-                      // the question again in StartTest:
-                      //   • search_item_id — the portal's own Item ID, the only
-                      //     value its "Search by Item ID" box resolves.
-                      //   • otherwise, for a StartTest book, a quoted phrase from
-                      //     the stem for the panel's "Search by Text" mode.
-                      //   • q_code last: it is the ITD item key, which that search
-                      //     rejects, so the tooltip says so rather than implying
-                      //     it works.
+                      // StartTest's "Search by Item ID" box only resolves its own
+                      // Item Name, which nothing we scrape ever exposes — q_code
+                      // is the ITD item key and that search rejects it. Its other
+                      // mode, Search by Text, works from the stem, so for a
+                      // StartTest book copy a quoted phrase; otherwise copy the
+                      // code and say plainly that it will not find anything.
                       const row = questionReview.row;
-                      const searchId = String(row.search_item_id || '').trim();
                       const phrase = getSourcePlatform(row.source) === 'starttest'
                         ? buildStartTestSearchPhrase(row.question_stem)
                         : '';
-                      const chip = searchId
-                        ? { value: searchId, label: `ID ${searchId}`, title: 'Copy StartTest Item ID — paste into Search → Search by Item ID' }
-                        : phrase
-                          ? { value: phrase, label: 'Search text', title: `Copy an exact phrase for StartTest → Search → Search by Text: ${phrase}` }
-                          : String(row.q_code || '').trim()
-                            ? { value: String(row.q_code).trim(), label: `Q ${String(row.q_code).trim()}`, title: 'Copy internal question code (not searchable in StartTest)' }
-                            : null;
+                      const code = String(row.q_code || '').trim();
+                      const chip = phrase
+                        ? { value: phrase, label: 'Search text', title: `Copy an exact phrase for StartTest → Search → Search by Text: ${phrase}` }
+                        : code
+                          ? { value: code, label: `Q ${code}`, title: 'Copy internal question code (not searchable in StartTest)' }
+                          : null;
                       if (!chip) return null;
                       return (
                         <button

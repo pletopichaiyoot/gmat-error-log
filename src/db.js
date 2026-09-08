@@ -4,7 +4,6 @@ const { runMigrations } = require('../scripts/migrate');
 const { deriveQuestionMetadata, enrichQuestionMetadata } = require('./question-metadata');
 const { isFlatGradeableChoices, correctAnswerInChoices, classifySetItems, pickBestGradeableRow } = require('./ai-practice-sets');
 const { canonicalizeMistakeTypeValue } = require('./mistake-tags');
-const { matchSearchRowsToAttempts } = require('./scrapers/starttest_search_scraper');
 
 // node-postgres returns int8/bigint (COUNT, SUM(int), session_external_id) and
 // numeric (ROUND results, computed percentages) as STRINGS to preserve precision.
@@ -48,7 +47,6 @@ const QUESTION_ATTEMPT_INSERT_COLUMNS = [
   'passage_text',
   'taxonomy_path',
   'stimulus',
-  'search_item_id',
 ];
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 10 });
@@ -765,9 +763,6 @@ function buildAttemptSnapshotIndex(rows = []) {
       my_answer: normalizedTextOrNull(row?.my_answer),
       correct_answer: normalizedTextOrNull(row?.correct_answer),
       confidence: normalizedTextOrNull(row?.confidence),
-      // StartTest's searchable Item ID, filled by the harvest pass (never by a
-      // scrape) — so a Phase-1 rescrape must carry it over like the rest.
-      search_item_id: normalizedTextOrNull(row?.search_item_id),
     };
 
     const qid = String(row?.q_id || '').trim();
@@ -869,7 +864,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
       // snapshot but not here, so every rescrape kept re-wiping them).
       const existingAttempts = await tx.all(
         `
-          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, question_stem_html, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta, taxonomy_path, stimulus, my_answer, correct_answer, confidence, search_item_id
+          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, question_stem_html, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta, taxonomy_path, stimulus, my_answer, correct_answer, confidence
           FROM question_attempts
           WHERE session_id = ?
         `,
@@ -1098,7 +1093,6 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
           passageText,
           normalizedTextOrNull(q.taxonomy_path) || preservedSnapshot?.taxonomy_path || null,
           normalizeStimulusForStorage(q.stimulus) || preservedSnapshot?.stimulus || null,
-          preservedSnapshot?.search_item_id || null,
       ];
       assertValueCount('question_attempts insert', QUESTION_ATTEMPT_INSERT_COLUMNS, attemptValues);
 
@@ -1956,7 +1950,6 @@ async function listErrors({ runId, subject, category, difficulty, topic, confide
         s.source,
         q.q_code,
         q.q_id,
-        q.search_item_id,
         q.cat_id,
         q.question_url,
         q.question_stem,
@@ -2922,7 +2915,6 @@ async function getSessionAnalysis(sessionId) {
         q.id,
         q.q_code,
         q.cat_id,
-        q.search_item_id,
         q.subject_code,
         q.category_code,
         q.subcategory,
@@ -3044,59 +3036,6 @@ async function getLatestRunForSource(source) {
     `,
     [source]
   );
-}
-
-// StartTest Item-ID harvest writer. Takes the rows scraped from the Search
-// panel for one book and caches each question's searchable Item Name on the
-// matching attempts (see src/scrapers/starttest_search_scraper.js for why the
-// id cannot come from a normal scrape). Attempts that stay ambiguous are left
-// NULL on purpose — a wrong Item ID would send the user to a wrong question.
-async function applyStartTestSearchItemIds({ source, searchRows }) {
-  const attempts = await all(
-    `
-      SELECT qa.id, qa.q_code, qa.question_stem, qa.correct, qa.time_sec, s.session_date
-      FROM question_attempts qa
-      JOIN sessions s ON s.id = qa.session_id
-      WHERE s.source = ?
-        AND COALESCE(TRIM(qa.question_stem), '') <> ''
-    `,
-    [source]
-  );
-
-  const { assignments, byQCode, ambiguous } = matchSearchRowsToAttempts(searchRows, attempts);
-
-  // A question's Item ID belongs to the question, not the attempt — so every
-  // other attempt of the same q_code inherits it (re-attempts show up in the
-  // search results only once, under their latest attempt).
-  const perAttempt = new Map(assignments.map((a) => [a.attemptId, a.itemId]));
-  for (const attempt of attempts) {
-    const qCode = String(attempt.q_code || '').trim();
-    if (!perAttempt.has(attempt.id) && qCode && byQCode.has(qCode)) {
-      perAttempt.set(attempt.id, byQCode.get(qCode));
-    }
-  }
-
-  let updated = 0;
-  if (perAttempt.size) {
-    await withTransaction(async (tx) => {
-      for (const [attemptId, itemId] of perAttempt) {
-        const res = await tx.run(
-          `UPDATE question_attempts SET search_item_id = ? WHERE id = ? AND COALESCE(search_item_id, '') <> ?`,
-          [itemId, attemptId, itemId]
-        );
-        updated += res?.changes ?? 0;
-      }
-    });
-  }
-
-  return {
-    source,
-    searchRows: (searchRows || []).length,
-    attempts: attempts.length,
-    matched: perAttempt.size,
-    updated,
-    ambiguous,
-  };
 }
 
 // Phase 2 enrichment: takes a session id (StartTest sid) and the array of items
@@ -5144,7 +5083,6 @@ module.exports = {
   enrichGmatClubSessionAttempts,
   enrichGmatClubCatSessionAttempts,
   enrichOpeSessionAttempts,
-  applyStartTestSearchItemIds,
   listGmatClubEnrichTargets,
   recomputeIrtCutoffs,
   listRuns,
