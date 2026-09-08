@@ -647,6 +647,8 @@ app.get('/api/errors', async (req, res) => {
 
     const platform = ['gmatclub', 'gmatclub-cat', 'starttest', 'ttp', 'ope-mock', 'lsat'].includes(req.query.platform) ? req.query.platform : null;
     const subjectRaw = String(req.query.subject || '').toUpperCase();
+    const categoryRaw = String(req.query.category || '').trim().toUpperCase();
+    const topicRaw = String(req.query.topic || '').trim();
     const sortKey = req.query.sortKey || 'session_date';
     const sortOrder = req.query.sortOrder === 'asc' ? 'asc' : 'desc';
     const search = req.query.search || '';
@@ -654,6 +656,7 @@ app.get('/api/errors', async (req, res) => {
     const filterOptions = {
       runId,
       subject: req.query.subject || '',
+      category: req.query.category || '',
       difficulty: req.query.difficulty || '',
       topic: req.query.topic || '',
       confidence: req.query.confidence || '',
@@ -673,8 +676,13 @@ app.get('/api/errors', async (req, res) => {
     const gmatRows = includeGmat
       ? await listErrors({ ...filterOptions, limit: 1000000, offset: 0 })
       : [];
+    // LSAT rows come from their own reader, which knows nothing about the
+    // GMAT category/subcategory taxonomy — so apply those two filters here
+    // rather than letting LSAT rows through unfiltered.
     const lsatRows = includeLsat
-      ? await listLsatDashboardErrors({ subject: ['RC', 'CR'].includes(subjectRaw) ? subjectRaw : null, search })
+      ? (await listLsatDashboardErrors({ subject: ['RC', 'CR'].includes(subjectRaw) ? subjectRaw : null, search }))
+        .filter((row) => (!categoryRaw || String(row.category_code || '').toUpperCase() === categoryRaw)
+          && (!topicRaw || String(row.topic || '') === topicRaw))
       : [];
 
     const dir = sortOrder === 'asc' ? 1 : -1;

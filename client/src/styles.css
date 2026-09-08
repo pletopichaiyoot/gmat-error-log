@@ -1695,6 +1695,36 @@ th.sortable:hover {
   white-space: nowrap;
 }
 
+/* Attempts cell: lifetime attempt count + accuracy on that one question.
+   Most rows are a single miss ("1x 0%"), so the percentage stays muted and only
+   a repeat attempt gets any weight -- the point is spotting the repeats. */
+.error-log-table .attempts-col {
+  white-space: nowrap;
+  min-width: 88px;
+}
+
+.attempt-tally {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.attempt-tally-n {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+.attempt-tally.is-repeat .attempt-tally-n {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.attempt-tally-pct {
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
 /* Clickable row */
 .error-row {
   cursor: pointer;
@@ -2063,6 +2093,14 @@ th.sortable:hover {
   background: var(--primary-lt);
   color: var(--primary);
   font-weight: 700;
+}
+
+/* The practice source is the one chip in this bar that isn't a .qr-meta-chip —
+   it's the shared SourceBadge, colored per platform — so size it to the row. */
+.qr-meta-group .source-chip {
+  min-height: 28px;
+  padding: 4px 12px;
+  font-size: 0.72rem;
 }
 
 .qr-chip-quiet {

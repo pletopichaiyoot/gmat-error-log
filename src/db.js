@@ -1603,7 +1603,7 @@ async function countSessions(runId, { platform, subject, startDate, endDate, inc
   return row ? row.total : 0;
 }
 
-async function listErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag, platform, sortKey, sortOrder, limit, offset, includeExcluded = false }) {
+async function listErrors({ runId, subject, category, difficulty, topic, confidence, search, mistakeTag, platform, sortKey, sortOrder, limit, offset, includeExcluded = false }) {
   const ALLOWED_SORT = {
     session_date: 's.session_date',
     session_external_id: 's.session_external_id',
@@ -1615,6 +1615,8 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
     topic: 'topic',
     time_sec: 'q.time_sec',
     mistake_type: 'q.mistake_type',
+    attempt_count: 'attempt_count',
+    attempt_accuracy_pct: 'attempt_accuracy_pct',
   };
   const sortCol = ALLOWED_SORT[sortKey] || 's.session_date';
   const sortDir = sortOrder === 'asc' ? 'ASC' : 'DESC';
@@ -1848,6 +1850,12 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
     where.push(`COALESCE(NULLIF(q.difficulty, ''), 'Unknown') = ?`);
     params.push(difficulty);
   }
+  if (category) {
+    // Same expression the SELECT aliases as `category`, so the filter and the
+    // rendered Category column agree.
+    where.push(`(${categoryHintExpr}) = ?`);
+    params.push(category);
+  }
   if (topic) {
     where.push(`(${topicExpr}) = ?`);
     params.push(topic);
@@ -1868,6 +1876,11 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
     where.push(`LOWER(COALESCE(q.mistake_type, '')) LIKE LOWER(?)`);
     params.push(`%${mistakeTag}%`);
   }
+
+  // The attempt tallies count the same universe of attempts the log itself
+  // lists, so a hidden (excluded) session must not inflate them either.
+  const attemptExcludedClause = excludedAttemptClause('q2', includeExcluded);
+  const attemptScopeClause = attemptExcludedClause ? `AND ${attemptExcludedClause}` : '';
 
   let limitClause = '';
   if (limit !== undefined && offset !== undefined) {
@@ -1900,6 +1913,26 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
         FROM question_attempts q2
         INNER JOIN sessions s2 ON s2.id = q2.session_id
         WHERE q2.correct = 1 AND TRIM(COALESCE(q2.q_id, '')) <> ''
+        GROUP BY TRIM(q2.q_id)
+      ),
+      att_code AS (
+        -- Lifetime attempt tally per q_code: how many times the question was
+        -- answered anywhere (original + redos, any source) and how many of
+        -- those were right. Same identity rule as corr_code/listAttemptHistory.
+        SELECT TRIM(q2.q_code) AS code, COUNT(*) AS n, SUM(q2.correct) AS ok
+        FROM question_attempts q2
+        WHERE TRIM(COALESCE(q2.q_code, '')) <> ''
+          AND NOT (${unansweredPlaceholderExpr('q2')})
+          ${attemptScopeClause}
+        GROUP BY TRIM(q2.q_code)
+      ),
+      att_id AS (
+        -- Same as att_code but keyed on q_id, for rows that lack a q_code.
+        SELECT TRIM(q2.q_id) AS qid, COUNT(*) AS n, SUM(q2.correct) AS ok
+        FROM question_attempts q2
+        WHERE TRIM(COALESCE(q2.q_id, '')) <> ''
+          AND NOT (${unansweredPlaceholderExpr('q2')})
+          ${attemptScopeClause}
         GROUP BY TRIM(q2.q_id)
       )
       SELECT
@@ -1946,7 +1979,12 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
           ELSE 0
         END AS corrected_later,
         q.mistake_type,
-        q.notes
+        q.notes,
+        COALESCE(ac.n, ai.n, 1) AS attempt_count,
+        ROUND(
+          100.0 * COALESCE(ac.ok, ai.ok, q.correct) / COALESCE(ac.n, ai.n, 1),
+          0
+        ) AS attempt_accuracy_pct
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
       LEFT JOIN corr_code cc ON COALESCE(NULLIF(TRIM(q.q_code), ''), '') <> ''
@@ -1954,6 +1992,11 @@ async function listErrors({ runId, subject, difficulty, topic, confidence, searc
       LEFT JOIN corr_id   ci ON COALESCE(NULLIF(TRIM(q.q_code), ''), '') = ''
                             AND COALESCE(NULLIF(TRIM(q.q_id), ''), '') <> ''
                             AND ci.qid = TRIM(q.q_id)
+      LEFT JOIN att_code  ac ON COALESCE(NULLIF(TRIM(q.q_code), ''), '') <> ''
+                            AND ac.code = TRIM(q.q_code)
+      LEFT JOIN att_id    ai ON COALESCE(NULLIF(TRIM(q.q_code), ''), '') = ''
+                            AND COALESCE(NULLIF(TRIM(q.q_id), ''), '') <> ''
+                            AND ai.qid = TRIM(q.q_id)
       WHERE ${where.join(' AND ')}
       ORDER BY ${sortCol} ${sortDir}, q.id ${sortDir}
       ${limitClause}

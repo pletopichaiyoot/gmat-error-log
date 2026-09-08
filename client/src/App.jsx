@@ -1192,6 +1192,22 @@ function SourceBadge({ source }) {
   );
 }
 
+// Lifetime attempts on one question plus how many of them were right
+// (attempt_count / attempt_accuracy_pct, computed per question identity by the
+// API). Every error-log row is a miss, so a never-redone question reads "1x 0%";
+// anything above one attempt is a repeat offender worth spotting.
+function AttemptTally({ row }) {
+  const n = Number(row?.attempt_count);
+  if (!Number.isFinite(n) || n < 1) return <span className="muted">-</span>;
+  const pct = row?.attempt_accuracy_pct;
+  return (
+    <span className={`attempt-tally${n > 1 ? ' is-repeat' : ''}`}>
+      <span className="attempt-tally-n">{n}×</span>
+      {pct != null && <span className="attempt-tally-pct">{Math.round(Number(pct))}%</span>}
+    </span>
+  );
+}
+
 // Lists every attempt that shares this question's identity (q_code, or q_id
 // fallback) — original plus redos across platforms — each with its own note.
 // Self-fetching so it can drop into both the error-row expand and the modal.
@@ -1547,7 +1563,7 @@ function App() {
     categoryBreakdown: [],
     subtopicBreakdown: [],
   });
-  const [filters, setFilters] = useState({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' });
+  const [filters, setFilters] = useState({ subject: '', category: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' });
   const [syncCenterOpen, setSyncCenterOpen] = useState(false);
   const [isOpening, setIsOpening] = useState(false);
   const [isOpeningProduct, setIsOpeningProduct] = useState(false);
@@ -1581,7 +1597,7 @@ function App() {
     loading: false,
     error: '',
     title: '',
-    criteria: { subject: '', difficulty: '', topic: '', confidence: '' },
+    criteria: { subject: '', category: '', difficulty: '', topic: '', confidence: '' },
     rows: [],
   });
   const [sessionAnalysis, setSessionAnalysis] = useState({
@@ -1832,6 +1848,7 @@ function App() {
     params.set('pageSize', errorPagination.pageSize);
     if (customFilters.subject) params.set('subject', customFilters.subject);
     if (customFilters.difficulty) params.set('difficulty', customFilters.difficulty);
+    if (customFilters.category) params.set('category', customFilters.category);
     if (customFilters.topic) params.set('topic', customFilters.topic);
     if (customFilters.confidence) params.set('confidence', customFilters.confidence);
     if (customFilters.search) params.set('search', customFilters.search);
@@ -1968,7 +1985,7 @@ function App() {
       loadErrorsByFilters(filters).catch(() => {});
     }, filters.search ? 350 : 0);
     return () => clearTimeout(id);
-  }, [filters.subject, filters.difficulty, filters.confidence, filters.search, filters.mistakeTag, filters.topic, filters.platform]);
+  }, [filters.subject, filters.category, filters.difficulty, filters.confidence, filters.search, filters.mistakeTag, filters.topic, filters.platform]);
 
   // Legacy toggle changes the row set for sessions, error log, AND patterns, so
   // it re-runs the whole dashboard load rather than just the sessions list.
@@ -2248,7 +2265,7 @@ function App() {
   }
 
   async function handleOpenPatternDrilldown(type, value, extra = {}) {
-    const criteria = { subject: '', difficulty: '', topic: '', confidence: '' };
+    const criteria = { subject: '', category: '', difficulty: '', topic: '', confidence: '' };
     if (type === 'topic') criteria.topic = value;
     if (type === 'difficulty') criteria.difficulty = value;
     if (type === 'confidence') criteria.confidence = value;
@@ -2426,6 +2443,31 @@ function App() {
     }
     return groups;
   }, [patterns.subtopicBreakdown]);
+
+  // Error-log Category / Subcategory filter options. Built from the patterns
+  // breakdown (already loaded, and the same canonical taxonomy the server
+  // filters on) because the error log is server-paginated — the rows in state
+  // are one page and can't enumerate the option set. Only buckets that hold at
+  // least one miss are offered, since the error log lists misses only.
+  const errorTaxonomyOptions = useMemo(() => {
+    // Both sides go through mapSubjectFamily: the subject filter speaks codes
+    // (Q/V/DI) while patterns rows carry family names, and the display
+    // normalizer renders DI as "Data Insights" — comparing raw values there
+    // silently emptied both dropdowns whenever a subject was selected.
+    const family = filters.subject ? mapSubjectFamily(filters.subject) : '';
+    const categories = new Set();
+    const subcategories = new Set();
+    for (const row of patterns.subtopicBreakdown || []) {
+      if (!Number(row.incorrect_count)) continue;
+      if (family && mapSubjectFamily(row.subject_family) !== family) continue;
+      const code = normalizedCategoryCode(row);
+      if (code && code !== '-' && code !== 'Other') categories.add(code);
+      if (filters.category && code !== filters.category) continue;
+      const subtopic = String(row.subtopic || '').trim();
+      if (subtopic) subcategories.add(subtopic);
+    }
+    return { categories: [...categories].sort(), subcategories: [...subcategories].sort() };
+  }, [patterns.subtopicBreakdown, filters.subject, filters.category]);
 
   const sortedCategoryRows = useMemo(() => {
     const rows = [...categoryRows];
@@ -3031,7 +3073,7 @@ function App() {
       loading: false,
       error: '',
       title: '',
-      criteria: { subject: '', difficulty: '', topic: '', confidence: '' },
+      criteria: { subject: '', category: '', difficulty: '', topic: '', confidence: '' },
       rows: [],
     });
   }
@@ -3404,7 +3446,7 @@ function App() {
   // Filter-aware empty states: "filtered to nothing" (offer Clear) vs
   // "no data yet" (offer Sync) read very differently to the user.
   const hasActiveErrorFilters = Boolean(
-    filters.subject || filters.difficulty || filters.topic
+    filters.subject || filters.category || filters.difficulty || filters.topic
     || filters.confidence || filters.search || filters.mistakeTag || filters.platform,
   );
   const hasActiveSessionFilters = Boolean(
@@ -3412,7 +3454,7 @@ function App() {
     || sessionDateRange.start || sessionDateRange.end,
   );
   function clearErrorFilters() {
-    setFilters({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' });
+    setFilters({ subject: '', category: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' });
   }
   function clearSessionFilters() {
     setSessionPlatformFilter('');
@@ -4251,11 +4293,14 @@ function App() {
           <>
             {(() => {
               const advancedActiveCount =
+                (filters.category ? 1 : 0) +
+                (filters.topic ? 1 : 0) +
                 (filters.difficulty ? 1 : 0) +
                 (filters.confidence ? 1 : 0) +
                 (filters.mistakeTag ? 1 : 0);
               const anyActive =
-                filters.subject || filters.difficulty || filters.confidence ||
+                filters.subject || filters.category || filters.topic ||
+                filters.difficulty || filters.confidence ||
                 filters.search || filters.mistakeTag || filters.platform;
               return (
                 <div className="error-filter-bar error-filter-sticky">
@@ -4277,7 +4322,7 @@ function App() {
                     <Select
                       className="filter-select"
                       value={filters.subject}
-                      onChange={(event) => setFilters((prev) => ({ ...prev, subject: event.target.value }))}
+                      onChange={(event) => setFilters((prev) => ({ ...prev, subject: event.target.value, category: '', topic: '' }))}
                     >
                       <option value="">All subjects</option>
                       <option value="Q">Quant</option>
@@ -4305,7 +4350,7 @@ function App() {
                         variant="ghost"
                         size="sm"
                         onClick={() => {
-                          setFilters({ subject: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' });
+                          setFilters({ subject: '', category: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' });
                           setErrorFiltersOpen(false);
                         }}
                       >
@@ -4315,6 +4360,26 @@ function App() {
                   </div>
                   {errorFiltersOpen && (
                     <div className="error-filter-secondary">
+                      <Select
+                        className="filter-select"
+                        value={filters.category}
+                        onChange={(event) => setFilters((prev) => ({ ...prev, category: event.target.value, topic: '' }))}
+                      >
+                        <option value="">All categories</option>
+                        {errorTaxonomyOptions.categories.map((code) => (
+                          <option key={code} value={code}>{code}</option>
+                        ))}
+                      </Select>
+                      <Select
+                        className="filter-select"
+                        value={filters.topic}
+                        onChange={(event) => setFilters((prev) => ({ ...prev, topic: event.target.value }))}
+                      >
+                        <option value="">All subcategories</option>
+                        {errorTaxonomyOptions.subcategories.map((topic) => (
+                          <option key={topic} value={topic}>{topic}</option>
+                        ))}
+                      </Select>
                       <Select
                         className="filter-select"
                         value={filters.difficulty}
@@ -4363,6 +4428,7 @@ function App() {
                     <th className="sortable topic-col" onClick={() => handleErrorSort('topic')}>Subcategory {sortIndicator(errorSort, 'topic')}</th>
                     <th className="sortable" onClick={() => handleErrorSort('difficulty')}>Diff {sortIndicator(errorSort, 'difficulty')}</th>
                     <th className="sortable" onClick={() => handleErrorSort('time_sec')}>Time {sortIndicator(errorSort, 'time_sec')}</th>
+                    <th className="sortable attempts-col" onClick={() => handleErrorSort('attempt_count')} title="Lifetime attempts on this question, and how many of them were right">Attempts {sortIndicator(errorSort, 'attempt_count')}</th>
                     <th className="sortable" onClick={() => handleErrorSort('mistake_type')}>Mistake Tags {sortIndicator(errorSort, 'mistake_type')}</th>
                     <th className="action-col">Actions</th>
                   </tr>
@@ -4370,7 +4436,7 @@ function App() {
                 <tbody>
                   {errors.length === 0 && (
                     <tr>
-                      <td colSpan="8">
+                      <td colSpan="9">
                         {isDashboardLoading ? (
                           <span className="table-empty-loading">Loading your error log…</span>
                         ) : bootError ? (
@@ -4435,6 +4501,7 @@ function App() {
                             ) : <span className="muted">-</span>}
                           </td>
                           <td>{formatDurationSeconds(row.time_sec)}</td>
+                          <td className="attempts-col"><AttemptTally row={row} /></td>
                           <td className="mistake-tags-cell">
                             {tags.length > 0
                               ? tags.map((tag) => (
@@ -4487,7 +4554,7 @@ function App() {
                         </tr>
                         {isExpanded && (
                           <tr className="error-expand-row">
-                            <td colSpan="8">
+                            <td colSpan="9">
                               <div className="error-expand-grid">
                                 <div className="error-expand-field">
                                   <span>Source</span>
@@ -5409,6 +5476,7 @@ function App() {
               <div className="question-review-hero">
                 <div className="qr-meta-bar">
                   <div className="qr-meta-group">
+                    <SourceBadge source={questionReview.row.source} />
                     {questionReview.row.q_code ? (
                       <button
                         type="button"

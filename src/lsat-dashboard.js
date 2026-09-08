@@ -154,10 +154,20 @@ function buildSessionRow(s, atts) {
   };
 }
 
-// A question_attempts-shaped row for the Error Log + review modal.
-function buildQuestionRow(s, a) {
+// Identity of one LSAT question across attempts (the analogue of q_code).
+function lsatQuestionKey(a) {
+  return `${a.test_num}|${a.section_roman}|${a.question_number}`;
+}
+
+// A question_attempts-shaped row for the Error Log + review modal. `tallies`
+// (from loadAll) carries the lifetime attempt count per question, matching the
+// attempt_count / attempt_accuracy_pct the GMAT reader computes in SQL; without
+// it a row reports only itself.
+function buildQuestionRow(s, a, tallies) {
   const idx = questionIndex();
-  const q = idx.get(`${a.test_num}|${a.section_roman}|${a.question_number}`) || {};
+  const key = lsatQuestionKey(a);
+  const q = idx.get(key) || {};
+  const tally = (tallies && tallies.get(key)) || { n: 1, ok: a.is_correct ? 1 : 0 };
   const sessionDbId = s ? s.id : a.session_id;
   return {
     id: `lsat-${a.id}`,
@@ -194,18 +204,26 @@ function buildQuestionRow(s, a) {
     mistake_type: a.mistake_type || null,
     notes: a.notes || null,
     question_number: a.question_number,
+    attempt_count: tally.n,
+    attempt_accuracy_pct: Math.round((100 * tally.ok) / tally.n),
   };
 }
 
 async function loadAll() {
   const [sessions, attempts] = await Promise.all([listLsatSessions(), listLsatAttempts({})]);
   const bySession = new Map();
+  const tallies = new Map();
   for (const a of attempts) {
+    const key = lsatQuestionKey(a);
+    if (!tallies.has(key)) tallies.set(key, { n: 0, ok: 0 });
+    const tally = tallies.get(key);
+    tally.n += 1;
+    if (a.is_correct) tally.ok += 1;
     if (a.session_id == null) continue;
     if (!bySession.has(a.session_id)) bySession.set(a.session_id, []);
     bySession.get(a.session_id).push(a);
   }
-  return { sessions, bySession };
+  return { sessions, bySession, tallies };
 }
 
 function subjectMatches(subject, kind) {
@@ -236,7 +254,7 @@ async function listLsatDashboardSessions({ subject, startDate, endDate } = {}) {
 
 // Error rows (incorrect answers only) for the Error Log + review modal.
 async function listLsatDashboardErrors({ subject, search } = {}) {
-  const { sessions, bySession } = await loadAll();
+  const { sessions, bySession, tallies } = await loadAll();
   const sessionById = new Map(sessions.map((s) => [s.id, s]));
   const out = [];
   for (const [sessionId, atts] of bySession.entries()) {
@@ -244,7 +262,7 @@ async function listLsatDashboardErrors({ subject, search } = {}) {
     for (const a of atts) {
       if (a.is_correct) continue;
       if (!subjectMatches(subject, a.section_kind)) continue;
-      const row = buildQuestionRow(s, a);
+      const row = buildQuestionRow(s, a, tallies);
       if (search) {
         const hay = `${row.question_stem} ${row.topic} ${row.q_code}`.toLowerCase();
         if (!hay.includes(String(search).toLowerCase())) continue;
