@@ -2071,6 +2071,18 @@ th.sortable:hover {
   border-color: transparent;
 }
 
+.qr-chip-code {
+  cursor: pointer;
+  font-family: inherit;
+  border-style: dashed;
+  border-color: var(--border);
+  color: var(--ink-1);
+}
+
+.qr-chip-code:hover {
+  background: var(--surface-2);
+}
+
 .qr-chip-source {
   color: var(--muted);
   border-style: dashed;

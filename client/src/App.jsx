@@ -1603,6 +1603,7 @@ function App() {
     row: null,
   });
   const [openingQuestionKey, setOpeningQuestionKey] = useState('');
+  const [copiedQCode, setCopiedQCode] = useState('');
   // Legacy = the retired pre-StartTest "GMAT Official" practice-book scrape
   // (sessions.excluded = 1 server-side). Hidden by default across every view;
   // the toggle re-requests with includeExcluded=1. Persisted so a reload keeps it.
@@ -3158,6 +3159,18 @@ function App() {
       open: false,
       row: null,
     });
+  }
+
+  async function handleCopyQCode(code) {
+    const text = String(code || '').trim();
+    if (!text) return;
+    try {
+      await window.navigator.clipboard.writeText(text);
+      setCopiedQCode(text);
+      window.setTimeout(() => setCopiedQCode((current) => (current === text ? '' : current)), 1600);
+    } catch {
+      setStatus({ message: `Copy failed. Question code: ${text}`, isError: true });
+    }
   }
 
   function applyAnnotationLocally(updated) {
@@ -5396,6 +5409,18 @@ function App() {
               <div className="question-review-hero">
                 <div className="qr-meta-bar">
                   <div className="qr-meta-group">
+                    {questionReview.row.q_code ? (
+                      <button
+                        type="button"
+                        className="qr-meta-chip qr-chip-code"
+                        title="Copy question code (paste into the StartTest search panel)"
+                        onClick={() => handleCopyQCode(questionReview.row.q_code)}
+                      >
+                        {copiedQCode === String(questionReview.row.q_code).trim()
+                          ? 'Copied'
+                          : `Q ${questionReview.row.q_code}`}
+                      </button>
+                    ) : null}
                     <span className="qr-meta-chip qr-chip-subject">{formatMaybe(normalizeSubjectFamilyDisplay(normalizedSubjectCode(questionReview.row)))}</span>
                     {formatMaybe(normalizedCategoryCode(questionReview.row)) !== '-' && (
                       <span className="qr-meta-chip">{normalizedCategoryCode(questionReview.row)}</span>
