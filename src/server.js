@@ -24,6 +24,7 @@ const {
   getPatterns,
   getSessionAnalysis,
   updateErrorAnnotation,
+  listReviewRules,
   listAttemptHistory,
   saveLsatAttempt,
   listLsatAttempts,
@@ -717,6 +718,17 @@ app.get('/api/patterns', async (req, res) => {
     const runId = req.query.runId ? Number(req.query.runId) : null;
     const patterns = await getPatterns(runId, { includeExcluded: wantsExcluded(req) });
     res.json(patterns);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// The "My Process" panel: every if-then rule written in a review note, ranked by
+// how often it was needed. Unpaginated on purpose — the count is bounded by how
+// many distinct rules exist, not by attempts.
+app.get('/api/review-rules', async (req, res) => {
+  try {
+    res.json(await listReviewRules({ includeExcluded: wantsExcluded(req) }));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

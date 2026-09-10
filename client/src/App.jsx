@@ -18,6 +18,17 @@ import Sparkline from './components/Sparkline';
 import DifficultyMatrix from './components/DifficultyMatrix';
 import MiniBar from './components/MiniBar';
 import { buildStartTestSearchPhrase } from './lib/starttestSearchPhrase.mjs';
+import { buildDropdownStatement, splitDropdownAnswers } from './lib/dropdownStem.mjs';
+import {
+  REVIEW_SLOTS,
+  OTHER_SLOT,
+  parseReviewNotes,
+  serializeReviewNotes,
+  parseRule,
+  formatRule,
+  collectRules,
+  RULE_ARROW,
+} from './lib/reviewNotes.mjs';
 import { buildAccuracyTrend, pickWeakestCategory, buildSubjectDifficultyMatrix } from './lib/trend.mjs';
 
 function RouteFallback() {
@@ -221,6 +232,21 @@ function formatDate(value) {
   return dt.toLocaleDateString();
 }
 
+// "3 days ago" reads faster than a date when the question is "is this rule still
+// biting me?". The exact day stays in the title attribute.
+function formatDaysAgo(value) {
+  if (!value) return '-';
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return String(value);
+  const midnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((midnight(new Date()) - midnight(dt)) / 86400000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 30) return `${days} days ago`;
+  const months = Math.round(days / 30);
+  return months === 1 ? 'a month ago' : `${months} months ago`;
+}
+
 function formatIsoDate(value) {
   if (!value) return '-';
   const dt = new Date(value);
@@ -347,6 +373,49 @@ function formatNotePreview(value, maxLength = 42) {
   return `${text.slice(0, maxLength - 1)}…`;
 }
 
+// The annotation modal edits the review note as slots (see lib/reviewNotes.mjs);
+// the DB still stores one text blob, so every read/write goes through these two.
+const EMPTY_REVIEW_SLOTS = Object.freeze({ happened: '', takeaway: '', when: '', then: '', other: '' });
+
+function reviewSlotsFromNotes(notes) {
+  const parsed = parseReviewNotes(notes);
+  const rule = parseRule(parsed.next);
+  return {
+    happened: parsed.happened,
+    takeaway: parsed.takeaway,
+    when: rule.when,
+    then: rule.then,
+    other: parsed.other,
+  };
+}
+
+function reviewSlotsToNotes(slots) {
+  return serializeReviewNotes({
+    happened: slots?.happened,
+    takeaway: slots?.takeaway,
+    next: formatRule({ when: slots?.when, then: slots?.then }),
+    other: slots?.other,
+  });
+}
+
+// Which of the three prompts a note actually answers — drives the "n / 3" chip
+// in the modal and the tooltip on the error log's notes dot.
+function filledReviewSlots(slots) {
+  if (!slots) return [];
+  const answered = {
+    happened: slots.happened,
+    takeaway: slots.takeaway,
+    next: formatRule({ when: slots.when, then: slots.then }),
+  };
+  return REVIEW_SLOTS.filter((slot) => String(answered[slot.key] || '').trim()).map((slot) => slot.label);
+}
+
+function describeReviewNotes(notes) {
+  const filled = filledReviewSlots(reviewSlotsFromNotes(notes));
+  if (!filled.length) return 'Has notes (no review prompts answered yet)';
+  return `Answered: ${filled.join(', ')}`;
+}
+
 function normalizeQuestionText(value) {
   return String(value || '')
     .replace(/\s+/g, ' ')
@@ -456,6 +525,36 @@ function StemContent({ row }) {
     text = text.replace(/^\s*\[(?:item contains image|figure|image)\]\s*/i, '').trim();
   }
   return <p>{text || 'No locally scraped stem yet.'}</p>;
+}
+
+// StartTest shows an item as: the graphic, then the prose under it, then the
+// statement with the drop-downs. Our modal used to print the stem in its own
+// card ABOVE the stimulus, which for chart items repeated the same prose twice
+// (once bare, once inside the captured stimulus) and put it in the wrong order.
+// So the stem card is dropped whenever its text is already on screen elsewhere.
+function stimulusPlainText(row) {
+  let stimulus = null;
+  try { stimulus = row?.stimulus ? JSON.parse(row.stimulus) : null; } catch { return ''; }
+  if (!stimulus?.html) return '';
+  const tpl = document.createElement('template');
+  tpl.innerHTML = sanitizeStimulusHtml(stimulus.html);
+  return normalizeQuestionText(tpl.content.textContent || '');
+}
+
+function isStemShownElsewhere(row) {
+  const stem = normalizeQuestionText(row?.question_stem);
+  if (!stem) return false;
+  // Stems carrying math render as images — never hide those.
+  if (sanitizeStemHtml(row?.question_stem_html)) return false;
+  // Drop-down items: "Your Responses" renders the whole stem, blanks in place.
+  if (buildDropdownStatement(row?.question_stem, parseAnswerChoices(row?.answer_choices))) return true;
+  // Only when the stimulus is actually rendered inline. MSR items push their
+  // sources into the left "Question Information" tabs and render NO inline
+  // stimulus, so hiding the stem there erases the question entirely.
+  if (getPassageTabs(row).length >= 2) return false;
+  const probe = stem.slice(0, 120);
+  if (probe.length < 40) return false;
+  return stimulusPlainText(row).includes(probe);
 }
 
 // MSR items ship their multiple source passages as sibling `.tabcontent` divs
@@ -1212,7 +1311,9 @@ function AttemptTally({ row }) {
 // Lists every attempt that shares this question's identity (q_code, or q_id
 // fallback) — original plus redos across platforms — each with its own note.
 // Self-fetching so it can drop into both the error-row expand and the modal.
-function AttemptHistoryList({ qCode, qId, variant = 'compact' }) {
+// Every attempt on one question. `null` while loading. Shared by the history
+// list and the question-review tally so the modal fetches this once.
+function useAttemptHistory(qCode, qId) {
   const [rows, setRows] = useState(null);
   useEffect(() => {
     let alive = true;
@@ -1220,11 +1321,20 @@ function AttemptHistoryList({ qCode, qId, variant = 'compact' }) {
     if (qCode) params.set('q_code', qCode);
     else if (qId) params.set('q_id', qId);
     else { setRows([]); return undefined; }
+    setRows(null);
     fetchJson(`/api/attempts/history?${params.toString()}`)
       .then((data) => { if (alive) setRows(Array.isArray(data.attempts) ? data.attempts : []); })
       .catch(() => { if (alive) setRows([]); });
     return () => { alive = false; };
   }, [qCode, qId]);
+  return rows;
+}
+
+function AttemptHistoryList({ qCode, qId, variant = 'compact', rows: given = null }) {
+  // A caller that already holds the attempts passes them in; the hook then has
+  // nothing to look up and never fires a second request for the same question.
+  const fetched = useAttemptHistory(given ? '' : qCode, given ? '' : qId);
+  const rows = given || fetched;
 
   if (rows === null) return <p className="muted attempt-history-status">Loading history…</p>;
   if (rows.length === 0) return <p className="muted attempt-history-status">No attempts recorded.</p>;
@@ -1265,6 +1375,52 @@ function AttemptHistoryList({ qCode, qId, variant = 'compact' }) {
         );
       })}
     </ol>
+  );
+}
+
+// How many times this question has been seen and how often it was right —
+// the context that decides whether a miss is new or a repeat. Sits in the
+// question-review panel; the history it expands is the same fetch.
+function QuestionAttemptSummary({ row }) {
+  const [showHistory, setShowHistory] = useState(false);
+  const attempts = useAttemptHistory(row?.q_code, row?.q_id);
+  const total = attempts?.length || 0;
+  const correct = (attempts || []).filter((a) => Number(a.correct) === 1).length;
+  const pct = total ? Math.round((100 * correct) / total) : null;
+
+  return (
+    <div className="qr-annot-field qr-attempts-field">
+      <span className="qr-annot-label">Attempts</span>
+      {attempts === null ? (
+        <span className="muted">Loading…</span>
+      ) : total === 0 ? (
+        <span className="muted">None recorded</span>
+      ) : (
+        <div className="qr-attempts-line">
+          <span className="qr-attempts-count">{`${total}\u00d7`}</span>
+          <span className={`qr-attempts-pct${pct === 100 ? ' is-clean' : pct === 0 ? ' is-miss' : ''}`}>
+            {`${pct}% correct`}
+          </span>
+          {total > 1 && (
+            <Button
+              variant="outline"
+              size="sm"
+              type="button"
+              className="readmore-btn"
+              onClick={() => setShowHistory((open) => !open)}
+              aria-expanded={showHistory}
+            >
+              {showHistory ? 'Hide history' : `History (${total})`}
+            </Button>
+          )}
+        </div>
+      )}
+      {showHistory && attempts && (
+        <div className="qr-attempts-history">
+          <AttemptHistoryList rows={attempts} variant="compact" />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1613,12 +1769,13 @@ function App() {
     error: '',
     row: null,
     mistakeTags: [],
-    notes: '',
+    slots: EMPTY_REVIEW_SLOTS,
   });
   const [questionReview, setQuestionReview] = useState({
     open: false,
     row: null,
   });
+  const [reviewRules, setReviewRules] = useState({ rules: [], unruled: 0 });
   const [openingQuestionKey, setOpeningQuestionKey] = useState('');
   const [copiedQCode, setCopiedQCode] = useState('');
   // Legacy = the retired pre-StartTest "GMAT Official" practice-book scrape
@@ -1678,6 +1835,7 @@ function App() {
     categoryBreakdown: false,
     performanceBySession: false,
     errorLog: false,
+    process: false,
   });
 
   const toggleSection = (section) => {
@@ -1793,11 +1951,19 @@ function App() {
     setRuns(data.runs || []);
   }
 
+  async function loadReviewRules() {
+    const data = await fetchJson(`/api/review-rules${showLegacyData ? '?includeExcluded=1' : ''}`);
+    setReviewRules({ rules: data.rules || [], unruled: Number(data.unruled || 0) });
+  }
+
   async function loadDashboard(runId = selectedRunId) {
     // Initial load: fetch first page of sessions and first page of errors
     await Promise.all([
       loadSessions(1, runId),
       loadErrors(1, runId),
+      // Non-fatal: an API process started before /api/review-rules existed must
+      // not take the whole dashboard load down with it.
+      loadReviewRules().catch(() => {}),
       (async () => {
         const patternParams = new URLSearchParams();
         if (runId) patternParams.set('runId', runId);
@@ -2469,6 +2635,15 @@ function App() {
     }
     return { categories: [...categories].sort(), subcategories: [...subcategories].sort() };
   }, [patterns.subtopicBreakdown, filters.subject, filters.category]);
+
+  // Rules already written on the loaded error rows, most-used first. Reusing one
+  // verbatim is what makes a rule countable — see collectRules().
+  // ponytail: scoped to the rows currently loaded in the error log; a full
+  // history rollup needs the /api/review-rules endpoint (Stage 2).
+  const knownRules = useMemo(
+    () => (reviewRules.rules.length ? reviewRules.rules : collectRules(errors)),
+    [reviewRules.rules, errors]
+  );
 
   const sortedCategoryRows = useMemo(() => {
     const rows = [...categoryRows];
@@ -3160,7 +3335,7 @@ function App() {
       error: '',
       row,
       mistakeTags: parseMistakeTags(row.mistake_type),
-      notes: row.notes || '',
+      slots: reviewSlotsFromNotes(row.notes),
     });
   }
 
@@ -3172,7 +3347,7 @@ function App() {
       error: '',
       row: null,
       mistakeTags: [],
-      notes: '',
+      slots: EMPTY_REVIEW_SLOTS,
     });
   }
 
@@ -3268,10 +3443,12 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mistakeType: annotation.mistakeTags.length ? JSON.stringify(annotation.mistakeTags) : '',
-          notes: annotation.notes,
+          notes: reviewSlotsToNotes(annotation.slots),
         }),
       });
       applyAnnotationLocally(result.error);
+      // A saved rule changes the rollup and the reuse list; both are cheap.
+      loadReviewRules().catch(() => {});
       handleCloseAnnotation();
       setStatus({ message: `Saved notes for Q ${annotation.row.q_code || annotation.row.id}.`, isError: false });
     } catch (error) {
@@ -3581,7 +3758,7 @@ function App() {
         <nav className="section-nav" aria-label="Jump to section">
           {[
             ['today', 'Today'], ['dashboard', 'Dashboard'], ['categories', 'Categories'],
-            ['sessions', 'Sessions'], ['errors', 'Error Log'],
+            ['sessions', 'Sessions'], ['errors', 'Error Log'], ['process', 'My Process'],
           ].map(([id, label]) => (
             <a
               key={id}
@@ -4509,7 +4686,15 @@ function App() {
                                   <span key={tag} className="mistake-tag-pill">{tag}</span>
                                 ))
                               : <span className="muted">-</span>}
-                            {hasNotes && <span className="err-notes-marker" title="Has notes" aria-label="Has notes">●</span>}
+                            {hasNotes && (
+                              <span
+                                className="err-notes-marker"
+                                title={describeReviewNotes(row.notes)}
+                                aria-label={describeReviewNotes(row.notes)}
+                              >
+                                ●
+                              </span>
+                            )}
                           </td>
                           <td className="action-col">
                             <div className="error-row-actions">
@@ -4614,6 +4799,80 @@ function App() {
                 Next
               </Button>
             </div>
+          </>
+        )}
+      </section>
+
+      <section id="process" className="page-section">
+        <div className="section-header">
+          <h2>My Process</h2>
+          <button
+            type="button"
+            className="collapse-toggle"
+            onClick={() => toggleSection('process')}
+            aria-expanded={!collapsedSections.process}
+            aria-label="Toggle My Process section"
+          >
+            {collapsedSections.process ? '\u002B' : '\u2212'}
+          </button>
+        </div>
+        {!collapsedSections.process && (
+          <>
+            <p className="process-summary">
+              {`${reviewRules.rules.length} ${reviewRules.rules.length === 1 ? 'rule' : 'rules'}`}
+              {reviewRules.unruled > 0 && (
+                <span className="muted">{` \u00b7 ${reviewRules.unruled} errors with no rule yet`}</span>
+              )}
+            </p>
+            {!reviewRules.rules.length ? (
+              <p className="muted process-empty">
+                No rules yet — the <strong>Next time</strong> field on any error becomes one.
+              </p>
+            ) : (
+              <div className="table-wrap">
+                <table className="review-table process-table">
+                  <thead>
+                    <tr>
+                      <th>Rule</th>
+                      <th className="process-hits-col">Hits</th>
+                      <th>Where</th>
+                      <th>Questions</th>
+                      <th>Last used</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reviewRules.rules.map((rule) => (
+                      <tr key={`${rule.when}-${rule.then}`}>
+                        <td className="process-rule-cell">
+                          <span className="process-rule-when">{`When ${rule.when}`}</span>
+                          <span className="process-rule-then">{`${RULE_ARROW} ${rule.then || '—'}`}</span>
+                        </td>
+                        <td className="process-hits-col">
+                          <span
+                            className={`process-hits${rule.hits >= 5 ? ' is-core' : rule.hits >= 2 ? ' is-repeat' : ''}`}
+                          >
+                            {`${rule.hits}\u00d7`}
+                          </span>
+                        </td>
+                        <td>
+                          {rule.categories.length ? (
+                            <span className="process-chips">
+                              {rule.categories.map((code) => (
+                                <span key={code} className="mistake-tag-pill">{code}</span>
+                              ))}
+                            </span>
+                          ) : (
+                            <span className="muted">-</span>
+                          )}
+                        </td>
+                        <td title={rule.sampleQCodes.join(', ')}>{rule.questions}</td>
+                        <td title={rule.lastSeen || ''}>{formatDaysAgo(rule.lastSeen)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </>
         )}
       </section>
@@ -5589,6 +5848,7 @@ function App() {
                 })()}
 
                 <div className="qr-annot-bar">
+                  <QuestionAttemptSummary row={questionReview.row} />
                   <div className="qr-annot-field">
                     <span className="qr-annot-label">Mistake Tags</span>
                     <div className="qr-annot-tags">
@@ -5642,12 +5902,14 @@ function App() {
                 })()}
 
                 <div className="question-review-col question-review-main-col">
-                  <div className="question-review-section">
-                    <h3>Question Stem</h3>
-                    <div className="question-stem-card">
-                      <StemContent row={questionReview.row} />
+                  {!isStemShownElsewhere(questionReview.row) && (
+                    <div className="question-review-section">
+                      <h3>Question Stem</h3>
+                      <div className="question-stem-card">
+                        <StemContent row={questionReview.row} />
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   {(() => {
                     let s = null;
@@ -5812,32 +6074,147 @@ function App() {
                         );
                       }
 
+                      // Matrix rows scraped before per-cell options were captured
+                      // carry only {label, text} — no options, no column headers.
+                      // The picks still exist as CSV column indices on the row, so
+                      // show those rather than a bare list of sub-questions that
+                      // says nothing about what was answered.
+                      if (fmt === 'matrix') {
+                        const cols = (value) => String(value || '').split(/\s*,\s*/).filter(Boolean);
+                        const mine = cols(questionReview.row.my_answer);
+                        const keys = cols(corrAns);
+                        if (mine.length || keys.length) {
+                          return (
+                            <div className="qr-matrix-plain">
+                              <p className="qr-matrix-plain-note muted">
+                                Column labels weren’t captured for this scrape — re-enrich the session to restore them.
+                              </p>
+                              <ol className="qr-matrix-plain-list">
+                                {choices.map((row, ri) => {
+                                  const pick = mine[ri] || '';
+                                  const key = keys[ri] || '';
+                                  const right = pick && key && pick === key;
+                                  return (
+                                    <li key={`mp-${ri}`} className={`qr-matrix-plain-row${pick && key ? (right ? ' is-right' : ' is-wrong') : ''}`}>
+                                      <span className="qr-matrix-plain-text">
+                                        {normalizeQuestionText(row?.text || row?.label || '') || '-'}
+                                      </span>
+                                      <span className="qr-matrix-plain-answers">
+                                        <span className={`qr-matrix-plain-pick${right ? ' is-right' : ''}`}>{`Your pick: col ${pick || '—'}`}</span>
+                                        <span className="qr-matrix-plain-key">{`Correct: col ${key || '—'}`}</span>
+                                      </span>
+                                    </li>
+                                  );
+                                })}
+                              </ol>
+                            </div>
+                          );
+                        }
+                      }
+
                       if (fmt === 'dropdown') {
-                        const correctParts = corrAns ? corrAns.split(/\s*,\s*/) : [];
+                        // Not a plain comma split: option texts like "1,200,000"
+                        // carry their own commas — see splitDropdownAnswers.
+                        const correctParts = splitDropdownAnswers(corrAns, choices);
+                        // The stem stores each dropdown as a dump of its options, so
+                        // on its own it never shows which sentence a blank sat in.
+                        // Rebuild the statement with the picks in place.
+                        const statement = buildDropdownStatement(questionReview.row.question_stem, choices);
+                        const blankPick = (bi) => {
+                          const userText = String(choices[bi]?.text || '').trim();
+                          const isPlaceholder = !userText || /^select\.\.\.?$/i.test(userText);
+                          const correctText = (correctParts[bi] || '').trim();
+                          return {
+                            userText,
+                            isPlaceholder,
+                            correctText,
+                            userIsRight: !isPlaceholder && correctText && userText === correctText,
+                          };
+                        };
                         return (
+                          <>
+                          {statement && (
+                            <p className="qr-statement">
+                              {statement.map((token, ti) => {
+                                if (token.type === 'text') {
+                                  return <span key={`t-${ti}`}>{token.text}</span>;
+                                }
+                                const pick = blankPick(token.index);
+                                return (
+                                  <span key={`t-${ti}`} className="qr-statement-blank">
+                                    <span
+                                      className={`qr-statement-pick ${
+                                        pick.userIsRight ? 'is-right' : pick.isPlaceholder ? 'is-empty' : 'is-wrong'
+                                      }`}
+                                    >
+                                      {pick.isPlaceholder ? '—' : pick.userText}
+                                    </span>
+                                    {!pick.userIsRight && pick.correctText && (
+                                      <span className="qr-statement-correct">{pick.correctText}</span>
+                                    )}
+                                  </span>
+                                );
+                              })}
+                            </p>
+                          )}
                           <div className="qr-blanks">
                             {choices.map((blank, bi) => {
                               const userText = String(blank?.text || '').trim();
                               const isPlaceholder = !userText || /^select\.\.\.?$/i.test(userText);
                               const correctText = (correctParts[bi] || '').trim();
                               const userIsRight = !isPlaceholder && correctText && userText === correctText;
+                              // The other options this blank offered — the menu you
+                              // actually faced on test day. Rows flattened by an old
+                              // rescrape have none, and then the cards render bare.
+                              const menu = (blank?.options || [])
+                                .map((option) => String(option?.text || '').trim())
+                                .filter((option) => option && !/^select\.\.\.?$/i.test(option));
+                              const cards = (
+                                <div className="qr-blank-body">
+                                  <div className={`qr-blank-cell ${userIsRight ? 'cell-right' : isPlaceholder ? 'cell-empty' : 'cell-wrong'}`}>
+                                    <span className="qr-blank-meta">Your pick</span>
+                                    <span className="qr-blank-val">{isPlaceholder ? '—' : userText}</span>
+                                  </div>
+                                  <div className={`qr-blank-cell ${userIsRight ? 'cell-right' : 'cell-correct'}`}>
+                                    <span className="qr-blank-meta">Correct</span>
+                                    <span className="qr-blank-val">{correctText || '—'}</span>
+                                  </div>
+                                </div>
+                              );
                               return (
                                 <div key={`b-${bi}`} className="qr-blank">
                                   <span className="qr-blank-head">{blank?.label || `Blank ${bi + 1}`}</span>
-                                  <div className="qr-blank-body">
-                                    <div className={`qr-blank-cell ${userIsRight ? 'cell-right' : isPlaceholder ? 'cell-empty' : 'cell-wrong'}`}>
-                                      <span className="qr-blank-meta">Your pick</span>
-                                      <span className="qr-blank-val">{isPlaceholder ? '—' : userText}</span>
-                                    </div>
-                                    <div className={`qr-blank-cell ${userIsRight ? 'cell-right' : 'cell-correct'}`}>
-                                      <span className="qr-blank-meta">Correct</span>
-                                      <span className="qr-blank-val">{correctText || '—'}</span>
-                                    </div>
-                                  </div>
+                                  {menu.length ? (
+                                    <details className="qr-blank-menu">
+                                      <summary>
+                                        {cards}
+                                        <span className="qr-blank-menu-hint">{`${menu.length} choices`}</span>
+                                      </summary>
+                                      <ul className="qr-blank-options">
+                                        {menu.map((option, oi) => {
+                                          const isMine = !isPlaceholder && option === userText;
+                                          const isKey = correctText && option === correctText;
+                                          const state = isMine && isKey ? 'is-right' : isMine ? 'is-wrong' : isKey ? 'is-key' : '';
+                                          return (
+                                            <li key={`o-${bi}-${oi}`} className={`qr-blank-option ${state}`}>
+                                              <span className="qr-blank-option-mark">
+                                                {isMine && isKey ? '✓' : isMine ? '✗' : isKey ? '✓' : ''}
+                                              </span>
+                                              <span>{option}</span>
+                                              {isMine && <span className="qr-blank-option-tag">your pick</span>}
+                                            </li>
+                                          );
+                                        })}
+                                      </ul>
+                                    </details>
+                                  ) : (
+                                    cards
+                                  )}
                                 </div>
                               );
                             })}
                           </div>
+                          </>
                         );
                       }
 
@@ -6102,15 +6479,96 @@ function App() {
                     ));
                   })()}
                 </div>
-                <label className="notes-label">
-                  Notes
-                  <Textarea
-                    rows={6}
-                    value={annotation.notes}
-                    placeholder="Add your reasoning gap, trap pattern, or takeaway..."
-                    onChange={(event) => setAnnotation((prev) => ({ ...prev, notes: event.target.value }))}
-                  />
-                </label>
+                <div className="review-slots">
+                  <div className="review-slots-head">
+                    <span className="review-slots-title">Review</span>
+                    <span
+                      className={`review-slots-progress${
+                        filledReviewSlots(annotation.slots).length === REVIEW_SLOTS.length ? ' is-complete' : ''
+                      }${filledReviewSlots(annotation.slots).length ? ' is-started' : ''}`}
+                    >
+                      {`${filledReviewSlots(annotation.slots).length} / ${REVIEW_SLOTS.length} answered`}
+                    </span>
+                  </div>
+
+                  {REVIEW_SLOTS.filter((slot) => slot.key !== 'next').map((slot) => (
+                    <label key={slot.key} className="review-slot">
+                      <span className="review-slot-label">{slot.label}</span>
+                      <span className="review-slot-hint">{slot.hint}</span>
+                      <Textarea
+                        rows={3}
+                        value={annotation.slots[slot.key]}
+                        onChange={(event) => {
+                          const { value } = event.target;
+                          setAnnotation((prev) => ({ ...prev, slots: { ...prev.slots, [slot.key]: value } }));
+                        }}
+                      />
+                    </label>
+                  ))}
+
+                  <div className="review-slot review-slot-rule">
+                    <span className="review-slot-label">Next time</span>
+                    <span className="review-slot-hint">
+                      {REVIEW_SLOTS.find((slot) => slot.key === 'next').hint}
+                      {knownRules.length > 0 && ' — or reuse one you already wrote'}
+                    </span>
+                    <div className="review-rule-row">
+                      <span className="review-rule-lead">When</span>
+                      <Input
+                        list="review-rule-triggers"
+                        value={annotation.slots.when}
+                        placeholder="a DS stem gives only ratios and asks for an absolute value"
+                        onChange={(event) => {
+                          const { value } = event.target;
+                          // Picking a trigger you have used before pulls its action
+                          // across, so reuse stays one interaction.
+                          const match = knownRules.find(
+                            (rule) => rule.when.toLowerCase() === value.trim().toLowerCase()
+                          );
+                          setAnnotation((prev) => ({
+                            ...prev,
+                            slots: {
+                              ...prev.slots,
+                              when: value,
+                              then: !prev.slots.then && match ? match.then : prev.slots.then,
+                            },
+                          }));
+                        }}
+                      />
+                      <span className="review-rule-arrow" aria-hidden="true">{RULE_ARROW}</span>
+                      <Input
+                        value={annotation.slots.then}
+                        placeholder="hunt for an anchor before you consider C"
+                        onChange={(event) => {
+                          const { value } = event.target;
+                          setAnnotation((prev) => ({ ...prev, slots: { ...prev.slots, then: value } }));
+                        }}
+                      />
+                    </div>
+                    <datalist id="review-rule-triggers">
+                      {knownRules.map((rule) => (
+                        <option key={rule.when} value={rule.when}>
+                          {`${rule.hits}\u00d7 — ${rule.then}`}
+                        </option>
+                      ))}
+                    </datalist>
+                  </div>
+
+                  {annotation.slots.other && (
+                    <label className="review-slot">
+                      <span className="review-slot-label">{OTHER_SLOT.label}</span>
+                      <span className="review-slot-hint">kept from an earlier note</span>
+                      <Textarea
+                        rows={3}
+                        value={annotation.slots.other}
+                        onChange={(event) => {
+                          const { value } = event.target;
+                          setAnnotation((prev) => ({ ...prev, slots: { ...prev.slots, other: value } }));
+                        }}
+                      />
+                    </label>
+                  )}
+                </div>
               </div>
               {annotation.error && <p className="status error">{annotation.error}</p>}
               <div className="analysis-actions">

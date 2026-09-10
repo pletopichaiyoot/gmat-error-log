@@ -3032,8 +3032,369 @@ th.sortable:hover {
   width: min(880px, calc(100vw - 24px));
 }
 
-.notes-label {
+/* ─── Blank menus (the drop-down's own option list) ──────────── */
+.qr-blank-menu > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  cursor: pointer;
+  list-style: none;
+}
+
+.qr-blank-menu > summary::-webkit-details-marker { display: none; }
+
+.qr-blank-menu > summary > .qr-blank-body { flex: 1; }
+
+.qr-blank-menu-hint {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+.qr-blank-menu-hint::after {
+  content: ' ▾';
+}
+
+.qr-blank-menu[open] .qr-blank-menu-hint::after {
+  content: ' ▴';
+}
+
+.qr-blank-options {
+  margin: var(--s2) 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+}
+
+.qr-blank-option {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--surface);
+  font-size: 0.88rem;
+}
+
+.qr-blank-option-mark {
+  width: 12px;
+  font-weight: 700;
+}
+
+.qr-blank-option-tag {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.qr-blank-option.is-right {
+  border-color: rgba(61, 122, 94, 0.5);
+  background: rgba(61, 122, 94, 0.08);
+  color: var(--primary);
+}
+
+.qr-blank-option.is-wrong {
+  border-color: rgba(181, 74, 68, 0.5);
+  background: rgba(181, 74, 68, 0.07);
+  color: var(--danger, #b54a44);
+}
+
+.qr-blank-option.is-key {
+  border-color: rgba(196, 168, 67, 0.6);
+  background: rgba(196, 168, 67, 0.14);
+}
+
+/* ─── Matrix rows with no captured columns ───────────────────── */
+.qr-matrix-plain-note {
+  margin: 0 0 var(--s2);
+  font-size: 0.78rem;
+}
+
+.qr-matrix-plain-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  counter-reset: mxp;
+}
+
+.qr-matrix-plain-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-s);
+  background: var(--surface);
+}
+
+.qr-matrix-plain-row.is-right { border-color: rgba(61, 122, 94, 0.45); }
+.qr-matrix-plain-row.is-wrong { border-color: rgba(181, 74, 68, 0.45); }
+
+.qr-matrix-plain-text { flex: 1 1 260px; }
+
+.qr-matrix-plain-answers {
+  display: inline-flex;
+  gap: 10px;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.qr-matrix-plain-pick { color: var(--danger, #b54a44); font-weight: 600; }
+.qr-matrix-plain-pick.is-right { color: var(--primary); }
+.qr-matrix-plain-key { color: var(--muted); }
+
+/* ─── Dropdown (GI) statement with the picks inline ──────────── */
+.qr-statement {
+  margin: 0 0 var(--s3);
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-s);
+  background: var(--surface);
+  font-size: 0.95rem;
+  line-height: 1.9;
+  white-space: pre-wrap;
+}
+
+.qr-statement-blank {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  margin: 0 2px;
+  white-space: normal;
+}
+
+.qr-statement-pick {
+  padding: 1px 8px;
+  border-radius: var(--r-xs);
+  font-weight: 600;
+}
+
+.qr-statement-pick.is-right {
+  background: rgba(61, 122, 94, 0.14);
+  color: var(--primary);
+}
+
+.qr-statement-pick.is-wrong {
+  background: rgba(181, 74, 68, 0.12);
+  color: var(--danger, #b54a44);
+  text-decoration: line-through;
+}
+
+.qr-statement-pick.is-empty {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+/* The key, shown beside a wrong pick — brass, the same "this is the answer"
+   colour the choice list uses. */
+.qr-statement-correct {
+  padding: 1px 8px;
+  border-radius: var(--r-xs);
+  background: rgba(196, 168, 67, 0.18);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* ─── Question-review attempt tally ──────────────────────────── */
+.qr-attempts-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.qr-attempts-count {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.qr-attempts-pct {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.qr-attempts-pct.is-clean {
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.qr-attempts-pct.is-miss {
+  color: var(--danger, #b54a44);
+  font-weight: 600;
+}
+
+/* The expanded history has to break the bar's flex row, not squeeze into it. */
+.qr-attempts-field {
+  flex-wrap: wrap;
+}
+
+.qr-attempts-history {
+  flex-basis: 100%;
+  margin-top: var(--s2);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+/* ─── My Process (review-rule rollup) ────────────────────────── */
+.process-summary {
+  margin: 0 0 var(--s3);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.process-empty {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.process-rule-cell {
+  display: grid;
+  gap: 2px;
+  max-width: 520px;
+}
+
+.process-rule-when {
+  font-weight: 600;
+}
+
+.process-rule-then {
+  color: var(--muted);
+}
+
+.process-hits-col {
+  width: 72px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* A rule you have needed once is a note; twice is a pattern; five times is the
+   protocol — so the count escalates the same way the modal's chip does. */
+.process-hits {
+  display: inline-block;
+  min-width: 34px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.process-hits.is-repeat {
+  background: var(--accent);
+  color: var(--ink);
+}
+
+.process-hits.is-core {
+  background: var(--primary);
+  color: #fff;
+}
+
+.process-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* ─── Review slots (annotation note prompts) ─────────────────── */
+.review-slots {
   grid-column: 1 / -1;
+  display: grid;
+  gap: var(--s3);
+}
+
+.review-slots-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+
+.review-slots-title {
+  font-size: 0.86rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* Grey until you start, brass while partial, forest when all three are answered
+   — the same gold/green semantic the answer chips use. */
+.review-slots-progress {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.review-slots-progress.is-started {
+  background: var(--accent);
+  color: var(--ink);
+}
+
+.review-slots-progress.is-complete {
+  background: var(--primary);
+  color: #fff;
+}
+
+.review-slot {
+  display: grid;
+  gap: 3px;
+}
+
+.review-slot-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.review-slot-hint {
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.review-slot .textarea,
+.review-slot textarea {
+  margin-top: 3px;
+}
+
+.review-rule-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.review-rule-lead,
+.review-rule-arrow {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .review-rule-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .review-rule-arrow {
+    justify-self: center;
+  }
 }
 
 /* ─── Mistake tags ───────────────────────────────────────────── */
