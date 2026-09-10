@@ -248,6 +248,25 @@ async function resolvePageRelative(page, relative) {
 // ─── Home page ──────────────────────────────────────────────────────────────
 
 async function navigateHome(page) {
+  // Prefer the page's OWN Home link: its href carries a live `code`. Rebuilding
+  // the router URL from the address bar replays whatever code the tab last used,
+  // and StartTest codes are single-use — a spent one lands on a blank/error page
+  // with no product menu, which surfaces later as "Product <id> not found in the
+  // StartTest home menu" or "No ITDReview.aspx frame ever appeared". Every
+  // re-enrichment failure on 2026-09-09/10 was this, not tab state.
+  const liveHome = await page
+    .evaluate(() => {
+      const link = document.querySelector('a[href*="cmd=HomePage"]');
+      return link ? link.href : null;
+    })
+    .catch(() => null);
+  if (liveHome) {
+    await goto(page, liveHome);
+    return;
+  }
+
+  // Fallback for a page with no nav (a bare harness frame): replay the address
+  // bar and let assertNotErrorPage inside goto() catch a spent code.
   const u = new URL(page.url());
   const next = new URL(u.origin + u.pathname);
   for (const k of ['programid', 'session', 'code']) {
@@ -259,16 +278,28 @@ async function navigateHome(page) {
 }
 
 async function navigateToProduct(page, productId, type = 6) {
-  // Landing Home first guarantees we have a live router URL with a fresh code.
-  await navigateHome(page);
-  // Find the product link in the product-switcher menu (its href has a live code).
-  const productUrl = await page.evaluate(
-    ({ productId, type }) => {
-      const sel = `a[href*="OrderProductID=${productId}"][href*="type=${type}"]`;
-      return document.querySelector(sel)?.href || null;
-    },
-    { productId, type }
-  );
+  const findLink = () =>
+    page
+      .evaluate(
+        ({ productId, type }) => {
+          const sel = `a[href*="OrderProductID=${productId}"][href*="type=${type}"]`;
+          return document.querySelector(sel)?.href || null;
+        },
+        { productId, type }
+      )
+      .catch(() => null);
+
+  // Try the CURRENT page first. The switcher ("Change Practice Test") lives on
+  // the product pages, NOT on cmd=HomePage — that one is the bare account home
+  // (Home / FAQ / Profile / Logout and nothing else). Going Home first therefore
+  // THREW AWAY the only context that can resolve a product, and every later
+  // session then failed with "Product … not found in the StartTest home menu"
+  // until the user re-entered from mba.com. Verified live 2026-09-10.
+  let productUrl = await findLink();
+  if (!productUrl) {
+    await navigateHome(page);
+    productUrl = await findLink();
+  }
   if (!productUrl) {
     throw new ScrapeAnomalyError(
       `Product ${productId} not found in the StartTest home menu. Verify the account owns this practice bank.`
@@ -1412,6 +1443,28 @@ async function readReviewFrame(frame) {
     // for `stem`) doesn't capture them.
     const stimulusText = stimulusRoots.map((el) => (el.innerText || '').trim()).filter(Boolean).join('\n\n');
 
+    // Interlinear items (DI "Graphics Interpretation", and the drop-down flavour
+    // of Table Analysis) keep the sentence that CONTAINS the dropdowns outside
+    // the stem, in a sibling branch:
+    //   .stem-block-inner > .options-container > .options-container-inner
+    //     > .ITSDirection > p > select.ITSInterlinearSelect
+    // `.ITSStemText` holds only the intro prose (or, when the item is a chart,
+    // nothing but the <img>). So reading the stem alone drops the actual
+    // question: verified 2026-09-09 against a live ITDReview frame, and against
+    // stored data — 90 of 93 dropdown rows had no statement at all. The three
+    // that did were items whose `.ITSStemText` was empty, letting the old
+    // fallback reach `.stem-block-inner`, which contains this branch.
+    // A <select>'s innerText renders as its option list, which is what makes the
+    // statement come out flattened ("Select... / opt / opt / …"); the review UI
+    // rebuilds it via client/src/lib/dropdownStem.mjs.
+    const interlinearStatement = document.querySelector('select.ITSInterlinearSelect')
+      ? text('.ITSDirection')
+      : null;
+    const baseStem = text('.ITSStemText') || text('.stem-container-inner') || text('.stem-block-inner');
+    const stemWithStatement = interlinearStatement && !String(baseStem || '').includes(interlinearStatement)
+      ? [baseStem, interlinearStatement].filter(Boolean).join('\n\n')
+      : baseStem;
+
     return {
       vItemName: window.vItemName || null,
       vItemType: window.vItemType || null,
@@ -1421,7 +1474,7 @@ async function readReviewFrame(frame) {
       vPassageName: window.vPassageName || null,
       vPublishingKey: window.vPublishingKey || null,
       correctKey, // CSV string from <input name="Key1">; "4" for MC, "2,2,1" for matrix
-      stem: text('.ITSStemText') || text('.stem-container-inner') || text('.stem-block-inner'),
+      stem: stemWithStatement,
       passage: text('.passage-block-inner') || text('.passage-block'),
       keyPoint: text('.sol-key-point-content'),
       rationale: text('.ItemRationaleText'),

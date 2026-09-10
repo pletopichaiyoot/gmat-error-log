@@ -739,7 +739,15 @@ function buildAttemptSnapshotIndex(rows = []) {
       question_url: normalizedTextOrNull(row?.question_url),
       question_stem: normalizedTextOrNull(row?.question_stem),
       question_stem_html: normalizedTextOrNull(row?.question_stem_html),
-      answer_choices: normalizeAnswerChoicesForStorage(row?.answer_choices),
+      // NOT normalizeAnswerChoicesForStorage: that sanitizes INCOMING scraper
+      // data down to {label, text, textHtml} and drops everything else. Run on a
+      // row already in the DB it silently strips exactly what Phase 2 captured —
+      // matrix `options`/`headers`, dropdown `options`, and the per-choice
+      // isCorrect/isUserSelected/value/color flags — so every Phase 1 rescrape
+      // flattened enriched questions (measured 2026-09-09: 180 of 320 DI
+      // matrix/dropdown rows had lost their cells, the same rows that had lost
+      // their stems). A stored value is already sanitized; pass it through.
+      answer_choices: preserveStoredJsonText(row?.answer_choices),
       response_format: normalizedTextOrNull(row?.response_format),
       response_details: normalizeResponseDetailsForStorage(row?.response_details),
       passage_text: normalizedTextOrNull(row?.passage_text),
@@ -1023,7 +1031,10 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
         preservedSnapshot?.content_domain ||
         null;
       const questionUrl = normalizedTextOrNull(q.question_url) || preservedSnapshot?.question_url || null;
-      const questionStem = normalizedTextOrNull(q.question_stem) || preservedSnapshot?.question_stem || null;
+      const questionStem = pickRicherStem(
+        normalizedTextOrNull(q.question_stem),
+        preservedSnapshot?.question_stem || null
+      );
       // OPE Phase 3 stores render-ready stem HTML (inline equation images) in
       // question_stem_html. Phase 1 rescrapes don't supply it, so preserve the
       // enriched value across rescrapes — same pattern as question_stem.
@@ -1334,6 +1345,30 @@ function platformWhereClause(platform, alias = 's') {
 // Two shapes because some queries have `sessions` joined and some only have
 // `question_attempts`; the subquery form avoids forcing a join for the sake of
 // one flag (sessions is a few hundred rows).
+// StartTest Phase 1 reads the Question History table, whose "Item Preview"
+// column is the stem truncated to ~60 characters (starttest_scraper.js: "preview
+// only; Phase 2 replaces with full stem"). Phase 2 then writes the real stem.
+// Taking the incoming value first therefore DOWNGRADED every enriched stem back
+// to its preview on the next Phase 1 rescrape — silently, and again after every
+// sync. Measured 2026-09-09: 369 of 683 enriched DI rows were sitting on a
+// ≤65-char stub. Phase 1 never has a better stem than Phase 2, so keep whichever
+// text is longer.
+// A JSON column read back out of the DB: keep it verbatim (it was sanitized on
+// the way in), just normalize empties to null.
+function preserveStoredJsonText(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') return value.trim() || null;
+  try { return JSON.stringify(value); } catch (_error) { return null; }
+}
+
+function pickRicherStem(incoming, preserved) {
+  const fresh = String(incoming || '').trim();
+  const kept = String(preserved || '').trim();
+  if (!kept) return fresh || null;
+  if (!fresh) return kept;
+  return fresh.length >= kept.length ? fresh : kept;
+}
+
 function excludedSessionClause(alias = 's', includeExcluded = false) {
   if (includeExcluded) return null;
   return `COALESCE(${alias ? `${alias}.excluded` : 'excluded'}, 0) = 0`;
@@ -2985,6 +3020,51 @@ async function listAttemptHistory({ qCode, qId } = {}) {
       ORDER BY q.created_at ASC, q.id ASC`,
     params
   );
+}
+
+// The review-note parser is ESM and lives beside the UI that writes the notes
+// (client/src/lib/reviewNotes.mjs). It is imported rather than mirrored into
+// src/: a vocabulary mirror like mistake-tags.js is safe to drift visibly, a
+// parser mirror would mis-split notes on one side only, silently.
+let reviewNotesModule = null;
+async function loadReviewNotes() {
+  if (!reviewNotesModule) {
+    reviewNotesModule = await import('../client/src/lib/reviewNotes.mjs');
+  }
+  return reviewNotesModule;
+}
+
+// Every if-then rule written in a "Next time" slot, rolled up by trigger, plus
+// the count of misses that still carry no rule. The LIKE is only a cheap
+// narrowing — rollupRules() decides what actually parses as a rule.
+async function listReviewRules({ includeExcluded = false } = {}) {
+  const { rollupRules } = await loadReviewNotes();
+  const sessionClause = excludedSessionClause('s', includeExcluded);
+  const scope = sessionClause ? `AND ${sessionClause}` : '';
+
+  const rows = await all(
+    `
+      SELECT q.q_code, q.notes, q.subject_code, q.category_code, s.session_date
+      FROM question_attempts q
+      INNER JOIN sessions s ON s.id = q.session_id
+      WHERE LOWER(COALESCE(q.notes, '')) LIKE '%next time:%'
+        ${scope}
+    `
+  );
+
+  const unruledRow = await get(
+    `
+      SELECT COUNT(*)::int AS count
+      FROM question_attempts q
+      INNER JOIN sessions s ON s.id = q.session_id
+      WHERE q.correct = 0
+        AND NOT (${unansweredPlaceholderExpr('q')})
+        AND LOWER(COALESCE(q.notes, '')) NOT LIKE '%next time:%'
+        ${scope}
+    `
+  );
+
+  return { rules: rollupRules(rows), unruled: Number(unruledRow?.count || 0) };
 }
 
 async function updateErrorAnnotation(errorId, { mistakeType, notes }) {
@@ -5094,6 +5174,8 @@ module.exports = {
   getSessionAnalysis,
   getLatestRunForSource,
   updateErrorAnnotation,
+  pickRicherStem,
+  listReviewRules,
   listAttemptHistory,
   saveLsatAttempt,
   listLsatAttempts,

@@ -523,9 +523,47 @@ const STARTTEST_TAB_RE = /starttest\.com/i;
 const TTP_TAB_RE = /gmat\.targettestprep\.com/i;
 const GMATCLUB_HOME_URL = 'https://gmatclub.com/forum/analytics.php#error_log';
 
-function findStartTestPage(browser) {
-  const pages = browser.contexts().flatMap((ctx) => ctx.pages());
-  return pages.find((p) => STARTTEST_TAB_RE.test(p.url())) || null;
+// Several starttest.com tabs are normally open at once, and a SPENT ITD harness
+// shell — blank title, an ITDStart/itd.aspx iframe, no product menu — matches the
+// same regex as the live one. Taking the first match therefore hands the run a
+// dead tab, which surfaces later as "Product <id> not found in the StartTest home
+// menu" or "No ITDReview.aspx frame ever appeared" — failures that look like a
+// scraper bug but are just tab selection (see the starttest tab-fragility notes).
+// Score each candidate on what it actually has and take the liveliest; ties go to
+// the most recently opened tab, which after a re-login is the fresh session.
+async function findStartTestPage(browser) {
+  const pages = browser
+    .contexts()
+    .flatMap((ctx) => ctx.pages())
+    .filter((page) => STARTTEST_TAB_RE.test(page.url()));
+  if (!pages.length) return null;
+
+  const scored = [];
+  for (const page of pages) {
+    let score = 0;
+    try {
+      score = await Promise.race([
+        page.evaluate(() => {
+          // The product switcher is what every StartTest run needs first; its
+          // links are the same ones navigateToProduct looks up.
+          if (document.querySelector('a[href*="OrderProductID="]')) return 3;
+          if ((document.title || '').trim()) return 2;
+          return (document.body?.innerText || '').trim() ? 1 : 0;
+        }),
+        // A wedged tab must not stall the whole run.
+        new Promise((resolve) => { setTimeout(() => resolve(0), 4000); }),
+      ]);
+    } catch (_error) {
+      score = 0;
+    }
+    scored.push({ page, score });
+  }
+
+  let best = scored[0];
+  for (const candidate of scored) {
+    if (candidate.score >= best.score) best = candidate;
+  }
+  return best.page;
 }
 
 // Best-effort post-run navigation back to the platform's "home" so the user's
@@ -603,7 +641,7 @@ async function runStartTestScrapeFromOpenBrowser(options = {}) {
     attemptedCdpUrls = cdpConnection.attemptedUrls;
     cdpFallbackUsed = cdpConnection.fallbackUsed;
 
-    startTestPage = findStartTestPage(browser);
+    startTestPage = await findStartTestPage(browser);
     if (!startTestPage) {
       throw new Error(
         `No starttest.com tab found. Open https://www.mba.com/my-account and sign in, then open GMAT practice — it will redirect to starttest.com. Keep that tab open.`
@@ -717,7 +755,7 @@ async function openStartTestProductInOpenBrowser(options = {}) {
     attemptedCdpUrls = cdpConnection.attemptedUrls;
     cdpFallbackUsed = cdpConnection.fallbackUsed;
 
-    startTestPage = findStartTestPage(browser);
+    startTestPage = await findStartTestPage(browser);
     if (!startTestPage) {
       throw new Error(
         `No starttest.com tab found. Open https://www.mba.com/my-account and sign in, then open GMAT practice to get a logged-in tab.`
@@ -809,7 +847,7 @@ async function runStartTestPhase2FromOpenBrowser(options = {}) {
     attemptedCdpUrls = cdpConnection.attemptedUrls;
     cdpFallbackUsed = cdpConnection.fallbackUsed;
 
-    startTestPage = findStartTestPage(browser);
+    startTestPage = await findStartTestPage(browser);
     if (!startTestPage) {
       throw new Error(
         `No starttest.com tab found. Open GMAT practice in your logged-in tab first.`
@@ -1501,7 +1539,7 @@ async function runOpeListAttemptsFromOpenBrowser(options = {}) {
   try {
     const cdp = await connectBrowserOverCdp(requestedCdpUrl);
     browser = cdp.browser;
-    const landing = findStartTestPage(browser);
+    const landing = await findStartTestPage(browser);
     if (!landing) {
       throw new Error(
         'No starttest.com tab found. Sign in via mba.com and open the GMAT practice area first.',
@@ -1853,6 +1891,9 @@ module.exports = {
   runOpeListAttemptsFromOpenBrowser,
   runOpeMockScrapeFromOpenBrowser,
   runOpePhase3FromOpenBrowser,
+  // Exported for test/unit/starttest-tab-pick.test.js — the pick is what decides
+  // whether a run gets a live tab or a spent harness shell.
+  findStartTestPage,
   STARTTEST_SOURCE_PRODUCTS,
   TTP_SECTION_PRESETS,
   OPE_SOURCE_PRODUCTS: opeScraper.SOURCE_PRODUCTS,
