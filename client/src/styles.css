@@ -3246,6 +3246,59 @@ th.sortable:hover {
   overflow-y: auto;
 }
 
+/* ─── Bookmarks ──────────────────────────────────────────────── */
+.bookmark-btn .bookmark-star {
+  margin-right: 6px;
+  color: var(--accent);
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.bookmark-btn.is-on {
+  border-color: var(--accent);
+  background: rgba(196, 168, 67, 0.14);
+  font-weight: 600;
+}
+
+/* Brass, like every other "this is the answer / this is marked" affordance. */
+.err-bookmark-marker {
+  margin-left: 6px;
+  color: var(--accent);
+  font-size: 0.78rem;
+  vertical-align: middle;
+}
+
+.filter-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.bookmarks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin-bottom: var(--s3);
+}
+
+.bookmarks-summary {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.bookmarks-empty {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.bookmark-stem-cell {
+  max-width: 420px;
+}
+
 /* ─── My Process (review-rule rollup) ────────────────────────── */
 .process-summary {
   margin: 0 0 var(--s3);

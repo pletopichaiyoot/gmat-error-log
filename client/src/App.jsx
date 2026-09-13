@@ -1720,7 +1720,7 @@ function App() {
     categoryBreakdown: [],
     subtopicBreakdown: [],
   });
-  const [filters, setFilters] = useState({ subject: '', category: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' });
+  const [filters, setFilters] = useState({ subject: '', category: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '', bookmarked: false });
   const [syncCenterOpen, setSyncCenterOpen] = useState(false);
   const [isOpening, setIsOpening] = useState(false);
   const [isOpeningProduct, setIsOpeningProduct] = useState(false);
@@ -1776,6 +1776,11 @@ function App() {
     row: null,
   });
   const [reviewRules, setReviewRules] = useState({ rules: [], unruled: 0 });
+  const [bookmarks, setBookmarks] = useState([]);
+  // Keys of every bookmarked question, so the star renders without waiting for
+  // a per-row request. Holds both ids of each bookmark's question.
+  const [bookmarkKeys, setBookmarkKeys] = useState(() => new Set());
+  const [bookmarkBusy, setBookmarkBusy] = useState(false);
   const [openingQuestionKey, setOpeningQuestionKey] = useState('');
   const [copiedQCode, setCopiedQCode] = useState('');
   // Legacy = the retired pre-StartTest "GMAT Official" practice-book scrape
@@ -1836,6 +1841,7 @@ function App() {
     performanceBySession: false,
     errorLog: false,
     process: false,
+    bookmarks: false,
   });
 
   const toggleSection = (section) => {
@@ -1951,6 +1957,62 @@ function App() {
     setRuns(data.runs || []);
   }
 
+  async function loadBookmarks() {
+    const data = await fetchJson(`/api/bookmarks${showLegacyData ? '?includeExcluded=1' : ''}`);
+    const rows = data.bookmarks || [];
+    setBookmarks(rows);
+    // Index by BOTH ids: a row's q_code can differ from the stored key (Phase 2
+    // rewrites it), and Phase-1-only rows are keyed by q_id.
+    const keys = new Set();
+    for (const row of rows) {
+      for (const value of [row.bookmark_key, row.q_code, row.q_id]) {
+        const trimmed = String(value || '').trim();
+        if (trimmed) keys.add(trimmed);
+      }
+    }
+    setBookmarkKeys(keys);
+  }
+
+  function isRowBookmarked(row) {
+    const code = String(row?.q_code || '').trim();
+    const id = String(row?.q_id || '').trim();
+    return (code && bookmarkKeys.has(code)) || (id && bookmarkKeys.has(id));
+  }
+
+  async function handleToggleBookmark(row) {
+    if (!row || bookmarkBusy) return;
+    const qCode = String(row.q_code || '').trim();
+    const qId = String(row.q_id || '').trim();
+    if (!qCode && !qId) {
+      setStatus({ message: 'This question has no id to bookmark yet — enrich the session first.', isError: true });
+      return;
+    }
+    setBookmarkBusy(true);
+    // Optimistic: the star flips now, and loadBookmarks reconciles.
+    setBookmarkKeys((prev) => {
+      const next = new Set(prev);
+      const on = !isRowBookmarked(row);
+      for (const value of [qCode, qId].filter(Boolean)) {
+        if (on) next.add(value);
+        else next.delete(value);
+      }
+      return next;
+    });
+    try {
+      await fetchJson('/api/bookmarks/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ qCode: qCode || null, qId: qId || null }),
+      });
+      await loadBookmarks();
+    } catch (error) {
+      setStatus({ message: `Bookmark failed: ${error.message}`, isError: true });
+      await loadBookmarks().catch(() => {});
+    } finally {
+      setBookmarkBusy(false);
+    }
+  }
+
   async function loadReviewRules() {
     const data = await fetchJson(`/api/review-rules${showLegacyData ? '?includeExcluded=1' : ''}`);
     setReviewRules({ rules: data.rules || [], unruled: Number(data.unruled || 0) });
@@ -1964,6 +2026,7 @@ function App() {
       // Non-fatal: an API process started before /api/review-rules existed must
       // not take the whole dashboard load down with it.
       loadReviewRules().catch(() => {}),
+      loadBookmarks().catch(() => {}),
       (async () => {
         const patternParams = new URLSearchParams();
         if (runId) patternParams.set('runId', runId);
@@ -2018,6 +2081,7 @@ function App() {
     if (customFilters.category) params.set('category', customFilters.category);
     if (customFilters.topic) params.set('topic', customFilters.topic);
     if (customFilters.confidence) params.set('confidence', customFilters.confidence);
+    if (customFilters.bookmarked) params.set('bookmarked', '1');
     if (customFilters.search) params.set('search', customFilters.search);
     if (customFilters.mistakeTag) params.set('mistakeTag', customFilters.mistakeTag);
     if (customFilters.platform) params.set('platform', customFilters.platform);
@@ -2152,7 +2216,7 @@ function App() {
       loadErrorsByFilters(filters).catch(() => {});
     }, filters.search ? 350 : 0);
     return () => clearTimeout(id);
-  }, [filters.subject, filters.category, filters.difficulty, filters.confidence, filters.search, filters.mistakeTag, filters.topic, filters.platform]);
+  }, [filters.subject, filters.category, filters.difficulty, filters.confidence, filters.search, filters.mistakeTag, filters.topic, filters.platform, filters.bookmarked]);
 
   // Legacy toggle changes the row set for sessions, error log, AND patterns, so
   // it re-runs the whole dashboard load rather than just the sessions list.
@@ -3625,14 +3689,14 @@ function App() {
   // "no data yet" (offer Sync) read very differently to the user.
   const hasActiveErrorFilters = Boolean(
     filters.subject || filters.category || filters.difficulty || filters.topic
-    || filters.confidence || filters.search || filters.mistakeTag || filters.platform,
+    || filters.confidence || filters.search || filters.mistakeTag || filters.platform || filters.bookmarked,
   );
   const hasActiveSessionFilters = Boolean(
     sessionPlatformFilter || sessionSubjectFilter
     || sessionDateRange.start || sessionDateRange.end,
   );
   function clearErrorFilters() {
-    setFilters({ subject: '', category: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' });
+    setFilters({ subject: '', category: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '', bookmarked: false });
   }
   function clearSessionFilters() {
     setSessionPlatformFilter('');
@@ -3758,7 +3822,7 @@ function App() {
         <nav className="section-nav" aria-label="Jump to section">
           {[
             ['today', 'Today'], ['dashboard', 'Dashboard'], ['categories', 'Categories'],
-            ['sessions', 'Sessions'], ['errors', 'Error Log'], ['process', 'My Process'],
+            ['sessions', 'Sessions'], ['errors', 'Error Log'], ['bookmarks', 'Bookmarks'], ['process', 'My Process'],
           ].map(([id, label]) => (
             <a
               key={id}
@@ -4475,11 +4539,12 @@ function App() {
                 (filters.topic ? 1 : 0) +
                 (filters.difficulty ? 1 : 0) +
                 (filters.confidence ? 1 : 0) +
+                (filters.bookmarked ? 1 : 0) +
                 (filters.mistakeTag ? 1 : 0);
               const anyActive =
                 filters.subject || filters.category || filters.topic ||
                 filters.difficulty || filters.confidence ||
-                filters.search || filters.mistakeTag || filters.platform;
+                filters.search || filters.mistakeTag || filters.platform || filters.bookmarked;
               return (
                 <div className="error-filter-bar error-filter-sticky">
                   <div className="error-filter-primary">
@@ -4528,7 +4593,7 @@ function App() {
                         variant="ghost"
                         size="sm"
                         onClick={() => {
-                          setFilters({ subject: '', category: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '' });
+                          setFilters({ subject: '', category: '', difficulty: '', topic: '', confidence: '', search: '', mistakeTag: '', platform: '', bookmarked: false });
                           setErrorFiltersOpen(false);
                         }}
                       >
@@ -4590,6 +4655,14 @@ function App() {
                           <option key={tag} value={tag}>{tag}</option>
                         ))}
                       </Select>
+                      <label className="filter-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={filters.bookmarked}
+                          onChange={(event) => setFilters((prev) => ({ ...prev, bookmarked: event.target.checked }))}
+                        />
+                        Bookmarked only
+                      </label>
                     </div>
                   )}
                 </div>
@@ -4686,6 +4759,9 @@ function App() {
                                   <span key={tag} className="mistake-tag-pill">{tag}</span>
                                 ))
                               : <span className="muted">-</span>}
+                            {isRowBookmarked(row) && (
+                              <span className="err-bookmark-marker" title="Bookmarked" aria-label="Bookmarked">★</span>
+                            )}
                             {hasNotes && (
                               <span
                                 className="err-notes-marker"
@@ -4799,6 +4875,120 @@ function App() {
                 Next
               </Button>
             </div>
+          </>
+        )}
+      </section>
+
+      <section id="bookmarks" className="page-section">
+        <div className="section-header">
+          <h2>Bookmarks</h2>
+          <button
+            type="button"
+            className="collapse-toggle"
+            onClick={() => toggleSection('bookmarks')}
+            aria-expanded={!collapsedSections.bookmarks}
+            aria-label="Toggle Bookmarks section"
+          >
+            {collapsedSections.bookmarks ? '\u002B' : '\u2212'}
+          </button>
+        </div>
+        {!collapsedSections.bookmarks && (
+          <>
+            <div className="bookmarks-head">
+              <p className="bookmarks-summary">
+                {`${bookmarks.length} ${bookmarks.length === 1 ? 'question' : 'questions'}`}
+              </p>
+              {bookmarks.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  type="button"
+                  onClick={() => handleCopyQCode(bookmarks.map((row) => row.q_code || row.bookmark_key).join(', '))}
+                  title="Copy the ids, to hand to an AI Curated Practice set"
+                >
+                  Copy q_codes
+                </Button>
+              )}
+            </div>
+            {!bookmarks.length ? (
+              <p className="muted bookmarks-empty">
+                No bookmarks yet — the ★ in a question&rsquo;s review panel adds one.
+              </p>
+            ) : (
+              <div className="table-wrap">
+                <table className="review-table bookmarks-table">
+                  <thead>
+                    <tr>
+                      <th className="section-col">Subject</th>
+                      <th className="category-col">Category</th>
+                      <th className="topic-col">Subcategory</th>
+                      <th>Question</th>
+                      <th className="attempts-col">Attempts</th>
+                      <th>Bookmarked</th>
+                      <th className="action-col">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {bookmarks.map((row) => {
+                      // A key whose question is gone from the log (a source was
+                      // excluded, or the attempt was never re-scraped) still
+                      // renders, so it can be removed rather than lingering.
+                      const orphan = !row.attempt_id;
+                      const pct = row.attempts ? Math.round((100 * row.correct_count) / row.attempts) : null;
+                      return (
+                        <tr key={row.bookmark_key}>
+                          <td className="section-col">{orphan ? <span className="muted">-</span> : <SubjectCell row={row} />}</td>
+                          <td className="category-col">{formatMaybe(normalizedCategoryCode(row))}</td>
+                          <td className="topic-col">{formatMaybe(normalizedSubcategory(row))}</td>
+                          <td className="bookmark-stem-cell">
+                            {orphan ? (
+                              <span className="muted">{`${row.bookmark_key} — not in the current error log`}</span>
+                            ) : (
+                              <span title={normalizeQuestionText(row.question_stem)}>
+                                {formatNotePreview(normalizeQuestionText(row.question_stem), 80)}
+                              </span>
+                            )}
+                          </td>
+                          <td className="attempts-col">
+                            {row.attempts ? (
+                              <>
+                                <span className="attempt-count">{`${row.attempts}\u00d7`}</span>
+                                <span className="attempt-accuracy muted">{` ${pct}%`}</span>
+                              </>
+                            ) : (
+                              <span className="muted">-</span>
+                            )}
+                          </td>
+                          <td title={row.created_at || ''}>{formatDaysAgo(row.created_at)}</td>
+                          <td className="action-col">
+                            {!orphan && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                type="button"
+                                className="readmore-btn"
+                                onClick={() => handleOpenQuestionReview(row)}
+                              >
+                                Review
+                              </Button>
+                            )}
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              type="button"
+                              onClick={() => handleToggleBookmark({ q_code: row.q_code || row.bookmark_key, q_id: row.q_id })}
+                              disabled={bookmarkBusy}
+                            >
+                              Remove
+                            </Button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </>
         )}
       </section>
@@ -5692,6 +5882,20 @@ function App() {
               <div className="analysis-header">
                 <h2>{questionReview.row.q_code ? `Question ${questionReview.row.q_code}` : 'Question Review'}</h2>
                 <div className="analysis-actions">
+                  <Button
+                    variant="outline"
+                    type="button"
+                    className={`bookmark-btn${isRowBookmarked(questionReview.row) ? ' is-on' : ''}`}
+                    onClick={() => handleToggleBookmark(questionReview.row)}
+                    disabled={bookmarkBusy}
+                    aria-pressed={isRowBookmarked(questionReview.row)}
+                    title={isRowBookmarked(questionReview.row) ? 'Remove bookmark' : 'Bookmark this question'}
+                  >
+                    <span className="bookmark-star" aria-hidden="true">
+                      {isRowBookmarked(questionReview.row) ? '\u2605' : '\u2606'}
+                    </span>
+                    {isRowBookmarked(questionReview.row) ? 'Bookmarked' : 'Bookmark'}
+                  </Button>
                   {questionReviewNav.total > 1 && (
                     <div className="question-review-nav">
                       <Button

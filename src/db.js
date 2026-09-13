@@ -1638,7 +1638,116 @@ async function countSessions(runId, { platform, subject, startDate, endDate, inc
   return row ? row.total : 0;
 }
 
-async function listErrors({ runId, subject, category, difficulty, topic, confidence, search, mistakeTag, platform, sortKey, sortOrder, limit, offset, includeExcluded = false }) {
+// ─── Question bookmarks ─────────────────────────────────────────────────────
+// Keyed on the question (q_code, falling back to q_id) rather than on an
+// attempt row — see migrations/0009_question_bookmarks.sql for why.
+// A bookmark stores ONE key, but a row carries two ids and which one is
+// authoritative changes over time: a Phase-1-only row has just a q_id, and
+// enrichment later gives it a q_code. Matching on either keeps a bookmark
+// attached to its question across that transition instead of orphaning it.
+const BOOKMARK_KEY_EXPR = (alias = 'q') =>
+  `COALESCE(NULLIF(TRIM(${alias}.q_code), ''), NULLIF(TRIM(${alias}.q_id), ''))`;
+const BOOKMARK_MATCH = (alias = 'q', bookmarkAlias = 'b') =>
+  `${bookmarkAlias}.bookmark_key IN (NULLIF(TRIM(${alias}.q_code), ''), NULLIF(TRIM(${alias}.q_id), ''))`;
+
+// Exported for test/unit/bookmark-key.test.js: which id a row is bookmarked by.
+function bookmarkKeyForRow(row) {
+  const qCode = String(row?.q_code ?? '').trim();
+  if (qCode) return { key: qCode, kind: 'q_code' };
+  const qId = String(row?.q_id ?? '').trim();
+  if (qId) return { key: qId, kind: 'q_id' };
+  return null;
+}
+
+// Returns the resulting state so the caller doesn't have to re-read.
+async function toggleBookmark({ qCode, qId, note = null }) {
+  const target = bookmarkKeyForRow({ q_code: qCode, q_id: qId });
+  if (!target) {
+    throw new Error('A bookmark needs a q_code or a q_id.');
+  }
+  // Look under BOTH of the question's ids, resolving the one the caller didn't
+  // supply. A bookmark may have been made before enrichment (q_id only), and
+  // Phase 2 can even rewrite a row's q_code — 35220 became 425955 on the
+  // 2026-09-10 re-enrichment — so the id in hand is not always the stored key.
+  const candidates = new Set([String(qCode ?? '').trim(), String(qId ?? '').trim()].filter(Boolean));
+  const sibling = await get(
+    `SELECT q_code, q_id FROM question_attempts
+      WHERE NULLIF(TRIM(q_code), '') = ? OR NULLIF(TRIM(q_id), '') = ?
+      ORDER BY id DESC LIMIT 1`,
+    [target.key, target.key]
+  );
+  for (const value of [sibling?.q_code, sibling?.q_id]) {
+    const trimmed = String(value ?? '').trim();
+    if (trimmed) candidates.add(trimmed);
+  }
+  const keys = [...candidates];
+  const existing = await get(
+    `SELECT id FROM question_bookmarks WHERE bookmark_key IN (${keys.map(() => '?').join(', ')})`,
+    keys
+  );
+  if (existing) {
+    await run('DELETE FROM question_bookmarks WHERE id = ?', [existing.id]);
+    return { bookmarked: false, key: target.key };
+  }
+  await run(
+    'INSERT INTO question_bookmarks (bookmark_key, key_kind, note) VALUES (?, ?, ?)',
+    [target.key, target.kind, normalizedTextOrNull(note)]
+  );
+  return { bookmarked: true, key: target.key };
+}
+
+// One row per bookmark, joined to the richest attempt of that question so the
+// list can show what the question actually is. "Richest" = the most recently
+// enriched attempt (a Phase-1-only row has no stem to show).
+async function listBookmarks({ includeExcluded = false } = {}) {
+  const excludedClause = excludedSessionClause('s', includeExcluded);
+  const scope = excludedClause ? `AND ${excludedClause}` : '';
+  return all(`
+    SELECT
+      b.bookmark_key,
+      b.key_kind,
+      b.note,
+      b.created_at,
+      pick.id            AS attempt_id,
+      pick.q_code,
+      pick.q_id,
+      pick.subject_code,
+      pick.category_code,
+      pick.subcategory,
+      pick.topic,
+      pick.difficulty,
+      pick.question_stem,
+      pick.question_url,
+      pick.source,
+      pick.session_date,
+      stats.attempts,
+      stats.correct_count
+    FROM question_bookmarks b
+    LEFT JOIN LATERAL (
+      SELECT q.id, q.q_code, q.q_id, q.subject_code, q.category_code, q.subcategory,
+             q.topic, q.difficulty, q.question_stem, q.question_url,
+             s.source, s.session_date
+      FROM question_attempts q
+      INNER JOIN sessions s ON s.id = q.session_id
+      WHERE ${BOOKMARK_MATCH('q', 'b')}
+        ${scope}
+      ORDER BY LENGTH(COALESCE(q.question_stem, '')) DESC, s.session_date DESC, q.id DESC
+      LIMIT 1
+    ) pick ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*)::int AS attempts,
+             COUNT(*) FILTER (WHERE q.correct = 1)::int AS correct_count
+      FROM question_attempts q
+      INNER JOIN sessions s ON s.id = q.session_id
+      WHERE ${BOOKMARK_MATCH('q', 'b')}
+        AND NOT (${unansweredPlaceholderExpr('q')})
+        ${scope}
+    ) stats ON true
+    ORDER BY b.created_at DESC
+  `);
+}
+
+async function listErrors({ runId, subject, category, difficulty, topic, confidence, search, mistakeTag, platform, bookmarked = false, sortKey, sortOrder, limit, offset, includeExcluded = false }) {
   const ALLOWED_SORT = {
     session_date: 's.session_date',
     session_external_id: 's.session_external_id',
@@ -1657,6 +1766,10 @@ async function listErrors({ runId, subject, category, difficulty, topic, confide
   const sortDir = sortOrder === 'asc' ? 'ASC' : 'DESC';
   const params = [];
   const where = ['q.correct = 0', `NOT (${unansweredPlaceholderExpr('q')})`];
+  // EXISTS rather than a join so listErrors and countErrors filter identically.
+  if (bookmarked) {
+    where.push(`EXISTS (SELECT 1 FROM question_bookmarks b WHERE ${BOOKMARK_MATCH('q', 'b')})`);
+  }
   const excludedClause = excludedSessionClause('s', includeExcluded);
   if (excludedClause) where.push(excludedClause);
   const normalizedSubExpr = `
@@ -2019,9 +2132,11 @@ async function listErrors({ runId, subject, category, difficulty, topic, confide
         ROUND(
           100.0 * COALESCE(ac.ok, ai.ok, q.correct) / COALESCE(ac.n, ai.n, 1),
           0
-        ) AS attempt_accuracy_pct
+        ) AS attempt_accuracy_pct,
+        (bm.bookmark_key IS NOT NULL) AS bookmarked
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
+      LEFT JOIN question_bookmarks bm ON ${BOOKMARK_MATCH('q', 'bm')}
       LEFT JOIN corr_code cc ON COALESCE(NULLIF(TRIM(q.q_code), ''), '') <> ''
                             AND cc.code = TRIM(q.q_code)
       LEFT JOIN corr_id   ci ON COALESCE(NULLIF(TRIM(q.q_code), ''), '') = ''
@@ -2041,9 +2156,13 @@ async function listErrors({ runId, subject, category, difficulty, topic, confide
   return rows.map((row) => enrichQuestionMetadata(row));
 }
 
-async function countErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag, platform, includeExcluded = false }) {
+async function countErrors({ runId, subject, difficulty, topic, confidence, search, mistakeTag, platform, bookmarked = false, includeExcluded = false }) {
   const params = [];
   const where = ['q.correct = 0', `NOT (${unansweredPlaceholderExpr('q')})`];
+  // EXISTS rather than a join so listErrors and countErrors filter identically.
+  if (bookmarked) {
+    where.push(`EXISTS (SELECT 1 FROM question_bookmarks b WHERE ${BOOKMARK_MATCH('q', 'b')})`);
+  }
   const excludedClause = excludedSessionClause('s', includeExcluded);
   if (excludedClause) where.push(excludedClause);
   // Re-use expressions for subject and topic logic to ensure consistency
@@ -5174,6 +5293,9 @@ module.exports = {
   getSessionAnalysis,
   getLatestRunForSource,
   updateErrorAnnotation,
+  bookmarkKeyForRow,
+  listBookmarks,
+  toggleBookmark,
   pickRicherStem,
   listReviewRules,
   listAttemptHistory,

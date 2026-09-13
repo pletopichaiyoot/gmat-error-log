@@ -24,6 +24,8 @@ const {
   getPatterns,
   getSessionAnalysis,
   updateErrorAnnotation,
+  listBookmarks,
+  toggleBookmark,
   listReviewRules,
   listAttemptHistory,
   saveLsatAttempt,
@@ -663,6 +665,9 @@ app.get('/api/errors', async (req, res) => {
       confidence: req.query.confidence || '',
       search,
       mistakeTag: req.query.mistakeTag || '',
+      // LSAT rows have no q_code/q_id to bookmark, so the flag also narrows the
+      // merge below to the GMAT side.
+      bookmarked: ['1', 'true', 'yes'].includes(String(req.query.bookmarked || '').toLowerCase()),
       platform: platform === 'lsat' ? null : platform,
       sortKey,
       sortOrder,
@@ -672,7 +677,9 @@ app.get('/api/errors', async (req, res) => {
     // GMAT subjects are Q/V/DI; LSAT subjects are RC/CR. A Q/V/DI subject filter
     // excludes LSAT errors; an RC/CR filter excludes GMAT errors.
     const includeGmat = platform !== 'lsat' && !['RC', 'CR'].includes(subjectRaw);
-    const includeLsat = (platform === null || platform === 'lsat') && !['Q', 'V', 'DI'].includes(subjectRaw);
+    const includeLsat = (platform === null || platform === 'lsat')
+      && !['Q', 'V', 'DI'].includes(subjectRaw)
+      && !filterOptions.bookmarked;
 
     const gmatRows = includeGmat
       ? await listErrors({ ...filterOptions, limit: 1000000, offset: 0 })
@@ -720,6 +727,30 @@ app.get('/api/patterns', async (req, res) => {
     res.json(patterns);
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Bookmarks are keyed on the question (q_code, else q_id), so one star covers
+// every attempt of it and survives the delete+reinsert of a Phase-1 rescrape.
+app.get('/api/bookmarks', async (req, res) => {
+  try {
+    const bookmarks = await listBookmarks({ includeExcluded: wantsExcluded(req) });
+    res.json({ bookmarks });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/bookmarks/toggle', async (req, res) => {
+  try {
+    const result = await toggleBookmark({
+      qCode: req.body?.qCode ?? req.body?.q_code,
+      qId: req.body?.qId ?? req.body?.q_id,
+      note: req.body?.note,
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
   }
 });
 
