@@ -76,6 +76,10 @@ function runFrom(lines, seed, startAt) {
   const questions = [];
   const warnings = [];
   const seedNumber = seed.number;
+  if (seed.unnumbered) {
+    warnings.push('no question numbers survived in this section; ' +
+      'questions are segmented by their choice runs and numbered in order');
+  }
 
   // The seed may be past startAt when the scan lost the opening numbers.
   if (seedNumber > startAt) {
@@ -117,6 +121,10 @@ function runFrom(lines, seed, startAt) {
     questions.push(q);
     cur = null;
   };
+
+  if (seed.unnumbered) {
+    cur = { number: seedNumber, stemParts: [], choices: [], numberInferred: true };
+  }
 
   for (let i = seed.index; i < lines.length; i++) {
     const line = lines[i].trimEnd();
@@ -173,9 +181,18 @@ function runFrom(lines, seed, startAt) {
 // whichever parse actually recovers the most complete questions.
 function parseQuestions(rawLines, { startAt = 1 } = {}) {
   const lines = rejoinLoneNumbers(rawLines);
-  const seeds = findSeeds(lines, startAt);
+  let seeds = findSeeds(lines, startAt);
   if (seeds.length === 0) {
-    return { questions: [], warnings: [`no question ${startAt} with choices found`] };
+    // A scan can lose every question number in a section (OG13 CR's redone
+    // layer does). The choice runs are then the only structure left, so start
+    // at the first one and let the (A)-restart rule segment the rest.
+    const firstRun = lines.findIndex(l => /^\(A\)\s/.test(l.trimEnd()));
+    if (firstRun < 0) {
+      return { questions: [], warnings: [`no question ${startAt} with choices found`] };
+    }
+    let stemStart = firstRun;
+    while (stemStart > 0 && lines[stemStart - 1].trim() !== '') stemStart--;
+    seeds = [{ index: stemStart, number: startAt, unnumbered: true }];
   }
 
   // Score: most complete questions, then most questions, then the seed

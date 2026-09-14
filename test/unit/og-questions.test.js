@@ -194,6 +194,22 @@ test('an inferred split still yields five choices each', () => {
   assert.deepEqual(questions.map(q => q.choices.length), [5, 5, 5]);
 });
 
+test('a section whose numbers are all lost still parses from the choice runs', () => {
+  // OG13 CR's re-OCR'd layer keeps clean choice labels but loses every
+  // question number in the practice section. The choice runs are all that is
+  // left to segment on.
+  const run = n => [`(A) a${n}`, `(B) b${n}`, `(C) c${n}`, `(D) d${n}`, `(E) e${n}`];
+  const { questions } = parseQuestions([
+    'Stem one, with no number at all.', ...run(1),
+    'Stem two, likewise.', ...run(2),
+    'Stem three, likewise.', ...run(3),
+  ]);
+  assert.deepEqual(questions.map(q => q.number), [1, 2, 3]);
+  assert.deepEqual(questions.map(q => q.choices.length), [5, 5, 5]);
+  assert.equal(questions[0].stem, 'Stem one, with no number at all.');
+  assert.ok(questions.every(q => q.numberInferred));
+});
+
 test('a page footer run onto the end of a line is trimmed', () => {
   const { questions } = parseQuestions([
     '1. The stem ends here. 542',

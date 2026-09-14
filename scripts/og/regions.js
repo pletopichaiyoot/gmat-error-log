@@ -30,28 +30,27 @@ const VALIDATORS = {
   explanations: null,
 };
 
-const TOC_HEADING = /^\d{1,2}\.\d{1,2}\s/;
-const TOC_WINDOW = 60;
-const TOC_MIN_DENSITY = 10;
-// The contents sit at the front of the book. Chapter-opener pages list several
-// headings together too, so without this bound the last such cluster — line
-// 55,621 of OG12 — would be mistaken for the contents.
-const TOC_SEARCH_FRACTION = 0.1;
+// A contents line is the heading followed by nothing but its page number
+// ("8.5 Answer Key 539"); the body prints the heading bare, or as a running
+// head with the subject inserted ("8.5 Critical Reasoning Answer Key").
+//
+// This replaced a density scan for the contents block: re-OCR reflows the
+// contents across more lines, so "a dozen headings within sixty lines" held
+// for the original text layer of OG13 and not for its Tesseract redo.
+const TOC_TAIL = /\s\d{1,4}\s*$/;
 
-// The contents are the first dense run of "N.M " headings near the front: a
-// dozen or more with only short gaps between them, which no body page matches.
-function findTocEnd(lines) {
-  const limit = Math.floor(lines.length * TOC_SEARCH_FRACTION);
-  const hits = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (TOC_HEADING.test(lines[i].trim())) hits.push(i);
-  }
-  for (let a = 0; a < hits.length && hits[a] <= limit; a++) {
-    let b = a;
-    while (b + 1 < hits.length && hits[b + 1] - hits[b] <= TOC_WINDOW) b++;
-    if (b - a + 1 >= TOC_MIN_DENSITY) return hits[b];
-  }
-  return 0;
+function isContentsLine(line) {
+  return TOC_TAIL.test(String(line).trimEnd());
+}
+
+// A heading carries a title. Two things in the scans squash to a heading
+// prefix without being one: a bare contents entry whose page number reflowed
+// onto its own line ("8.3"), and a line of answer-key table noise
+// ("8. 39, 70. 101. 132."). Both are letterless.
+const MIN_HEADING_LETTERS = 3;
+
+function looksLikeHeading(line) {
+  return (String(line).match(/[A-Za-z]/g) || []).length >= MIN_HEADING_LETTERS;
 }
 
 function headingsFor(book, kind) {
@@ -70,6 +69,7 @@ function candidates(lines, heading, isValid, after) {
   const out = [];
   for (let i = after; i < lines.length; i++) {
     if (!squash(lines[i]).startsWith(want)) continue;
+    if (isContentsLine(lines[i]) || !looksLikeHeading(lines[i])) continue;
     if (isValid && !isValid(lines, i)) continue;
     out.push(i);
   }
@@ -79,14 +79,13 @@ function candidates(lines, heading, isValid, after) {
 function findRegions(lines, book, kind) {
   const h = headingsFor(book, kind);
   const ch = book.chapters[kind];
-  const afterToc = findTocEnd(lines);
 
   const first = (heading, isValid, after) => {
     const c = candidates(lines, heading, isValid, after);
     return c.length ? c[0] : -1;
   };
 
-  const iDirections = first(h.directions, null, afterToc);
+  const iDirections = first(h.directions, null, 0);
   if (iDirections < 0) throw new Error(`Could not locate heading: ${h.directions}`);
   const iKey = first(h.key, VALIDATORS.key, iDirections + 1);
   if (iKey < 0) throw new Error(`Could not locate heading: ${h.key}`);
@@ -116,4 +115,4 @@ function findRegions(lines, book, kind) {
   };
 }
 
-module.exports = { findRegions, headingsFor, findTocEnd };
+module.exports = { findRegions, headingsFor, isContentsLine };
