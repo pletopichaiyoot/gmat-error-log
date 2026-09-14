@@ -7,25 +7,52 @@
 //
 //  1. The "X.4 Practice Questions" heading is NOT the start of the practice
 //     material. Its heading-and-directions block is emitted after the
-//     section's first passage page, so question 1 physically precedes it in
-//     the text stream. The practice region is therefore bounded by the
-//     directions heading (X.3) on the left and the answer key (X.5) on the
-//     right.
-//  2. Every heading appears first in the table of contents, where the
-//     chapter's sub-headings sit on adjacent lines. Picking the triple with
-//     the widest practice region separates the body from the TOC without any
-//     tuned threshold: the TOC triple spans about one line, the body triple
-//     hundreds.
+//     section's first passage page, so question 1 precedes it in the text
+//     stream. The practice region is bounded by the directions heading (X.3)
+//     on the left and the answer key (X.5) on the right.
+//  2. Every heading appears first in the table of contents, with a page
+//     number attached. Bounding a region with those lines yields nothing, so
+//     the contents block is located and skipped.
 
 const { squash, isRunningHead, normalizeLine } = require('./text');
 
-const QUESTION_ONE = /^1\.\s+\S/;
-const KEY_ENTRY = /(?:^|\s)[0-9IlO]{1,4}\.\s*[A-E0](?=\s|$)/;
+// A key line is a numbered entry, with or without its letter: re-OCR can
+// recover a rotated key table's numbers while losing the letter column
+// entirely (OG13 CR). The heading still has to be findable so the caller can
+// see the region and judge it unusable.
+const KEY_LINE = /^[0-9IlO]{1,4}[.,;]/;
 
+// The explanations heading needs no content check: it is taken as the first
+// X.6 after the chosen key heading. Requiring a numbered question beneath it
+// would fail on the scans that lose those numbers.
 const VALIDATORS = {
-  key: (lines, i) => lines.slice(i + 1, i + 20).some(l => KEY_ENTRY.test(l.trim())),
-  explanations: (lines, i) => lines.slice(i + 1, i + 80).some(l => QUESTION_ONE.test(l.trim())),
+  key: (lines, i) => lines.slice(i + 1, i + 20).filter(l => KEY_LINE.test(l.trim())).length >= 3,
+  explanations: null,
 };
+
+const TOC_HEADING = /^\d{1,2}\.\d{1,2}\s/;
+const TOC_WINDOW = 60;
+const TOC_MIN_DENSITY = 10;
+// The contents sit at the front of the book. Chapter-opener pages list several
+// headings together too, so without this bound the last such cluster — line
+// 55,621 of OG12 — would be mistaken for the contents.
+const TOC_SEARCH_FRACTION = 0.1;
+
+// The contents are the first dense run of "N.M " headings near the front: a
+// dozen or more with only short gaps between them, which no body page matches.
+function findTocEnd(lines) {
+  const limit = Math.floor(lines.length * TOC_SEARCH_FRACTION);
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (TOC_HEADING.test(lines[i].trim())) hits.push(i);
+  }
+  for (let a = 0; a < hits.length && hits[a] <= limit; a++) {
+    let b = a;
+    while (b + 1 < hits.length && hits[b + 1] - hits[b] <= TOC_WINDOW) b++;
+    if (b - a + 1 >= TOC_MIN_DENSITY) return hits[b];
+  }
+  return 0;
+}
 
 function headingsFor(book, kind) {
   const ch = book.chapters[kind];
@@ -38,10 +65,10 @@ function headingsFor(book, kind) {
   };
 }
 
-function candidates(lines, heading, isValid) {
+function candidates(lines, heading, isValid, after) {
   const want = squash(heading);
   const out = [];
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = after; i < lines.length; i++) {
     if (!squash(lines[i]).startsWith(want)) continue;
     if (isValid && !isValid(lines, i)) continue;
     out.push(i);
@@ -49,40 +76,26 @@ function candidates(lines, heading, isValid) {
   return out;
 }
 
-// Widest practice region wins — see note 2 above.
-function bestTriple(directions, key, explanations) {
-  let best = null;
-  for (const d of directions) {
-    const k = key.find(x => x > d);
-    if (k === undefined) continue;
-    const e = explanations.find(x => x > k);
-    if (e === undefined) continue;
-    if (!best || k - d > best.key - best.directions) {
-      best = { directions: d, key: k, explanations: e };
-    }
-  }
-  return best;
-}
-
 function findRegions(lines, book, kind) {
   const h = headingsFor(book, kind);
   const ch = book.chapters[kind];
+  const afterToc = findTocEnd(lines);
 
-  const cDirections = candidates(lines, h.directions, null);
-  if (cDirections.length === 0) throw new Error(`Could not locate heading: ${h.directions}`);
-  const cKey = candidates(lines, h.key, VALIDATORS.key);
-  if (cKey.length === 0) throw new Error(`Could not locate heading: ${h.key}`);
-  const cExpl = candidates(lines, h.explanations, VALIDATORS.explanations);
-  if (cExpl.length === 0) throw new Error(`Could not locate heading: ${h.explanations}`);
+  const first = (heading, isValid, after) => {
+    const c = candidates(lines, heading, isValid, after);
+    return c.length ? c[0] : -1;
+  };
 
-  const picked = bestTriple(cDirections, cKey, cExpl);
-  if (!picked) {
-    throw new Error(`Could not order headings ${h.directions} / ${h.key} / ${h.explanations}`);
-  }
+  const iDirections = first(h.directions, null, afterToc);
+  if (iDirections < 0) throw new Error(`Could not locate heading: ${h.directions}`);
+  const iKey = first(h.key, VALIDATORS.key, iDirections + 1);
+  if (iKey < 0) throw new Error(`Could not locate heading: ${h.key}`);
+  const iExpl = first(h.explanations, VALIDATORS.explanations, iKey + 1);
+  if (iExpl < 0) throw new Error(`Could not locate heading: ${h.explanations}`);
 
   // The explanations run to the next chapter, not to end of file, so an RC
   // parse does not swallow the CR chapter that follows it.
-  const cNext = candidates(lines, h.nextChapter, null).filter(i => i > picked.explanations);
+  const cNext = candidates(lines, h.nextChapter, null, iExpl + 1);
   const iEnd = cNext.length ? cNext[cNext.length - 1] : lines.length;
 
   // Every heading in this chapter doubles as a running head to strip.
@@ -97,10 +110,10 @@ function findRegions(lines, book, kind) {
     .filter(l => l.trim() !== '' && !isRunningHead(l, runningHeads));
 
   return {
-    practice: clean(picked.directions + 1, picked.key),
-    key: clean(picked.key + 1, picked.explanations),
-    explanations: clean(picked.explanations + 1, iEnd),
+    practice: clean(iDirections + 1, iKey),
+    key: clean(iKey + 1, iExpl),
+    explanations: clean(iExpl + 1, iEnd),
   };
 }
 
-module.exports = { findRegions, headingsFor };
+module.exports = { findRegions, headingsFor, findTocEnd };

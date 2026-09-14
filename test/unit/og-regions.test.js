@@ -20,11 +20,39 @@ const body = (extra = []) => [
   ...extra,
 ];
 
-const chapter = (extra = []) => [
+// A realistic table of contents: every chapter's sub-headings listed together
+// with page numbers. This is what the region locator has to see past.
+const toc = () => [
+  '1.0 What Is the GMAT 12',
+  '2.0 How to Prepare 20',
+  '3.0 Diagnostic Test 30',
+  '4.0 Math Review 100',
+  '5.0 Problem Solving 140',
+  '5.3 Practice Questions 152',
+  '5.4 Answer Key 186',
+  '5.5 Answer Explanations 188',
+  '6.0 Data Sufficiency 270',
+  '6.3 Practice Questions 272',
+  '6.4 Answer Key 289',
+  '6.5 Answer Explanations 290',
+  '7.0 Reading Comprehension 358',
+  '7.3 The Directions 362',
+  '7.4 Practice Questions 364',
+  '7.5 Answer Key 418',
+  '7.6 Answer Explanations 419',
+  '8.0 Critical Reasoning 496',
   '8.3 The Directions 485',
   '8.4 Practice Questions 486',
   '8.5 Answer Key 539',
   '8.6 Answer Explanations 540',
+  '9.0 Sentence Correction 660',
+  // Real books put thousands of lines of front matter and earlier chapters
+  // between the contents and the body; the locator relies on that distance.
+  ...Array.from({ length: 200 }, (_, i) => `front matter line ${i}`),
+];
+
+const chapter = (extra = []) => [
+  ...toc(),
   'front matter, then whole chapters of other material',
   '8.3 The Directions',
   'Read very carefully the set of statements on which a question is based.',
@@ -79,6 +107,7 @@ test('the OG13 watermark is stripped and misread labels repaired', () => {
 
 test('VR2 running heads broken at random points still match', () => {
   const lines = [
+    ...toc(),
     '3.3 The Directions',
     '1. The primary purpose of the passage is to',
     '(A) one', '(B) two', '(C) three', '(D) four', '(E) five',
@@ -95,6 +124,6 @@ test('VR2 running heads broken at random points still match', () => {
 });
 
 test('findRegions throws naming the heading it could not find', () => {
-  const lines = ['8.3 The Directions', '1. stem', '8.6 Answer Explanations', '1. stem'];
+  const lines = [...toc(), '8.3 The Directions', '1. stem', '8.6 Answer Explanations', '1. stem'];
   assert.throws(() => findRegions(lines, OG13, 'CR'), /8\.5 Answer Key/);
 });
