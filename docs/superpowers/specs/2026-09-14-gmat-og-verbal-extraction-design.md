@@ -175,8 +175,15 @@ idempotent on re-run (skips questions that already carry a difficulty).
 `data/gmat-og-questions.json`, with `.bak-<reason>-<timestamp>` siblings
 for rollback — the same convention `data/lsat-questions.json` uses.
 
-`.gitignore` gains `data/gmat-og-questions.json*` and `docs/ocr/`. The source PDFs
-under `docs/` stay tracked; they are the only inputs the pipeline cannot regenerate.
+`.gitignore` gains `/docs/*.pdf`, `/docs/ocr/`, and `/data/gmat-og-questions.json*`.
+
+**The source PDFs must never be committed.** This repository is public, the OG books
+are copyrighted, and the existing `/*.pdf` rule only covers the repository root — the
+three books sit in `docs/`, currently untracked but *unignored*, so a single
+`git add -A` would publish 217MB of copyrighted material. Widening the rule is the
+first task of the implementation, before any pipeline work. The PDFs are local-only
+inputs, like `data/lsat-questions.json` and the `LSAT PrepTest 1_89.pdf` before
+them; the pipeline's scripts are what the repository tracks.
 
 ```
 {
