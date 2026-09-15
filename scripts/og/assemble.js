@@ -119,20 +119,81 @@ function squashText(t) {
   return String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-function repairChoices(q, entry) {
-  if (!entry || !entry.questionBlock || !entry.questionBlock.length) return null;
-  const parsed = parseQuestions(entry.questionBlock, { startAt: entry.number || 1 }).questions[0];
-  if (!parsed || parsed.choices.length !== q.choices.length) return null;
-  if (parsed.choices.some(c => !c.text || !c.text.trim())) return null;
+// Index every explanation's reprinted choices by their opening characters, so
+// a question can find the copy that reprints IT — independent of the number
+// pairing, which is exactly what fails on the sections that need repair most.
+// Long enough to identify a question, short enough that a brief option still
+// takes part in the match.
+const REPRINT_MIN_KEY = 18;
 
+function buildReprintIndex(explanations) {
+  const index = new Map();
+  for (const entry of explanations) {
+    if (!entry.questionBlock || !entry.questionBlock.length) continue;
+    const parsed = parseQuestions(entry.questionBlock, { startAt: entry.number || 1 }).questions[0];
+    if (!parsed || !parsed.choices.length) continue;
+    for (const c of parsed.choices) {
+      const k = squashText(c.text).slice(0, PAIR_PREFIX);
+      if (k.length >= REPRINT_MIN_KEY && !index.has(k)) index.set(k, parsed.choices);
+    }
+  }
+  return index;
+}
+
+function findReprint(q, index) {
+  const counts = new Map();
+  for (const c of q.choices) {
+    const k = squashText(c.text).slice(0, PAIR_PREFIX);
+    if (k.length < REPRINT_MIN_KEY) continue;
+    const hit = index.get(k);
+    if (hit) counts.set(hit, (counts.get(hit) || 0) + 1);
+  }
+  for (const [choices, n] of counts) {
+    // Two matching choices is enough to identify the question; one could be a
+    // stock option shared between questions.
+    if (n >= 2 && choices.length === q.choices.length) return choices;
+  }
+  return null;
+}
+
+// Return the part of `full` that lies beyond `have`, comparing on normalized
+// characters but cutting the RAW text, so the recovered tail keeps its own
+// spacing and the part already in hand keeps the better rendering it has.
+function tailBeyond(fullRaw, haveNormalizedLength) {
+  let seen = 0;
+  for (let i = 0; i < fullRaw.length; i++) {
+    if (/[a-z0-9]/i.test(fullRaw[i])) {
+      seen++;
+      if (seen === haveNormalizedLength) return fullRaw.slice(i + 1);
+    }
+  }
+  return '';
+}
+
+// Extend a cut choice with what the reprint has beyond it. The reprint often
+// comes from a worse OCR pass ("plantsthat dowell"), so replacing the whole
+// choice would trade a cut for glued words — only the missing part is taken.
+function repairChoices(q, index) {
+  const reprint = findReprint(q, index);
+  if (!reprint) return null;
+  if (reprint.some(c => !c.text || !c.text.trim())) return null;
+
+  const out = [];
   let anyLonger = false;
   for (let i = 0; i < q.choices.length; i++) {
-    const have = squashText(q.choices[i].text);
-    const full = squashText(parsed.choices[i].text);
-    if (!full.startsWith(have)) return null;      // a different rendering, not a repair
-    if (full.length > have.length) anyLonger = true;
+    const haveRaw = q.choices[i].text;
+    const have = squashText(haveRaw);
+    const full = squashText(reprint[i].text);
+    if (!full.startsWith(have)) return null;
+    if (full.length > have.length) {
+      const tail = tailBeyond(reprint[i].text, have.length).trim();
+      out.push({ label: q.choices[i].label, text: `${haveRaw.trim()} ${tail}`.trim() });
+      anyLonger = true;
+    } else {
+      out.push(q.choices[i]);
+    }
   }
-  return anyLonger ? parsed.choices : null;
+  return anyLonger ? out : null;
 }
 
 // Whether a question can actually be practised, by the rules the repo already
@@ -207,6 +268,7 @@ function assembleSection({ book, kind, questions, keys, explanations, passageRef
   const warnings = [];
   const matched = matchExplanations(questions, explanations);
   const unverifiable = keysAreUnverifiable(questions, keys);
+  const reprints = buildReprintIndex(explanations);
   if (unverifiable) {
     warnings.push(`${book.code}-${kind}: no printed key and mostly inferred numbering, ` +
       'so explanation-derived keys cannot be cross-checked; section withheld');
@@ -226,7 +288,7 @@ function assembleSection({ book, kind, questions, keys, explanations, passageRef
       e = null;
     }
 
-    const repaired = repairChoices(q, e);
+    const repaired = repairChoices(q, reprints);
     if (repaired) q.choices = repaired;
 
     const printedKey = keys.get(q.number) || null;

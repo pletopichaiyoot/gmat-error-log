@@ -302,6 +302,35 @@ test('a repair is refused when the explanation copy is cut the same way', () => 
   assert.equal(section.questions[0].unusable, 'truncated-choice');
 });
 
+test('a repair appends the missing tail and keeps the better spacing', () => {
+  // The reprint often comes from a worse OCR pass ("plantsthat dowell"), so
+  // replacing the whole choice trades a cut for glued words. Only the part
+  // that was cut off is taken.
+  const cut = [
+    { label: 'A', text: 'refute the idea that zonation is caused by salinity' },
+    { label: 'B', text: 'describe the pattern of zonation in mangrove forests' },
+    { label: 'C', text: 'argue that the paradigm cannot be applied here' },
+    { label: 'D', text: 'discuss hypotheses that explain the zonation' },
+    { label: 'E', text: 'establish that plants that do well in saline forest' },
+  ];
+  const reprint = e(1, { number: 1, questionBlock: [
+    '1. The primary purpose of the passage is to',
+    '(A) refute the idea that zonation is caused by salinity',
+    '(B) describe the pattern of zonation in mangrove forests',
+    '(C) argue that the paradigm cannot be applied here',
+    '(D) discuss hypotheses that explain the zonation',
+    '(E) establish that plantsthat dowell insalineforest environments require salt',
+  ] });
+  const { section } = assembleSection({
+    book: OG13, kind: 'CR', questions: [q(1, { choices: cut })],
+    keys: new Map([[1, 'B']]), explanations: [reprint], passageRefs: [],
+  });
+  const E = section.questions[0].choices[4].text;
+  assert.match(E, /^establish that plants that do well in saline forest/,
+    'the practice rendering is kept');
+  assert.match(E, /environments require salt$/, 'the cut-off tail is appended');
+});
+
 test('good choices are never replaced by the explanation copy', () => {
   const entry = e(1, { questionBlock: [
     '1. Stem.', '(A) a different rendering', '(B) b', '(C) c', '(D) d', '(E) e',
@@ -344,6 +373,40 @@ test('a section with a printed key is trusted even when numbering is inferred', 
     passageRefs: [],
   });
   assert.equal(stats.usable, 2);
+});
+
+test('choices are repaired from whichever explanation reprints them', () => {
+  // The repair must not depend on the number pairing: VR2-RC-62's choices were
+  // cut, and the entry that reprints them was NOT the one its number matched.
+  const cut = [
+    { label: 'A', text: 'refute the idea that zonation is caused by salinity' },
+    { label: 'B', text: 'describe the pattern of zonation in Florida mangrove forests' },
+    { label: 'C', text: 'argue that the succession paradigm cannot be applied' },
+    { label: 'D', text: 'discuss hypotheses that explain the zonation of forests' },
+    { label: 'E', text: 'establish that plants that do well in saline forest' },
+  ];
+  const wrongPairing = e(1, { number: 1, typeLabel: 'Inference',
+    questionBlock: ['1. According to the passage, the earliest research produced which?',
+      '(A) something else entirely here', '(B) b', '(C) c', '(D) d', '(E) e'] });
+  const reprint = e(2, { number: 2, typeLabel: 'Main idea', questionBlock: [
+    '2. The primary purpose of the passage is to',
+    '(A) refute the idea that zonation is caused by salinity',
+    '(B) describe the pattern of zonation in Florida mangrove forests',
+    '(C) argue that the succession paradigm cannot be applied',
+    '(D) discuss hypotheses that explain the zonation of forests',
+    '(E) establish that plants that do well in saline forest',
+    'environments require salt to achieve maximum',
+    'metabolic efficiency',
+  ] });
+  const { section } = assembleSection({
+    book: OG13, kind: 'CR',
+    questions: [q(1, { stem: 'The primary purpose of the passage is to', choices: cut })],
+    keys: new Map([[1, 'B']]), explanations: [wrongPairing, reprint], passageRefs: [],
+  });
+  const out = section.questions[0];
+  assert.match(out.choices[4].text, /metabolic efficiency$/, 'repaired from the reprint');
+  assert.equal(out.choicesSource, 'explanation');
+  assert.equal(out.usable, true);
 });
 
 test('passageRefs ride along on the section', () => {

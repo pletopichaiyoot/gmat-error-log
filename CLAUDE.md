@@ -200,9 +200,14 @@ Result: 1,718 → 2,117 keyed (79.6%), all 2,117 verified against an independent
 Critical Reasoning and Reading Comprehension questions extracted from three
 Official Guide PDFs into **`data/gmat-og-questions.json`** (gitignored;
 `.bak-*` siblings are the rollback). Sentence Correction is out of scope — the
-Focus exam dropped it. **363 usable questions**, each with a verified answer key and an
-LLM difficulty rating; 277 also carry the book's question-type label and its
-full answer explanation.
+Focus exam dropped it. **377 usable questions**, each with a verified answer key, a complete
+stem and choices, and an LLM difficulty rating; 277 also carry the book's
+question-type label and its full answer explanation.
+
+**The bar for `usable` is that the question is answerable.** A missing or
+dropped explanation does not disqualify it — 100 questions are keyed but
+unenriched. A defect in the passage, stem, choices or key does: those are
+excluded and carry the reason in `unusable`.
 
 **The source PDFs in `docs/` are copyrighted and gitignored** (`/docs/*.pdf`,
 `/docs/ocr/`). This repo is public — never commit them.
@@ -291,8 +296,12 @@ only `usable` questions.
   numbering, so nothing cross-checks the pairing — is withheld entirely
   (`unverifiable-key`); a wrong key is worse than none, because it marks a
   correct answer wrong.
-- **A truncated choice is repaired from the explanation copy** where the
-  explanation's rendering extends the practice one. 17 questions recovered.
+- **A truncated choice is repaired from whichever reprint contains it.** The
+  explanations are indexed by their reprinted choice text, so the repair does
+  not depend on the number pairing — which is precisely what fails on the
+  sections needing repair most. Only the part that was cut off is taken: the
+  reprint often comes from a worse OCR pass ("plantsthat dowell"), so replacing
+  the whole choice would trade a cut for glued words. 65 questions recovered.
 - **The scans truncate a choice at a line break.** A choice ending on a
   lower-case dangling function word with no terminal punctuation is the tell;
   length alone is not, since "Size" and "evaluation of a problem" are real
