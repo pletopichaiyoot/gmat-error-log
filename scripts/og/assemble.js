@@ -200,11 +200,20 @@ function repairChoices(q, index) {
 // applies when curating a practice set (CLAUDE.md): a non-empty stem, five
 // choices that all carry text, and a key. A disputed key is not a key — a
 // wrong one tells the user they missed a question they answered correctly.
+// "In the argument above, the portion in boldface plays which of the following
+// roles?" is unanswerable unless the bold span survived extraction. It did not:
+// pdftotext drops font weight and the pdfplumber pass never emitted stemHtml, so
+// every one of these stems reads as undifferentiated prose. Matched on "bold
+// face"/"boldfaced"/"portion(s) in bold" rather than a bare "bold", so "the bold
+// claim above" is not caught.
+const BOLDFACE_STEM = /\bbold\s?face\b|\bportions?\s+in\s+bold\b|\bboldfaced\b/i;
+
 function unusableReason(q, correct, keyDisputed, kind) {
   // Reading Comprehension without its passage cannot be answered. Passages are
   // attached by the pdfplumber pass, so RC stays unusable until that has run.
   if (kind === 'RC' && !q.passageId) return 'no-passage';
   if (!q.stem || !q.stem.trim()) return 'stem';
+  if (BOLDFACE_STEM.test(q.stem) && !/<b[\s>]/i.test(q.stemHtml || '')) return 'boldface-unmarked';
   if (q.choices.length !== 5) return 'choices';
   if (q.choices.some(c => !c.text || !c.text.trim())) return 'blank-choice';
   if (isLopsided(q.choices)) return 'lopsided-choice';

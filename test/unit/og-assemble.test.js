@@ -2,7 +2,7 @@
 /* global require */
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { assembleSection, matchExplanations } = require('../../scripts/og/assemble');
+const { assembleSection, matchExplanations, unusableReason } = require('../../scripts/og/assemble');
 const { bookByCode } = require('../../scripts/og/books');
 
 const OG13 = bookByCode('OG13');
@@ -416,4 +416,30 @@ test('passageRefs ride along on the section', () => {
     explanations: [e(1)], passageRefs: refs,
   });
   assert.deepEqual(section.passageRefs, refs);
+});
+
+// 17 CR stems ask what role "the portion in boldface" plays. The extraction
+// never recovered the bold spans (no question in the pool carries stemHtml), so
+// the stem is unanswerable as rendered — a stem defect, which drops the
+// question.
+test('a boldface question with no bold markup is unusable', () => {
+  const boldStem = {
+    stem: 'In the hunter\u2019s argument, the portion in boldface plays which of the following roles?',
+    choices,
+  };
+  assert.equal(unusableReason(boldStem, 'A', false, 'CR'), 'boldface-unmarked');
+});
+
+test('a boldface question keeps its markup when stemHtml recovered the spans', () => {
+  const marked = {
+    stem: 'The portion in boldface plays which of the following roles?',
+    stemHtml: 'The portion in <b>boldface</b> plays which of the following roles?',
+    choices,
+  };
+  assert.equal(unusableReason(marked, 'A', false, 'CR'), null);
+});
+
+test('an ordinary stem that merely contains the word bold is untouched', () => {
+  const ordinary = { stem: 'The bold claim above depends on which assumption?', choices };
+  assert.equal(unusableReason(ordinary, 'A', false, 'CR'), null);
 });
