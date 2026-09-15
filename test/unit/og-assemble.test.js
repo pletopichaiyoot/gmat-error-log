@@ -138,6 +138,33 @@ test('CR needs no passage', () => {
   assert.equal(section.questions[0].usable, true);
 });
 
+test('a choice wildly longer than its siblings is not a real option', () => {
+  // Residual scan damage glues following text onto a choice. A real A-E set is
+  // roughly even in length; one option many times the rest is not answerable.
+  const lopsided = [
+    { label: 'A', text: 'a short option' },
+    { label: 'B', text: 'another short option' },
+    { label: 'C', text: 'a third short option' },
+    { label: 'D', text: 'a fourth short option' },
+    { label: 'E', text: 'x'.repeat(600) },
+  ];
+  const { section } = assembleSection({
+    book: OG13, kind: 'CR', questions: [q(1, { choices: lopsided })],
+    keys: new Map([[1, 'A']]), explanations: [e(1)], passageRefs: [],
+  });
+  assert.equal(section.questions[0].usable, false);
+  assert.equal(section.questions[0].unusable, 'lopsided-choice');
+});
+
+test('a legitimately long choice set is kept', () => {
+  const long = 'ABCDE'.split('').map(l => ({ label: l, text: `${l} `.repeat(90) }));
+  const { section } = assembleSection({
+    book: OG13, kind: 'CR', questions: [q(1, { choices: long })],
+    keys: new Map([[1, 'A']]), explanations: [e(1)], passageRefs: [],
+  });
+  assert.equal(section.questions[0].usable, true);
+});
+
 test('passageRefs ride along on the section', () => {
   const refs = [{ firstQuestion: 1, lastQuestion: 3, page: 358 }];
   const { section } = assembleSection({

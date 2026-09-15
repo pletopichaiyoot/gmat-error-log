@@ -42,6 +42,22 @@ function matchExplanations(questions, explanations) {
 // applies when curating a practice set (CLAUDE.md): a non-empty stem, five
 // choices that all carry text, and a key. A disputed key is not a key — a
 // wrong one tells the user they missed a question they answered correctly.
+// Residual scan damage glues following text onto a choice. A printed A-E set
+// is roughly even in length, so one option several times the median of the
+// rest is carrying something that is not an answer.
+const LOPSIDED_RATIO = 3;
+const LOPSIDED_MIN = 250;
+
+function isLopsided(choices) {
+  if (choices.length < 2) return false;
+  const lens = choices.map(c => (c.text || '').length);
+  const longest = Math.max(...lens);
+  if (longest < LOPSIDED_MIN) return false;
+  const rest = lens.filter((n, i) => i !== lens.indexOf(longest)).sort((a, b) => a - b);
+  const median = rest[Math.floor(rest.length / 2)] || 0;
+  return longest > median * LOPSIDED_RATIO;
+}
+
 function unusableReason(q, correct, keyDisputed, kind) {
   // Reading Comprehension without its passage cannot be answered. Passages are
   // attached by the pdfplumber pass, so RC stays unusable until that has run.
@@ -49,6 +65,7 @@ function unusableReason(q, correct, keyDisputed, kind) {
   if (!q.stem || !q.stem.trim()) return 'stem';
   if (q.choices.length !== 5) return 'choices';
   if (q.choices.some(c => !c.text || !c.text.trim())) return 'blank-choice';
+  if (isLopsided(q.choices)) return 'lopsided-choice';
   if (keyDisputed) return 'key-disputed';
   if (!correct) return 'no-key';
   return null;

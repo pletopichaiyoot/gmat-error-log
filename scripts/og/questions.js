@@ -13,6 +13,20 @@ const Q_START = /^(\d{1,3})\.\s+(?=\S)/;
 const CHOICE_START = /^\(([A-E])\)\s*/;
 // A bare 1-4 digit number at end of line is a page footer pdftotext ran on.
 const TRAILING_FOOTER = /\s+\d{1,4}$/;
+
+// Lines that end whatever was being accumulated. Without these the last choice
+// on an RC page ran on through the page footer, the next page's header and the
+// following passage — one OG12 choice reached 3,100 characters.
+const STOP = [
+  /^Questions\s+\d{1,3}\s*[-\u2013\u2014]\s*\d{1,3}\s+refer/i,  // next passage's header
+  /^Line$/,                                                    // gutter caption
+  /^\(\d{1,2}\)$/,                                            // gutter line number
+  /^\d{1,4}$/,                                                 // bare page number
+];
+
+function isStop(line) {
+  return STOP.some(re => re.test(line));
+}
 // How far the run may jump forward to absorb a question number the scanner
 // lost. VR2 prints 104 RC questions but only 78 survive as "N." lines, so a
 // strict run would stop at the first gap; a jump larger than this is a page
@@ -99,6 +113,7 @@ function runFrom(lines, seed, startAt) {
     cur.choices.push({
       label: choiceLabel,
       text: finishText(choiceParts),
+      first: finishText(choiceParts.slice(0, 1)),
       carried: choiceParts.slice(1),
     });
     choiceLabel = null;
@@ -126,8 +141,18 @@ function runFrom(lines, seed, startAt) {
     cur = { number: seedNumber, stemParts: [], choices: [], numberInferred: true };
   }
 
+  // After a stop line nothing is accumulated until the next question or
+  // choice begins: the material in between is passage text or page furniture.
+  let limbo = false;
+
   for (let i = seed.index; i < lines.length; i++) {
     const line = lines[i].trimEnd();
+
+    if (isStop(line)) {
+      flushChoice();
+      limbo = true;
+      continue;
+    }
 
     const qm = line.match(Q_START);
     // Only open a question when the number continues the printed run — a
@@ -136,6 +161,7 @@ function runFrom(lines, seed, startAt) {
     const expected = cur ? cur.number + 1 : seedNumber;
     const n = qm ? Number(qm[1]) : null;
     if (qm && n >= expected && n <= expected + MAX_NUMBER_GAP) {
+      limbo = false;
       flushQuestion();
       if (n > expected) {
         const missing = [];
@@ -149,6 +175,7 @@ function runFrom(lines, seed, startAt) {
 
     const cm = line.match(CHOICE_START);
     if (cm) {
+      limbo = false;
       // A choice run restarting at (A) means the previous question ended, even
       // when its successor's number did not survive the scan. Without this one
       // question swallows every question after it.
@@ -156,7 +183,12 @@ function runFrom(lines, seed, startAt) {
         flushChoice();
         // Whatever followed the previous question's last choice is the next
         // question's stem: the closed choice keeps only its own first line.
-        const carried = cur.choices[cur.choices.length - 1].carried || [];
+        const last = cur.choices[cur.choices.length - 1];
+        const carried = last.carried || [];
+        // Those lines are the next stem, so they have to LEAVE this choice —
+        // copying them out while leaving them behind glued the following
+        // question onto choice E.
+        if (carried.length) last.text = last.first;
         const number = cur.number + 1;
         flushQuestion();
         cur = { number, stemParts: carried, choices: [], numberInferred: true };
@@ -167,6 +199,7 @@ function runFrom(lines, seed, startAt) {
       continue;
     }
 
+    if (limbo) continue;
     if (choiceLabel !== null) choiceParts.push(line);
     else cur.stemParts.push(line);
   }

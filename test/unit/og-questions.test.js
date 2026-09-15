@@ -210,6 +210,54 @@ test('a section whose numbers are all lost still parses from the choice runs', (
   assert.ok(questions.every(q => q.numberInferred));
 });
 
+test('the next question\'s stem does not stay inside the previous choice', () => {
+  // With no numbers to split on, the lines after (E) are the next question's
+  // stem. They must leave choice E, not merely be copied out of it: 57 of
+  // OG13 CR's questions ended up with the following stem glued onto choice E.
+  const { questions } = parseQuestions([
+    '1. First stem.',
+    '(A) a1', '(B) b1', '(C) c1', '(D) d1', '(E) e1',
+    'Second stem, whose number the scanner lost.',
+    'It runs to a second line.',
+    '(A) a2', '(B) b2', '(C) c2', '(D) d2', '(E) e2',
+  ]);
+  assert.equal(questions[0].choices[4].text, 'e1');
+  assert.equal(questions[1].stem,
+    'Second stem, whose number the scanner lost. It runs to a second line.');
+});
+
+test('a choice stops at the next passage, not at the next (A)', () => {
+  // In RC the last choice on a page was swallowing the footer, the next
+  // page header and the whole following passage — 3,100 characters in one
+  // OG12 case — because nothing ended it before the next question's (A).
+  const { questions } = parseQuestions([
+    '1. First stem.',
+    '(A) a1', '(B) b1', '(C) c1', '(D) d1', '(E) e1',
+    '362',
+    'Line',
+    '(5)',
+    '(10)',
+    'A long passage about predator densities during the Pleistocene era.',
+    'Questions 2-3 refer to the passage above.',
+    '2. Second stem.',
+    '(A) a2', '(B) b2', '(C) c2', '(D) d2', '(E) e2',
+  ]);
+  assert.equal(questions[0].choices[4].text, 'e1');
+  assert.equal(questions[1].stem, 'Second stem.');
+  assert.equal(questions[1].choices.length, 5);
+});
+
+test('a gutter marker does not become choice text', () => {
+  const { questions } = parseQuestions([
+    '1. Stem.',
+    '(A) a', '(B) b', '(C) c', '(D) d',
+    '(E) the final option',
+    '(15)',
+    'passage prose that follows on the same page',
+  ]);
+  assert.equal(questions[0].choices[4].text, 'the final option');
+});
+
 test('a page footer run onto the end of a line is trimmed', () => {
   const { questions } = parseQuestions([
     '1. The stem ends here. 542',
