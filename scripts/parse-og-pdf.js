@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-/* eslint-disable no-console */
 // Parse the GMAT Official Guide PDFs into data/gmat-og-questions.json.
 //
 // Usage:
