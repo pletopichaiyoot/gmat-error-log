@@ -397,23 +397,32 @@ function Runner({ session, onFinish, onExit }) {
           {q.stemHtml
             ? <div className="lsat-st-stem" dangerouslySetInnerHTML={{ __html: q.stemHtml }} />
             : <div className="lsat-st-stem">{q.stem}</div>}
-          <div className="lsat-st-choices" role="radiogroup" aria-label="Answer choices">
+          {/* .lsat-st-choice is a two-column grid (18px for the control, 1fr for
+              the text), so it needs BOTH children: with the span alone the text
+              lands in the 18px column and wraps one word per line. A real radio
+              in a label also beats role="radio" on a button for keyboard and
+              screen-reader behaviour. */}
+          <div className="lsat-st-choices">
             {q.choices.map((c) => {
               const isPick = chosen === c.label;
               const isKey = revealed && fb.correctAnswer === c.label;
               const isWrongPick = revealed && isPick && !fb.isCorrect;
+              let cls = 'lsat-st-choice';
+              if (isKey) cls += ' is-correct';
+              else if (isWrongPick) cls += ' is-wrong';
+              else if (submitted && isPick) cls += ' is-locked';
               return (
-                <button
-                  key={c.label}
-                  type="button"
-                  role="radio"
-                  aria-checked={isPick}
-                  className={`lsat-st-choice${isPick ? ' is-picked' : ''}${isKey ? ' is-correct' : ''}${isWrongPick ? ' is-wrong' : ''}`}
-                  onClick={() => pick(c.label)}
-                  disabled={submitted}
-                >
-                  <span className="lsat-st-choice-text"><b>{c.label}.</b> {c.text}</span>
-                </button>
+                <label key={c.label} className={cls} data-disabled={submitted ? 'true' : undefined}>
+                  <input
+                    type="radio"
+                    name={`og-q-${q.id}`}
+                    value={c.label}
+                    checked={isPick}
+                    disabled={submitted}
+                    onChange={() => pick(c.label)}
+                  />
+                  <span className="lsat-st-choice-text"><b className="ai-choice-letter">{c.label}.</b> {c.text}</span>
+                </label>
               );
             })}
           </div>
