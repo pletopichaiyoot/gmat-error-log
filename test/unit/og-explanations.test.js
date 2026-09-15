@@ -198,5 +198,6 @@ test('canonicalTypeLabel folds plurals and OCR spacing', () => {
   assert.equal(canonicalTypeLabel('Supporting ideas'), 'Supporting ideas');
   assert.equal(canonicalTypeLabel('Argument Evaluat ion'), 'Argument Evaluation');
   assert.equal(canonicalTypeLabel('Main idea'), 'Main idea');
+  assert.equal(canonicalTypeLabel('Tone'), 'Style and tone');
   assert.equal(canonicalTypeLabel('A This information suggests'), null);
 });

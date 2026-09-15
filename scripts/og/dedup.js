@@ -105,6 +105,21 @@ function dedupPool(pool, { prefer }) {
     section.questions = section.questions.filter(q => !dropIds.has(q.passageId));
   }
 
+  // A passage no usable question points at is dead weight: it would show up in
+  // a passage list with nothing to practise on it.
+  report.orphanPassagesDropped = 0;
+  const served = new Set();
+  for (const b of pool.books) {
+    for (const s of b.sections) {
+      for (const q of s.questions) if (q.usable && q.passageId) served.add(q.passageId);
+    }
+  }
+  for (const { section } of sectionsOf(pool, 'RC')) {
+    const before = (section.passages || []).length;
+    section.passages = (section.passages || []).filter(p => served.has(p.id));
+    report.orphanPassagesDropped += before - section.passages.length;
+  }
+
   return { pool, report };
 }
 

@@ -103,6 +103,16 @@ test('a shared RC passage drops its whole group, never part of it', () => {
   assert.equal(og13.questions.length, 2);
 });
 
+test('a passage no usable question points at is dropped', () => {
+  const p = pool();
+  // Make OG13's RC group unusable; its passage then serves nobody.
+  p.books[0].sections[1].questions.forEach(q => { q.usable = false; });
+  const { pool: out, report } = dedupPool(p, { prefer: ['OG13', 'OG12'] });
+  const og13 = out.books.find(b => b.code === 'OG13').sections.find(s => s.kind === 'RC');
+  assert.equal(og13.passages.length, 0);
+  assert.ok(report.orphanPassagesDropped >= 1);
+});
+
 test('preference decides which edition keeps the copy', () => {
   const { pool: out } = dedupPool(pool(), { prefer: ['OG12', 'OG13'] });
   const og12 = out.books.find(b => b.code === 'OG12').sections.find(s => s.kind === 'CR');

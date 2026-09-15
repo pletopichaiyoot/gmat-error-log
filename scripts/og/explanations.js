@@ -37,6 +37,9 @@ const LABEL_ALIASES = new Map([
   ['supportingidea', 'Supporting ideas'],
   ['inferences', 'Inference'],
   ['mainideas', 'Main idea'],
+  // The books shorten "Style and tone" to "Tone" on some RC entries.
+  ['tone', 'Style and tone'],
+  ['style', 'Style and tone'],
 ]);
 
 const LABEL_BY_KEY = new Map(TYPE_LABELS.map(l => [squash(l), l]));
