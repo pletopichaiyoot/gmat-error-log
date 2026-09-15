@@ -3067,55 +3067,69 @@ Not covered here, by design: migration `0010`, `src/og-dashboard.js`, `/api/og/*
 
 **Known soft spot.** Task 8's stem fallback re-runs `parseQuestions` over the whole explanations region once per fallback question. That is O(n²) on a region of a few thousand lines and only fires for questions missing from the practice section — measured in single digits, if any. Left simple deliberately; if the fallback count turns out large, hoist the parse out of the loop.
 
-## Execution status (stopped 2026-09-15)
+## Execution status: COMPLETE (2026-09-15)
 
-Tasks 1-6 are complete and committed on `feat/og-verbal-extraction`; Task 7 is
-complete for the clean-text book and incomplete for the scans. Tasks 8-13 are
-not started. 55 unit tests pass, lint is clean, and the new files add no
-warnings.
+All thirteen tasks are done and committed on `feat/og-verbal-extraction`
+(17 commits, not pushed). 316 unit tests pass, lint adds no new warnings, and
+`npm run og:verify` reports all eleven acceptance checks passing.
 
-**Question recovery measured against the real books** (printed / parsed /
-five-choice / printed keys recovered):
+**Pipeline** — `og:parse` → `og:passages` → `og:dedup` →
+`node scripts/classify-og-difficulty.mjs` → `og:verify`. Difficulty ratings are
+carried across a re-parse by `scripts/og/carry-ratings.js`, so rebuilding the
+pool does not re-spend on the only step that costs money.
 
-| Book | Printed | Parsed | 5-choice | Keys |
-|---|---|---|---|---|
-| OG12 RC | 139 | 139 | 100% | 139 |
-| OG12 CR | 124 | 124 | 100% | 124 |
-| OG13 RC | 139 | 136 | 99% | 111 |
-| OG13 CR | 124 | 122 | 86% | 0 — explanations are the only key source |
-| VR2 RC | 104 | 92 | 86% | 104 |
-| VR2 CR | 83 | 84 | 99% | 67 |
+**Result: 377 usable questions** in `data/gmat-og-questions.json` (gitignored).
 
-**What the plan got wrong, corrected in the code:**
+| Book | CR | RC |
+|---|---|---|
+| OG 12e | 123 | 137 |
+| OG 13e | — withheld | 21 |
+| Verbal Review 2e | 59 | 37 |
 
-- `--redo-ocr` is incompatible with `--deskew`; ocrmypdf refuses the pair and
-  exits at once. Piping the command into `tail` reports the pipe's status, so
-  the refusal looked like success. (Fixed in Task 2 above.)
-- Re-OCR is not uniformly better. On OG13 it took misread `(C)` labels from 418
-  lines to zero and glued words down to the clean-text baseline, but it
-  rasterized the answer-key tables into numbers with no letter column and lost
-  two thirds of the question numbers in the answer explanations. Neither layer
-  wins everywhere, so `scripts/og/select-source.js` — not in the original plan
-  — picks the layer per region by how well that region actually parses.
-- The `X.4` heading does not start the practice material: its
-  heading-and-directions block is emitted after the section's first passage
-  page, so question 1 precedes it in the text stream. Regions are bounded by
-  `X.3` and `X.5` instead.
-- The scans lose question numbers wholesale, so a strict run stopped at the
-  first gap and one question swallowed the rest of the section. The parser now
-  restarts a question on a second `(A)`, tries every plausible seed and keeps
-  the best parse, and falls back to segmenting on choice runs alone for a
-  section with no surviving numbers.
+277 carry the book's question-type label and full answer explanation; 100 are
+keyed and answerable but unenriched. 162 questions were excluded:
+73 unverifiable-key, 27 no-passage, 26 truncated-choice, 12 no-key,
+10 wrong choice count, 8 blank-choice, 4 key-disputed, 2 lopsided-choice.
 
-**Next step if this resumes:** `parseExplanations` still segments on question
-numbers, so it recovers only 1 of 124 entries for OG13 CR and 3 of 104 for
-VR2 RC. It needs the same structural treatment the practice parser got —
-segment on the type-label plus A-E rationale block. This is load-bearing: the
-explanations are the only key source for OG13 CR, and they carry the type
-labels and review text. Task 8 onward assumes it.
+**The usability bar is that a question is ANSWERABLE** (user's rule, 2026-09-15):
+a missing or dropped explanation does not disqualify it; a defect in the
+passage, stem, choices or key does.
 
-**Shippable today without that work:** OG12 alone — 263 questions, fully keyed
-from two agreeing sources, 100% five-choice, 100% type-labelled.
+### What the real PDFs disproved, and what it cost
+
+Every one of these was found by measuring, not by reading the plan:
+
+- `--redo-ocr` refuses `--deskew`, and piping ocrmypdf into `tail` hides the
+  refusal behind the pipe's exit status.
+- **Neither text layer wins everywhere.** Re-OCR fixed 418 misread `(C)` labels
+  in OG13 but destroyed its answer-key tables and lost two thirds of the
+  question numbers in its explanations. `select-source.js` chooses per region.
+- **The `X.4` heading does not start the practice material** — question 1
+  precedes it in the text stream.
+- **The scans lose question numbers wholesale**, so questions segment on the
+  choice run restarting at `(A)`.
+- **A choice had nothing ending it** — one OG12 choice reached 3,100 characters,
+  swallowing a page footer, a header and the following passage.
+- **Explanations were paired to questions by a guessed number.** Verified
+  against choice text instead; a pairing that reprints a different question is
+  dropped. OG13's CR section has no printed key AND inferred numbering, so
+  nothing cross-checks it — measured against OG12's double-confirmed keys,
+  3 agreed and 4 disagreed, so the section is withheld entirely.
+- **Difficulty is a rough relative ranking, not a calibrated measure.** Asked
+  for a label directly the model put 319 of 448 in one bucket; asked for a
+  percentage it clusters in 72-82 and correlates only ~0.15-0.22 with printed
+  question order. Labels are tertiles of the estimates; `--relabel` re-cuts
+  them for free from the stored `difficulty_pct`.
+
+### Next phase — not started
+
+The practice track: migration `0010` (`og_attempts`, `og_sessions`),
+`src/og-dashboard.js`, `/api/og/*`, `client/src/GmatOgPractice.jsx` at `#og`,
+and merging OG into `/api/sessions` and `/api/errors` under `platform=og`.
+Design decisions already agreed with the user and recorded in the spec:
+StartTest-style filter-based set builder (book, subject, type label, difficulty,
+seen/unseen/wrong, count, timed), RC draws whole passages, Practice vs Timed
+explanation modes. **That plan has not been written yet.**
 
 ## Execution Handoff
 
