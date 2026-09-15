@@ -3121,15 +3121,29 @@ Every one of these was found by measuring, not by reading the plan:
   question order. Labels are tertiles of the estimates; `--relabel` re-cuts
   them for free from the stored `difficulty_pct`.
 
-### Next phase — not started
+### Next phase — BUILT (2026-09-15)
 
-The practice track: migration `0010` (`og_attempts`, `og_sessions`),
-`src/og-dashboard.js`, `/api/og/*`, `client/src/GmatOgPractice.jsx` at `#og`,
-and merging OG into `/api/sessions` and `/api/errors` under `platform=og`.
-Design decisions already agreed with the user and recorded in the spec:
-StartTest-style filter-based set builder (book, subject, type label, difficulty,
-seen/unseen/wrong, count, timed), RC draws whole passages, Practice vs Timed
-explanation modes. **That plan has not been written yet.**
+The practice track was planned in
+`docs/superpowers/plans/2026-09-15-gmat-og-practice-track.md` and built the same
+day: migration `0010` (`og_attempts`, `og_sessions`), `src/og-data.js`,
+`src/og-set-builder.js`, `src/og-dashboard.js`, `/api/og/*`,
+`client/src/GmatOgPractice.jsx` at `#og`, and OG merged into `/api/sessions`
+and `/api/errors` under `platform=og`.
+
+Building it changed the extraction's own numbers twice, both times because
+working a set in the browser showed what a structural check could not:
+
+- **Boldface CR questions carry no bold spans** — 17 stems ask what "the portion
+  in boldface" does and no question ever carried a `stemHtml`. 9 were `usable`.
+  Dropped: 377 → 368.
+- **A cut choice reappears at the head of the next stem** — the two-column scan's
+  column break damages two questions, and 97 usable stems opened mid-sentence,
+  some with no question in them at all. 38 were repaired from the printed
+  number still inside the stem; the rest dropped: 368 → **310** (CR 147,
+  RC 163). OG12 was unaffected and supplies 251 of the 310.
+
+Every difficulty rating carried across both re-parses, so the LLM pass was
+never re-paid.
 
 ## Execution Handoff
 

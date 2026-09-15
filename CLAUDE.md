@@ -200,14 +200,34 @@ Result: 1,718 → 2,117 keyed (79.6%), all 2,117 verified against an independent
 Critical Reasoning and Reading Comprehension questions extracted from three
 Official Guide PDFs into **`data/gmat-og-questions.json`** (gitignored;
 `.bak-*` siblings are the rollback). Sentence Correction is out of scope — the
-Focus exam dropped it. **377 usable questions**, each with a verified answer key, a complete
-stem and choices, and an LLM difficulty rating; 277 also carry the book's
-question-type label and its full answer explanation.
+Focus exam dropped it. **310 usable questions** (CR 147, RC 163), each with a verified answer
+key, a complete stem and choices, and an LLM difficulty rating; 256 also carry
+the book's question-type label and its full answer explanation. 251 of the 310
+come from OG12, whose native text layer is the only clean one.
 
 **The bar for `usable` is that the question is answerable.** A missing or
-dropped explanation does not disqualify it — 100 questions are keyed but
+dropped explanation does not disqualify it — 54 questions are keyed but
 unenriched. A defect in the passage, stem, choices or key does: those are
-excluded and carry the reason in `unusable`.
+excluded and carry the reason in `unusable`. The exclusion reasons, largest
+first: `unverifiable-key` 73, `stem-fragment` 81, `no-passage` 27,
+`truncated-choice` 12, `boldface-unmarked` 11, `choices` 10, `no-key` 8,
+`blank-choice` 6, `lopsided-choice` 1.
+
+**Serve only `usable` questions**, and note that the extraction is deliberately
+harsher than a structural check: a question can have five choices and a
+double-confirmed key and still be unanswerable as rendered. Two whole classes
+were found that way, both by reading what the app actually shows:
+
+- **Boldface CR questions carry no bold spans.** 17 stems ask what "the portion
+  in boldface" does; `stemHtml` was never produced for any question, so the
+  emphasis is gone and the stem is undifferentiated prose. Dropped.
+- **A cut choice reappears at the head of the next stem.** Where the two-column
+  scan cuts a choice at a column break, the part cut off lands in front of the
+  NEXT question's stem — so one break damages two questions. 97 stems were
+  affected, none of them in OG12. Where the question's own printed number
+  survived inside the stem it marks the true start and the fragment is cut
+  (38 recovered, flagged `stemSource: 'renumbered'`); the rest are dropped, some
+  of them having no question in them at all.
 
 **The source PDFs in `docs/` are copyrighted and gitignored** (`/docs/*.pdf`,
 `/docs/ocr/`). This repo is public — never commit them.
@@ -230,7 +250,7 @@ across a re-parse by question id, since that is the only step that costs money.
 estimates what share of a 655-705 cohort answers each question correctly, and
 the labels are tertiles of those estimates within a subject. Asked for Easy /
 Medium / Hard directly it compressed nearly everything into one bucket
-(319 of 448); asked for a percentage it still clusters in 72-82, and correlates
+(319 of 448 at the time); asked for a percentage it still clusters in 72-82, and correlates
 only about 0.15-0.22 with printed question order, which the Official Guide
 arranges roughly easy-to-hard. Raising `reasoning.effort` to `high` made it
 slightly worse (0.187 against 0.219). `--relabel` re-cuts the buckets from the
@@ -309,6 +329,45 @@ only `usable` questions.
 
 `loadOgData()` in `server.js` will cache in-process like `loadLsatData`, so
 **restart the API after regenerating the file**.
+
+### The practice track
+
+The pool is served at `#og` (`client/src/GmatOgPractice.jsx`) through
+`/api/og/*`. Answers live in `og_attempts` / `og_sessions` (migration `0010`);
+question content never enters the database — `question_id` (`'OG13-RC-56'`) is
+the join key into the JSON file.
+
+| Module | Responsibility |
+|---|---|
+| `src/og-data.js` | cached reader + index over the pool; library facets. **Restart the API after regenerating the JSON.** |
+| `src/og-set-builder.js` | pure filter → question list. RC draws whole passages |
+| `src/og-dashboard.js` | OG rows → dashboard session/question shapes, `og-<id>` namespaced |
+
+Four things to know before changing any of it:
+
+- **The question payload the browser receives carries neither `correct` nor
+  `explanation`.** Both come back one answer at a time from
+  `POST /api/og/attempts`, which is what makes Timed mode's withheld
+  explanations actually withheld — one rationale in every explanation opens
+  with "Correct.", so shipping them with the questions would leak the whole key
+  list into the network tab.
+- **RC draws whole passages, so the delivered count is approximate.** A group
+  that would overshoot the requested count is skipped, not truncated; the
+  preview states the real count and the passage total. A type-label filter in RC
+  selects *passages containing* a match and still delivers the full group.
+- **Source labels must start `GMAT OG Book`.** `getSourcePlatform`
+  (`client/src/App.jsx`) classifies by substring and three StartTest presets are
+  already named "OG Verbal Review", "OG Quant Review" and "OG 2024-2025 Main" —
+  a bare "OG" in the label puts book practice on the StartTest chip.
+- **`og_attempts` is unique on (question_id, session_id)**, not on question:
+  redoing a question in a NEW session is the point of the seen / previously-wrong
+  filters, while re-submitting inside one session updates in place.
+
+OG rows merge into `/api/sessions` and `/api/errors` under `platform=og`, and
+their subjects are RC/CR — the same namespace the LSAT track uses, so a Q/V/DI
+filter excludes both practice tracks and an RC/CR filter excludes GMAT.
+Bookmarking is excluded for OG exactly as it is for LSAT: neither has rows in
+`question_attempts` for the bookmark join to hydrate.
 
 ## Key Patterns
 
