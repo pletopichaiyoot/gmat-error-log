@@ -113,6 +113,7 @@ function Builder({ onStart, onExit }) {
   const [kind, setKind] = useState('CR');
   const [books, setBooks] = useState([]);
   const [typeLabels, setTypeLabels] = useState([]);
+  const [questionTypes, setQuestionTypes] = useState([]);
   const [difficulties, setDifficulties] = useState([]);
   const [historyMode, setHistoryMode] = useState('all');
   const [count, setCount] = useState(10);
@@ -126,9 +127,9 @@ function Builder({ onStart, onExit }) {
 
   // Switching subject invalidates the type-label selection: the two subjects'
   // label vocabularies do not overlap.
-  useEffect(() => { setTypeLabels([]); setPreview(null); }, [kind]);
+  useEffect(() => { setTypeLabels([]); setQuestionTypes([]); setPreview(null); }, [kind]);
 
-  const filters = { books, kind, typeLabels, difficulties, historyMode, count: Number(count) || 10 };
+  const filters = { books, kind, typeLabels, questionTypes, difficulties, historyMode, count: Number(count) || 10 };
 
   const runPreview = useCallback(async () => {
     setBusy(true);
@@ -141,7 +142,7 @@ function Builder({ onStart, onExit }) {
     }
     setBusy(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [books, kind, typeLabels, difficulties, historyMode, count]);
+  }, [books, kind, typeLabels, questionTypes, difficulties, historyMode, count]);
 
   const toggle = (setter, list) => (value) =>
     setter(list.includes(value) ? list.filter((x) => x !== value) : [...list, value]);
@@ -201,7 +202,12 @@ function Builder({ onStart, onExit }) {
           selected={books}
           onToggle={toggle(setBooks, books)}
         />
-        <ChipMulti label="Question type" options={lib.typeLabels[kind]} selected={typeLabels} onToggle={toggle(setTypeLabels, typeLabels)} />
+        {/* Two type axes on purpose. "Question type" is derived from the
+            prompt and is what you would drill by; "OG label" is the book's own
+            classification, authoritative but coarse — one of its buckets covers
+            assumption, conclusion and paradox alike. */}
+        <ChipMulti label="Question type" options={lib.questionTypes[kind]} selected={questionTypes} onToggle={toggle(setQuestionTypes, questionTypes)} />
+        <ChipMulti label="OG label" options={lib.typeLabels[kind]} selected={typeLabels} onToggle={toggle(setTypeLabels, typeLabels)} />
         <ChipMulti label="Difficulty" options={lib.difficulties[kind]} selected={difficulties} onToggle={toggle(setDifficulties, difficulties)} />
 
         <div className="og-filter">
@@ -393,7 +399,10 @@ function Runner({ session, onFinish, onExit }) {
           <span className="lsat-st-section-label">{label}</span>
         </div>
         <div className="lsat-st-topbar-right">
-          <span className="lsat-st-set-meta">{q.bookCode} · {q.typeLabel || q.kind} · {q.difficulty || 'Unrated'} · {isTimed ? 'Timed' : 'Practice'}</span>
+          <span className="lsat-st-set-meta">
+            {q.bookCode} · {q.questionType || q.kind}
+            {q.typeLabel ? ` · ${q.typeLabel}` : ''} · {q.difficulty || 'Unrated'} · {isTimed ? 'Timed' : 'Practice'}
+          </span>
           <button type="button" className="lsat-st-finish-btn" onClick={finish} title="End now and review what was answered">End Session</button>
         </div>
       </header>

@@ -4,14 +4,22 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const {
   assembleSection, matchExplanations, unusableReason, repairStem,
-  recoverStem, buildReprintIndex,
+  recoverStem, buildReprintIndex, stripStemJunk,
 } = require('../../scripts/og/assemble');
 const { bookByCode } = require('../../scripts/og/books');
 
 const OG13 = bookByCode('OG13');
 
 const choices = 'ABCDE'.split('').map(l => ({ label: l, text: `the ${l} option` }));
-const q = (number, over = {}) => ({ number, stem: `Stem ${number}.`, choices, ...over });
+// A realistic stem length matters: unusableReason drops anything under 25
+// characters as scan noise, and a toy `Stem 1.` would make these tests pass or
+// fail for the wrong reason.
+const q = (number, over = {}) => ({
+  number,
+  stem: `Which of the following, if true, most weakens the argument in question ${number}?`,
+  choices,
+  ...over,
+});
 const e = (position, over = {}) => ({
   position, number: position, typeLabel: 'Inference', situation: null,
   reasoning: 'r', choiceNotes: { A: 'Correct. y' }, key: 'A',
@@ -534,4 +542,70 @@ test('boldface never masks a defect that would drop the question anyway', () => 
   const stem = 'The portion in boldface plays which of the following roles?';
   assert.equal(unusableReason({ stem, choices }, null, false, 'CR'), 'no-key');
   assert.equal(unusableReason({ stem, choices: choices.slice(0, 4) }, 'A', false, 'CR'), 'choices');
+});
+
+// The section directions are printed once per page and the parser carries them
+// onto the end of a stem. They always start on a fixed phrase and run to the
+// end, so the question in front of them survives the cut.
+test('the directions block is cut off the end of a stem', () => {
+  const stem = 'Which of the following, if true, most strongly indicates that the logic of the prediction '
+    + 'above is flawed? Each of the critical reasoning questions is based on a short argument, a set '
+    + 'of statements, or a plan of action. For each question, select the best answer of the choices given.';
+  assert.equal(
+    stripStemJunk(stem, 4),
+    'Which of the following, if true, most strongly indicates that the logic of the prediction above is flawed?'
+  );
+});
+
+test('a page number stranded at the head of a stem is cut', () => {
+  assert.equal(
+    stripStemJunk('120 Large national budget deficits do not cause large trade deficits.', 13),
+    'Large national budget deficits do not cause large trade deficits.'
+  );
+  assert.equal(
+    stripStemJunk('16, According to Snyder et al., which compound binds to the receptor?', 79),
+    'According to Snyder et al., which compound binds to the receptor?'
+  );
+});
+
+// The reprint recovery hands back the question's own printed number, so the
+// same cleaning has to reach it.
+test("the question's own printed number is cut from the head", () => {
+  assert.equal(
+    stripStemJunk('83. It can be inferred from the passage that the authors held which hypothesis?', 85),
+    'It can be inferred from the passage that the authors held which hypothesis?'
+  );
+});
+
+// A year opening a stem is prose, not a stray page number.
+test('a stem opening on a year is left alone', () => {
+  const stem = '1984 saw the first commercial release of the product, and sales have risen since.';
+  assert.equal(stripStemJunk(stem, 7), stem);
+});
+
+// The running head turns up mid-stem, and the stems carrying it have turned out
+// to be the previous question's answer choices rather than a question.
+test('a stem carrying a running head is unusable', () => {
+  const stem = 'These PAHs are not likely to be found in any meteorite that originated from Mars. '
+    + 'These PAHs are likely to be found in fewer meteorites. 29 The Official Guide for GMAT Verbal Review 2nd Edition';
+  assert.equal(unusableReason({ stem, choices }, 'A', false, 'CR'), 'stem-junk');
+});
+
+test('scan noise too short to be a question is unusable', () => {
+  assert.equal(unusableReason({ stem: 'Ls Oe.', choices }, 'A', false, 'CR'), 'stem-junk');
+});
+
+// The scan runs two columns together and leaves the page number inside the
+// stem, between one sentence and the next.
+test('a page number spliced mid-stem is cut', () => {
+  const stem = 'Anyone with that degree or more will very likely be unemployed. 507 Sharon’s argument relies on the assumption that';
+  assert.equal(
+    stripStemJunk(stem, 71),
+    'Anyone with that degree or more will very likely be unemployed. Sharon’s argument relies on the assumption that'
+  );
+});
+
+test('a sentence that really does open on a number is left alone', () => {
+  const stem = 'The survey closed in March. 12 people responded to every question on it, which surprised the researchers.';
+  assert.equal(stripStemJunk(stem, 9), stem);
 });
