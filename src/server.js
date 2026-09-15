@@ -36,6 +36,14 @@ const {
   completeLsatSession,
   listLsatSessions,
   getLsatSession,
+  saveOgAttempt,
+  createOgSession,
+  completeOgSession,
+  listOgSessions,
+  getOgSession,
+  listOgAttempts,
+  listOgErrors,
+  ogStats,
   listStudyPlanTasks,
   getStudyPlanTask,
   createStudyPlanTask,
@@ -68,6 +76,8 @@ const {
   isLsatDashboardId,
   updateLsatDashboardAnnotation,
 } = require('./lsat-dashboard');
+const { ogPool, ogQuestion, ogLibrary } = require('./og-data');
+const { buildOgSet } = require('./og-set-builder');
 const { LlmConfigError, generatePerformanceReview, answerCoachQuestion } = require('./llm-coach-agent');
 const { classifyScrapedQuestions } = require('./question-topic-classifier');
 const {
@@ -1899,6 +1909,199 @@ app.get('/api/lsat/stats', async (req, res) => {
   try {
     const stats = await lsatStats();
     res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- GMAT OG book practice endpoints ----------
+// Question content comes from data/gmat-og-questions.json through the cached
+// reader in src/og-data.js; only answers touch Postgres. Restart the API after
+// regenerating that file.
+
+// The shape sent to the browser. It deliberately omits BOTH `correct` and
+// `explanation`: the key and the book's rationale are handed back one question
+// at a time by POST /api/og/attempts, when they have been earned. Sending the
+// explanation with the question would undo Timed mode — one of its per-choice
+// rationales opens with "Correct.", so the whole key list would sit in the
+// network tab before the first answer.
+function ogQuestionPayload(q) {
+  return {
+    id: q.id,
+    number: q.number,
+    bookCode: q.bookCode,
+    bookTitle: q.bookTitle,
+    kind: q.kind,
+    stem: q.stem,
+    stemHtml: q.stemHtml || null,
+    choices: q.choices || [],
+    typeLabel: q.typeLabel || null,
+    difficulty: q.difficulty || null,
+    passageId: q.passageId || null,
+  };
+}
+
+// The user's attempt history as two id sets, for the unseen / previously-wrong
+// filters. Latest attempt per question: answering it right on a redo should take
+// it out of "previously wrong".
+async function ogHistory() {
+  const rows = await listOgAttempts({ latestOnly: true });
+  const attempted = new Set();
+  const wrong = new Set();
+  for (const r of rows) {
+    attempted.add(r.question_id);
+    if (r.is_correct === 0) wrong.add(r.question_id);
+  }
+  return { attempted, wrong };
+}
+
+app.get('/api/og/library', async (req, res) => {
+  try {
+    const history = await ogHistory();
+    res.json({
+      library: ogLibrary(),
+      history: { attempted: history.attempted.size, wrong: history.wrong.size },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Resolve filters to a question list for PREVIEW. Writes nothing — the builder
+// can say "18 questions across 5 passages" before the user commits.
+app.post('/api/og/build-set', async (req, res) => {
+  try {
+    const f = req.body?.filters || {};
+    const filters = {
+      books: Array.isArray(f.books) ? f.books : [],
+      kind: f.kind === 'RC' ? 'RC' : 'CR',
+      typeLabels: Array.isArray(f.typeLabels) ? f.typeLabels : [],
+      difficulties: Array.isArray(f.difficulties) ? f.difficulties : [],
+      historyMode: ['unseen', 'wrong'].includes(f.historyMode) ? f.historyMode : 'all',
+      count: Math.min(50, Math.max(1, Number(f.count) || 10)),
+    };
+    const pool = ogPool();
+    const set = buildOgSet({ pool, filters, history: await ogHistory() });
+    const questions = set.questionIds.map((id) => ogQuestionPayload(pool.byId.get(id)));
+    const passages = set.passageIds.map((pid) => pool.passages.get(pid)).filter(Boolean);
+    res.json({ set, filters, questions, passages });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/og/sessions', async (req, res) => {
+  try {
+    const questionIds = Array.isArray(req.body?.questionIds) ? req.body.questionIds.map(String) : [];
+    if (questionIds.length === 0) return res.status(400).json({ error: 'A session needs at least one question.' });
+    const pool = ogPool();
+    const unknown = questionIds.filter((id) => !pool.byId.has(id));
+    if (unknown.length) return res.status(400).json({ error: `Unknown question ids: ${unknown.slice(0, 3).join(', ')}` });
+    const result = await createOgSession({
+      setLabel: req.body?.setLabel || null,
+      mode: req.body?.mode === 'timed' ? 'timed' : 'practice',
+      filters: req.body?.filters || null,
+      questionIds,
+    });
+    res.json({ id: result.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/og/sessions/:id/complete', async (req, res) => {
+  try {
+    const result = await completeOgSession(Number(req.params.id));
+    res.json({ ok: true, answeredCount: result?.answeredCount ?? null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/og/sessions', async (req, res) => {
+  try {
+    res.json({ sessions: await listOgSessions() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// One session, rehydrated: the questions it holds (in stored order), their
+// passages, and what was answered. This is what "resume" and the review screen
+// both read.
+app.get('/api/og/sessions/:id', async (req, res) => {
+  try {
+    const session = await getOgSession(Number(req.params.id));
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    const pool = ogPool();
+    const ids = Array.isArray(session.question_ids) ? session.question_ids : [];
+    const questions = ids.map((id) => pool.byId.get(id)).filter(Boolean).map(ogQuestionPayload);
+    const passageIds = [...new Set(questions.map((q) => q.passageId).filter(Boolean))];
+    res.json({
+      session,
+      questions,
+      passages: passageIds.map((pid) => pool.passages.get(pid)).filter(Boolean),
+      attempts: await listOgAttempts({ sessionId: Number(req.params.id) }),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Grade one answer. The correct letter comes from the pool here, never from the
+// client, and this response is the only place it — and the book's explanation —
+// is revealed.
+app.post('/api/og/attempts', async (req, res) => {
+  try {
+    const { questionId, userAnswer, confidence, timeMs, sessionId } = req.body || {};
+    if (!questionId || !userAnswer) return res.status(400).json({ error: 'Missing required fields' });
+    const q = ogQuestion(questionId);
+    if (!q) return res.status(404).json({ error: 'Question not found' });
+    const result = await saveOgAttempt({
+      questionId: q.id,
+      bookCode: q.bookCode,
+      kind: q.kind,
+      userAnswer: String(userAnswer).toUpperCase(),
+      correctAnswer: q.correct,
+      confidence: confidence || null,
+      timeMs: timeMs != null ? Number(timeMs) : null,
+      sessionId: sessionId != null ? Number(sessionId) : null,
+    });
+    res.json({ ...result, correctAnswer: q.correct, explanation: q.explanation || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/og/attempts', async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId != null ? Number(req.query.sessionId) : null;
+    const latestOnly = req.query.latestOnly === 'true' || req.query.latestOnly === '1';
+    res.json({ attempts: await listOgAttempts({ sessionId, latestOnly }) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/og/errors', async (req, res) => {
+  try {
+    const limit = req.query.limit != null ? Math.min(500, Number(req.query.limit)) : 200;
+    const rows = await listOgErrors({ limit });
+    // The error log reviews questions already answered, so the explanation is no
+    // longer withheld here.
+    const enriched = rows.map((r) => {
+      const q = ogQuestion(r.question_id);
+      return { ...r, question: q ? { ...ogQuestionPayload(q), explanation: q.explanation || null } : null };
+    });
+    res.json({ errors: enriched });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/og/stats', async (req, res) => {
+  try {
+    res.json(await ogStats());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
