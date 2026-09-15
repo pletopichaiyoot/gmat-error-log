@@ -200,34 +200,38 @@ Result: 1,718 → 2,117 keyed (79.6%), all 2,117 verified against an independent
 Critical Reasoning and Reading Comprehension questions extracted from three
 Official Guide PDFs into **`data/gmat-og-questions.json`** (gitignored;
 `.bak-*` siblings are the rollback). Sentence Correction is out of scope — the
-Focus exam dropped it. **310 usable questions** (CR 147, RC 163), each with a verified answer
-key, a complete stem and choices, and an LLM difficulty rating; 256 also carry
-the book's question-type label and its full answer explanation. 251 of the 310
+Focus exam dropped it. **347 usable questions** (CR 166, RC 181), each with a verified answer
+key, a complete stem and choices, and an LLM difficulty rating; 273 also carry
+the book's question-type label and its full answer explanation. 260 of the 347
 come from OG12, whose native text layer is the only clean one.
 
 **The bar for `usable` is that the question is answerable.** A missing or
-dropped explanation does not disqualify it — 54 questions are keyed but
+dropped explanation does not disqualify it — 74 questions are keyed but
 unenriched. A defect in the passage, stem, choices or key does: those are
 excluded and carry the reason in `unusable`. The exclusion reasons, largest
-first: `unverifiable-key` 73, `stem-fragment` 81, `no-passage` 27,
-`truncated-choice` 12, `boldface-unmarked` 11, `choices` 10, `no-key` 8,
-`blank-choice` 6, `lopsided-choice` 1.
+first: `unverifiable-key` 73, `stem-fragment` 50, `no-passage` 27,
+`truncated-choice` 13, `choices` 10, `no-key` 10, `blank-choice` 6,
+`key-disputed` 2, `lopsided-choice` 1.
 
 **Serve only `usable` questions**, and note that the extraction is deliberately
 harsher than a structural check: a question can have five choices and a
 double-confirmed key and still be unanswerable as rendered. Two whole classes
 were found that way, both by reading what the app actually shows:
 
-- **Boldface CR questions carry no bold spans.** 17 stems ask what "the portion
-  in boldface" does; `stemHtml` was never produced for any question, so the
-  emphasis is gone and the stem is undifferentiated prose. Dropped.
+- **Boldface CR questions lose their emphasis.** 17 stems ask what "the portion
+  in boldface" does, and a flat text extraction drops font weight, leaving
+  undifferentiated prose. `scripts/extract-og-passages.py` reads the weight off
+  the page and writes `stemHtml`; the rest are dropped. See the boldface note
+  below.
 - **A cut choice reappears at the head of the next stem.** Where the two-column
   scan cuts a choice at a column break, the part cut off lands in front of the
   NEXT question's stem — so one break damages two questions. 97 stems were
-  affected, none of them in OG12. Where the question's own printed number
-  survived inside the stem it marks the true start and the fragment is cut
-  (38 recovered, flagged `stemSource: 'renumbered'`); the rest are dropped, some
-  of them having no question in them at all.
+  affected, none of them in OG12. Two repairs run in order: the question's own
+  printed number, where it survived inside the stem, marks the true start and
+  the fragment before it is cut (38, `stemSource: 'renumbered'`); otherwise the
+  stem is taken whole from the copy the explanations reprint (28,
+  `stemSource: 'explanation'`). What neither recovers is dropped as
+  `stem-fragment`, some of it having no question in it at all.
 
 **The source PDFs in `docs/` are copyrighted and gitignored** (`/docs/*.pdf`,
 `/docs/ocr/`). This repo is public — never commit them.
@@ -326,6 +330,33 @@ only `usable` questions.
   lower-case dangling function word with no terminal punctuation is the tell;
   length alone is not, since "Size" and "evaluation of a problem" are real
   options. This is the largest single exclusion reason — 67 questions.
+
+- **Boldface spans are found by their text, not by locating the question.**
+  Every page is scanned for runs of bold words, and each run is tested against
+  each boldface stem: a run of 20+ characters occurring exactly once in a stem
+  identifies both the page and the span. That needs no page offset, no column
+  ordering and no question number — none of which survive reliably in the
+  scanned books. **Expand ligatures before comparing**: the PDF spells "field"
+  as the two words "fi eld" where the text layer carries the ligature, and
+  without that one question matches nothing. Recovered: OG12 9 of 9, VR2 1 of 2,
+  OG13 0 of 7 (that section is withheld anyway). Each recovered stem carries
+  exactly as many `<b>` spans as its own wording claims.
+- **A fragment stem is recovered from the explanation reprint, found by its
+  CHOICES.** The explanations print each question in single-column flow, where
+  no column break could have spliced the previous question onto it. Matching on
+  choice text rather than on the number pairing is what makes this work on the
+  sections that need it, since their numbering is exactly what failed. The whole
+  stem is replaced, not just the head: the reprint comes from a worse OCR pass
+  ("ofthe", "inthe") and splicing two renderings mid-sentence is worse than
+  glued words — a stem with glued words is readable, a stem that opens in the
+  middle of the previous question's answer is not.
+
+**Two checks are ordered, not incidental.** `boldface-unmarked` is the LAST test
+in `unusableReason`, so the reason implies the question is otherwise sound —
+which is what lets `scripts/extract-og-passages.py` flip `usable` when it
+recovers the markup, instead of needing another parse. And `carry-ratings.js`
+carries `stemHtml` across a re-parse for the same reason it carries the
+difficulty ratings: the pass that produces it runs afterwards.
 
 `loadOgData()` in `server.js` will cache in-process like `loadLsatData`, so
 **restart the API after regenerating the file**.

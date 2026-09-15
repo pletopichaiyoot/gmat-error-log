@@ -3133,17 +3133,19 @@ and `/api/errors` under `platform=og`.
 Building it changed the extraction's own numbers twice, both times because
 working a set in the browser showed what a structural check could not:
 
-- **Boldface CR questions carry no bold spans** — 17 stems ask what "the portion
-  in boldface" does and no question ever carried a `stemHtml`. 9 were `usable`.
-  Dropped: 377 → 368.
+- **Boldface CR questions lose their emphasis** — 17 stems ask what "the portion
+  in boldface" does and no question carried a `stemHtml`. Dropped first
+  (377 → 368), then recovered: font weight is on the page, so the pdfplumber
+  pass reads it (OG12 9 of 9, VR2 1 of 2).
 - **A cut choice reappears at the head of the next stem** — the two-column scan's
   column break damages two questions, and 97 usable stems opened mid-sentence,
-  some with no question in them at all. 38 were repaired from the printed
-  number still inside the stem; the rest dropped: 368 → **310** (CR 147,
-  RC 163). OG12 was unaffected and supplies 251 of the 310.
+  some with no question in them at all. 38 were repaired from the printed number
+  still inside the stem and 28 from the copy the explanations reprint, found by
+  its choices rather than by the numbering; the remaining 50 are dropped.
 
-Every difficulty rating carried across both re-parses, so the LLM pass was
-never re-paid.
+Net **347 usable** (CR 166, RC 181). OG12 was unaffected by either defect and
+supplies 260 of the 347. Every difficulty rating carried across all four
+re-parses, so the LLM pass was never re-paid.
 
 ## Execution Handoff
 
