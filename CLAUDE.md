@@ -200,8 +200,9 @@ Result: 1,718 → 2,117 keyed (79.6%), all 2,117 verified against an independent
 Critical Reasoning and Reading Comprehension questions extracted from three
 Official Guide PDFs into **`data/gmat-og-questions.json`** (gitignored;
 `.bak-*` siblings are the rollback). Sentence Correction is out of scope — the
-Focus exam dropped it. **390 usable questions**, each with the book's own question-type
-label, its full answer explanation, and an LLM difficulty rating.
+Focus exam dropped it. **363 usable questions**, each with a verified answer key and an
+LLM difficulty rating; 277 also carry the book's question-type label and its
+full answer explanation.
 
 **The source PDFs in `docs/` are copyrighted and gitignored** (`/docs/*.pdf`,
 `/docs/ocr/`). This repo is public — never commit them.
@@ -280,6 +281,18 @@ only `usable` questions.
   choice — the tail alone collided 16 times inside OG12 CR. RC dedups per
   passage so a shared passage takes its whole question group.
 - **pdfplumber splits ligature glyphs**, so "Official" arrives as "Offi cial".
+- **An explanation is only attached when it demonstrably reprints ITS question.**
+  The pairing is checked on the choice text — clean in both copies, where a
+  stem reconstructed from choice runs is not. This is load-bearing: OG13's CR
+  section has no printed key and mostly inferred numbering, so its explanations
+  were matched by a guess. Against OG12, which reprints 49 of the same
+  questions with double-confirmed keys, only 3 of its keys agreed and 4
+  disagreed. A section in that state — no printed key AND mostly inferred
+  numbering, so nothing cross-checks the pairing — is withheld entirely
+  (`unverifiable-key`); a wrong key is worse than none, because it marks a
+  correct answer wrong.
+- **A truncated choice is repaired from the explanation copy** where the
+  explanation's rendering extends the practice one. 17 questions recovered.
 - **The scans truncate a choice at a line break.** A choice ending on a
   lower-case dangling function word with no terminal punctuation is the tell;
   length alone is not, since "Size" and "evaluation of a problem" are real

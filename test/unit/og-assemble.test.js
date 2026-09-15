@@ -15,6 +15,58 @@ const e = (position, over = {}) => ({
   keySource: 'correct-marker', ...over,
 });
 
+test('a question whose number was inferred matches on its text, not its number', () => {
+  // VR2's RC scan loses numbers, so the parser infers them and they drift out
+  // of step with the explanations. Matching on the number paired a "primary
+  // purpose" question with the explanation for a different one — wrong type
+  // label, wrong rationale, and a key the cross-check then reported as
+  // disputed.
+  const questions = [
+    { number: 61, stem: 'The primary purpose of the passage is to', choices, numberInferred: true },
+    { number: 62, stem: 'According to the passage, the earliest research produced which?', choices, numberInferred: true },
+  ];
+  const entries = [
+    e(1, { number: 62, questionBlock: ['62. According to the passage, the earliest research produced which?'] }),
+    e(2, { number: 63, questionBlock: ['63. The primary purpose of the passage is to'] }),
+  ];
+  const m = matchExplanations(questions, entries);
+  assert.equal(m.get(61).number, 63, 'paired on the stem it actually reprints');
+  assert.equal(m.get(62).number, 62);
+});
+
+test('an explanation that reprints a different question is not attached', () => {
+  // A wrong type label and rationale is worse than none: it silently corrupts
+  // the drill taxonomy and attaches another question's reasoning.
+  const questions = [{ number: 62, stem: 'The primary purpose of the passage is to', choices }];
+  const entries = [e(1, {
+    number: 62, typeLabel: 'Supporting ideas',
+    questionBlock: ['62. According to the passage, the earliest research on mangrove forests produced which of the following?'],
+  })];
+  const { section, warnings } = assembleSection({
+    book: OG13, kind: 'CR', questions, keys: new Map([[62, 'B']]),
+    explanations: entries, passageRefs: [],
+  });
+  const out = section.questions[0];
+  assert.equal(out.typeLabel, null, 'no label rather than the wrong one');
+  assert.equal(out.explanation, null);
+  assert.equal(out.correct, 'B', 'the printed key still stands');
+  assert.equal(out.keySource, 'printed');
+  assert.ok(warnings.some(w => /OG13-CR-62/.test(w) && /different question/i.test(w)));
+});
+
+test('a pairing survives ordinary OCR differences between the two copies', () => {
+  const questions = [{ number: 1, stem: 'The primary purpose of the passage is to', choices }];
+  const entries = [e(1, {
+    number: 1,
+    questionBlock: ['1. The primarypurpose of thepassage isto'],
+  })];
+  const { section } = assembleSection({
+    book: OG13, kind: 'CR', questions, keys: new Map([[1, 'A']]),
+    explanations: entries, passageRefs: [],
+  });
+  assert.equal(section.questions[0].typeLabel, 'Inference');
+});
+
 test('numbered explanations match their question by number', () => {
   const m = matchExplanations([q(1), q(2), q(3)], [e(3), e(1), e(2)]);
   assert.equal(m.get(1).number, 1);
@@ -198,6 +250,100 @@ test('a short but complete choice is kept', () => {
     keys: new Map([[1, 'A']]), explanations: [e(1)], passageRefs: [],
   });
   assert.equal(section.questions[0].usable, true);
+});
+
+test('a truncated choice is repaired from the explanation copy', () => {
+  // The explanations reprint the question in single-column flow, so the copy
+  // survives where the two-column practice section cut it at a line break.
+  const cut = [
+    { label: 'A', text: 'refute the idea' },
+    { label: 'B', text: 'describe the pattern' },
+    { label: 'C', text: 'argue that Davis' },
+    { label: 'D', text: 'discuss hypotheses' },
+    { label: 'E', text: 'establish that plants that do well in saline forest' },
+  ];
+  const entry = e(1, {
+    questionBlock: [
+      '1. The primary purpose of the passage is to',
+      '(A) refute the idea', '(B) describe the pattern', '(C) argue that Davis',
+      '(D) discuss hypotheses',
+      '(E) establish that plants that do well in saline forest',
+      'environments require salt to achieve maximum',
+      'metabolic efficiency',
+    ],
+  });
+  const { section } = assembleSection({
+    book: OG13, kind: 'CR', questions: [q(1, { choices: cut })],
+    keys: new Map([[1, 'A']]), explanations: [entry], passageRefs: [],
+  });
+  const out = section.questions[0];
+  assert.equal(out.usable, true);
+  assert.equal(out.choicesSource, 'explanation');
+  assert.match(out.choices[4].text, /metabolic efficiency$/);
+});
+
+test('a repair is refused when the explanation copy is cut the same way', () => {
+  // Both renderings agree, so there is no evidence of a cut to repair from.
+  // The dangling-function-word fallback still rejects the question.
+  const bad = [
+    { label: 'A', text: 'one complete.' }, { label: 'B', text: 'two complete.' },
+    { label: 'C', text: 'three complete.' }, { label: 'D', text: 'four complete.' },
+    { label: 'E', text: 'Immigration Service reports from 1914 to' },
+  ];
+  const entry = e(1, { questionBlock: [
+    '1. Stem.', '(A) one complete.', '(B) two complete.', '(C) three complete.',
+    '(D) four complete.', '(E) Immigration Service reports from 1914 to',
+  ] });
+  const { section } = assembleSection({
+    book: OG13, kind: 'CR', questions: [q(1, { choices: bad })],
+    keys: new Map([[1, 'A']]), explanations: [entry], passageRefs: [],
+  });
+  assert.equal(section.questions[0].usable, false);
+  assert.equal(section.questions[0].unusable, 'truncated-choice');
+});
+
+test('good choices are never replaced by the explanation copy', () => {
+  const entry = e(1, { questionBlock: [
+    '1. Stem.', '(A) a different rendering', '(B) b', '(C) c', '(D) d', '(E) e',
+  ] });
+  const { section } = assembleSection({
+    book: OG13, kind: 'CR', questions: [q(1)],
+    keys: new Map([[1, 'A']]), explanations: [entry], passageRefs: [],
+  });
+  assert.equal(section.questions[0].choices[0].text, 'the A option');
+  assert.equal(section.questions[0].choicesSource, undefined);
+});
+
+test('a section with no printed key and guessed numbering is not trusted', () => {
+  // OG13's CR section: its printed key is a table the scan destroyed, and its
+  // question numbers are inferred, so explanations are matched to questions by
+  // a guess. Checked against OG12, which reprints 49 of the same questions
+  // with double-confirmed keys, only 3 of its surviving keys agreed and 4
+  // disagreed — worse than no key at all.
+  const questions = [1, 2, 3, 4].map(n => (
+    { number: n, stem: `Stem ${n} which of the following most weakens it?`, choices,
+      numberInferred: true }));
+  const { section, stats, warnings } = assembleSection({
+    book: OG13, kind: 'CR', questions, keys: new Map(),
+    explanations: questions.map((_, i) => e(i + 1, { number: i + 1 })),
+    passageRefs: [],
+  });
+  assert.equal(stats.usable, 0);
+  assert.ok(section.questions.every(q => q.unusable === 'unverifiable-key'));
+  assert.ok(warnings.some(w => /cannot be cross-checked/i.test(w)));
+});
+
+test('a section with a printed key is trusted even when numbering is inferred', () => {
+  // The printed key cross-checks the pairing, so a guessed number is survivable.
+  const questions = [1, 2].map(n => (
+    { number: n, stem: `Stem ${n} which of the following most weakens it?`, choices,
+      numberInferred: true }));
+  const { stats } = assembleSection({
+    book: OG13, kind: 'CR', questions, keys: new Map([[1, 'A'], [2, 'A']]),
+    explanations: questions.map((_, i) => e(i + 1, { number: i + 1 })),
+    passageRefs: [],
+  });
+  assert.equal(stats.usable, 2);
 });
 
 test('passageRefs ride along on the section', () => {

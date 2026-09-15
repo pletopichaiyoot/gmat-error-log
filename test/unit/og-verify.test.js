@@ -36,6 +36,23 @@ test('a disputed key fails even when a letter is present', () => {
   assert.ok(failed(verifyPool(p)).includes('no usable question has a disputed key'));
 });
 
+test('a question keyed but without an explanation still passes', () => {
+  // Its explanation was dropped for reprinting a different question; the stem,
+  // choices and printed key are intact, so it is still practiceable.
+  const p = good();
+  delete p.books[0].sections[0].questions[0].typeLabel;
+  p.books[0].sections[0].questions[0].explanation = null;
+  const r = verifyPool(p);
+  assert.equal(r.ok, true, failed(r).join(', '));
+});
+
+test('an attached explanation without a type label fails', () => {
+  const p = good();
+  p.books[0].sections[0].questions[0].explanation = { reasoning: 'r', choices: {} };
+  delete p.books[0].sections[0].questions[0].typeLabel;
+  assert.ok(failed(verifyPool(p)).includes('every attached explanation carries a type label'));
+});
+
 test('an RC question with no passage fails', () => {
   const p = good();
   p.books[0].sections[1].questions[0].passageId = null;

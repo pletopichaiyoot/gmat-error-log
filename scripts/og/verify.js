@@ -35,8 +35,18 @@ function verifyPool(pool) {
   add('no watermark or footer junk',
     all.filter(x => JUNK.test(x.q.stem) || (x.q.choices || []).some(c => JUNK.test(c.text)))
       .map(x => x.q.id));
-  add('every usable question has a type label',
-    all.filter(x => !x.q.typeLabel).map(x => x.q.id));
+  // The type label and rationale come from the explanation, which is dropped
+  // when it turns out to reprint a different question. The question is still
+  // answerable — stem, choices and printed key — so enrichment is reported,
+  // not required.
+  add('every attached explanation carries a type label',
+    all.filter(x => x.q.explanation && !x.q.typeLabel).map(x => x.q.id));
+  const unenriched = all.filter(x => !x.q.explanation).length;
+  checks.push({
+    name: 'questions carrying an explanation', ok: true,
+    detail: `${all.length - unenriched} of ${all.length}` +
+      (unenriched ? ` (${unenriched} keyed but unenriched)` : ''),
+  });
 
   add('every usable RC question has a passage',
     all.filter(x => x.section.kind === 'RC' && !x.q.passageId).map(x => x.q.id));

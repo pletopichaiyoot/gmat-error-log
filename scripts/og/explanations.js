@@ -55,6 +55,7 @@ function canonicalTypeLabel(raw) {
 
 const Q_START = /^(\d{1,3})\.\s+(?=\S)/;
 const NOTE_START = /^([A-E])\s+(?=\S)/;
+const CHOICE_START = /^\([A-E]\)/;
 const BARE_CORRECT = /^Correct\./i;
 const SITUATION = /^Situation\s+/;
 const REASONING = /^Reasoning\s+/;
@@ -189,14 +190,40 @@ function parseExplanations(lines) {
     // The question number, where the scan kept it, is the last numbered line
     // before this entry's label — the head of the stem the label follows.
     let number = null;
+    let numberIdx = -1;
     for (let i = at - 1; i >= lower; i--) {
       const m = lines[i].trim().match(Q_START);
-      if (m) { number = Number(m[1]); break; }
+      if (m) { number = Number(m[1]); numberIdx = i; break; }
+    }
+
+    // The reprinted question starts at its number, or — when the scan lost it
+    // — at the stem above its first choice. Starting from the previous entry's
+    // label instead would prepend that entry's rationales.
+    let blockStart = numberIdx;
+    if (blockStart < 0) {
+      let firstChoice = -1;
+      for (let i = at - 1; i >= lower; i--) {
+        if (/^\(A\)\s/.test(lines[i].trim())) { firstChoice = i; break; }
+      }
+      if (firstChoice > lower) {
+        blockStart = firstChoice;
+        // Walk back over the stem, stopping at the previous entry's rationales.
+        while (blockStart > lower && !NOTE_START.test(lines[blockStart - 1].trim())
+               && !CHOICE_START.test(lines[blockStart - 1].trim())) {
+          blockStart--;
+        }
+      }
     }
 
     const position = n + 1;
     const label = `entry ${position}${number ? ` (printed ${number})` : ''}`;
     const body = parseBody(lines.slice(at + 1, end), warnings, label);
+
+    // The explanations reprint the question and its choices above the type
+    // label, in single-column flow. That copy is intact where the practice
+    // section's two-column one was cut at a line break, so it is kept as a
+    // repair source.
+    const questionBlock = blockStart >= 0 ? lines.slice(blockStart, at) : [];
 
     let key = null, keySource = null;
     if (body.markerKey && body.closingKey) {
@@ -212,6 +239,7 @@ function parseExplanations(lines) {
     entries.push({
       position,
       number,
+      questionBlock,
       typeLabel: labelAt[at],
       situation: body.situation,
       reasoning: body.reasoning,
