@@ -2,7 +2,10 @@
 /* global require */
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { assembleSection, matchExplanations, unusableReason, repairStem } = require('../../scripts/og/assemble');
+const {
+  assembleSection, matchExplanations, unusableReason, repairStem,
+  recoverStem, buildReprintIndex,
+} = require('../../scripts/og/assemble');
 const { bookByCode } = require('../../scripts/og/books');
 
 const OG13 = bookByCode('OG13');
@@ -468,4 +471,67 @@ test('a clean stem is left alone', () => {
   const clean = 'The primary purpose of the passage is to';
   assert.equal(repairStem(clean, 7), clean);
   assert.equal(unusableReason({ stem: clean, choices }, 'A', false, 'CR'), null);
+});
+
+// The reprint index keys on the first 18 normalized characters of a choice, so
+// these fixtures need choices of a realistic length — the short `the A option`
+// used elsewhere in this file is below that floor and would make the recovery
+// tests pass for the wrong reason.
+const longChoices = [
+  'He introduced cultural and historical consciousness to the community',
+  'He organized a boycott that the local authorities were unable to break',
+  'He persuaded several established leaders to abandon their opposition',
+  'He founded a newspaper that circulated well beyond its own city',
+  'He raised the funds needed to keep the movement solvent for a decade',
+].map((text, i) => ({ label: 'ABCDE'[i], text }));
+
+// A fragment stem has no boundary inside itself to cut at, but the explanations
+// reprint the same question in single-column flow where no column break could
+// have spliced the previous question onto it. The reprint is found through its
+// CHOICES, so the recovery does not depend on the number pairing.
+test('a fragment stem is recovered from the explanation reprint', () => {
+  const reprint = ['61. According to the passage, which of the following contributed to the success?']
+    .concat(longChoices.map(c => `(${c.label}) ${c.text}`));
+  const index = buildReprintIndex([e(1, { number: 61, questionBlock: reprint })]);
+  const broken = { number: 61, stem: 'largest moons and the planets of the solar system', choices: longChoices };
+  assert.equal(
+    recoverStem(broken, index),
+    'According to the passage, which of the following contributed to the success?'
+  );
+});
+
+test('no reprint means no recovery, rather than a guess', () => {
+  const other = ['61. A different question entirely?']
+    .concat('ABCDE'.split('').map(l => `(${l}) an unrelated option ${l} with plenty of text`));
+  const index = buildReprintIndex([e(1, { number: 61, questionBlock: other })]);
+  const broken = { number: 61, stem: 'largest moons and the planets of the solar system', choices: longChoices };
+  assert.equal(recoverStem(broken, index), null);
+});
+
+// The reprint comes from a worse OCR pass, so it can be a fragment too — and a
+// fragment is not an improvement on a fragment.
+test('a reprint that is itself a fragment is refused', () => {
+  const reprint = ['61. tail of someone else’s answer choice']
+    .concat(choices.map(c => `(${c.label}) ${c.text}`));
+  const index = buildReprintIndex([e(1, { number: 61, questionBlock: reprint })]);
+  const broken = { number: 61, stem: 'largest moons and the planets of the solar system', choices };
+  assert.equal(recoverStem(broken, index), null);
+});
+
+// The boldface check runs LAST so that the reason implies the question is
+// otherwise sound: the pdfplumber pass flips the flag when it recovers the
+// spans, and it must not be flipping a question that also has a bad key.
+test('a boldface stem with recovered markup is usable', () => {
+  const stem = 'The portion in boldface plays which of the following roles?';
+  assert.equal(unusableReason({ stem, choices }, 'A', false, 'CR'), 'boldface-unmarked');
+  assert.equal(
+    unusableReason({ stem, stemHtml: 'The portion in <b>boldface</b> plays which role?', choices }, 'A', false, 'CR'),
+    null
+  );
+});
+
+test('boldface never masks a defect that would drop the question anyway', () => {
+  const stem = 'The portion in boldface plays which of the following roles?';
+  assert.equal(unusableReason({ stem, choices }, null, false, 'CR'), 'no-key');
+  assert.equal(unusableReason({ stem, choices: choices.slice(0, 4) }, 'A', false, 'CR'), 'choices');
 });

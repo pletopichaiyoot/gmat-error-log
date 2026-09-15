@@ -6,6 +6,11 @@
 //
 // Only a rating backed by a stored estimate is carried: a bare label is a
 // leftover from an older scheme and cannot be re-derived.
+//
+// `stemHtml` rides along for the same reason. It is written by the pdfplumber
+// pass (the bold spans in a "the portion in boldface plays which role" stem),
+// which runs AFTER the parse, so without carrying it a re-parse would mark
+// every boldface question unanswerable until that pass ran again.
 
 const FIELDS = [
   'difficulty', 'difficulty_pct', 'difficulty_source',
@@ -30,7 +35,9 @@ function carryRatings(next, prior) {
     for (const s of b.sections || []) {
       for (const q of s.questions || []) {
         const was = before.get(q.id);
-        if (!was || !Number.isFinite(was.difficulty_pct)) continue;
+        if (!was) continue;
+        if (was.stemHtml) q.stemHtml = was.stemHtml;
+        if (!Number.isFinite(was.difficulty_pct)) continue;
         for (const f of FIELDS) if (was[f] !== undefined) q[f] = was[f];
         carried++;
       }

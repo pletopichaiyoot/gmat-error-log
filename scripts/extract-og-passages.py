@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Attach Reading Comprehension passages to data/gmat-og-questions.json.
+"""Attach RC passages and CR boldface markup to data/gmat-og-questions.json.
 
 The questions, choices and answer keys are produced by scripts/parse-og-pdf.js
 from the text layer. Passages need page geometry instead: the books print them
@@ -11,6 +11,12 @@ The page to read is known: the answer explanations print "Questions 1-3 refer
 to the passage on page 358." for every group, and parse-og-pdf.js already
 carries those references through. Only the printed-to-PDF page offset has to be
 discovered, and that is one integer per book.
+
+The same geometry answers a second question the text layer cannot. Roughly two
+dozen CR questions ask what "the portion in boldface" plays in the argument,
+and a flat extraction drops the emphasis, leaving the stem unanswerable. Font
+weight is on the page, so the bold runs are read here and written back as a
+`stemHtml`.
 
 Usage:
     python3 scripts/extract-og-passages.py            # dry-run report
@@ -213,6 +219,114 @@ def build_passage(page, passage_id, printed_page):
             "lines": numbered, "highlights": []}
 
 
+# ---------------------------------------------------------------- boldface CR
+
+# "In the argument given, the two portions in boldface play which of the
+# following roles?" — matched the same way scripts/og/assemble.js matches it, so
+# the two ends of the pipeline agree on which questions need this.
+BOLDFACE_STEM = re.compile(r"\bbold\s?face\b|\bportions?\s+in\s+bold\b|\bboldfaced\b", re.I)
+
+# A bold run has to be long enough to identify a span of the argument. Shorter
+# runs are the page's own furniture: the running head, a question number, the
+# "Argument Evaluation" label above an explanation.
+BOLD_RUN_MIN = 20
+
+# The PDF spells "field" as the two words "fi eld" where the text layer carries
+# the ligature. Expanding the ligature before stripping punctuation is what lets
+# the two renderings compare equal.
+LIGATURES = {"\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl", "\ufb03": "ffi", "\ufb04": "ffl"}
+
+
+def norm_map(text):
+    """Normalized text plus, for each normalized character, its index in `text`."""
+    out, idx = [], []
+    for i, ch in enumerate(text):
+        for lig, plain in LIGATURES.items():
+            if ch == lig:
+                ch = plain
+                break
+        for c in ch.lower():
+            if c.isalnum():
+                out.append(c)
+                idx.append(i)
+    return "".join(out), idx
+
+
+def norm(text):
+    return norm_map(text)[0]
+
+
+def bold_runs(page):
+    """Every maximal run of consecutive bold words on the page, normalized."""
+    try:
+        words = page.extract_words(extra_attrs=["fontname"])
+    except Exception:
+        return []
+    runs, cur = [], []
+    for w in words:
+        if "bold" in w.get("fontname", "").lower():
+            cur.append(w["text"])
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    out = []
+    for r in runs:
+        n = norm("".join(r))
+        if len(n) >= BOLD_RUN_MIN:
+            out.append(n)
+    return out
+
+
+def escape_html(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def mark_bold(stem, spans):
+    """Wrap each (start, end) span of `stem` in <b>, escaping the rest."""
+    out, at = [], 0
+    for start, end in sorted(spans):
+        if start < at:
+            continue
+        out.append(escape_html(stem[at:start]))
+        out.append("<b>" + escape_html(stem[start:end]) + "</b>")
+        at = end
+    out.append(escape_html(stem[at:]))
+    return "".join(out)
+
+
+def boldface_html(pdf, questions):
+    """qid -> stemHtml, for the CR questions whose stem talks about boldface.
+
+    The question is NOT located first and read second. Every page is scanned for
+    bold runs and each run is tested against each stem: a run of twenty or more
+    characters that occurs exactly once in a stem identifies both the page and
+    the span, and needs no page offset, no column ordering and no question
+    number — none of which survive reliably in the scanned books. The page
+    yielding the most spans wins, which prefers the practice section's printing
+    over the explanations' reprint of the same question, where the type label is
+    also set bold.
+    """
+    stems = {q["id"]: norm_map(q["stem"]) for q in questions}
+    best = {}
+    for page in pdf.pages:
+        runs = bold_runs(page)
+        if not runs:
+            continue
+        for qid, (sn, idx) in stems.items():
+            spans = []
+            for run in runs:
+                if sn.count(run) != 1:
+                    continue
+                at = sn.index(run)
+                spans.append((idx[at], idx[at + len(run) - 1] + 1))
+            if spans and len(spans) > len(best.get(qid, [])):
+                best[qid] = spans
+    by_id = {q["id"]: q for q in questions}
+    return {qid: mark_bold(by_id[qid]["stem"], spans) for qid, spans in best.items()}
+
+
 def find_page_offset(pdf, refs, probe_text):
     """Printed page numbers are not PDF page indices. Find the one offset where
     the passages actually land on the pages the book says they do."""
@@ -233,6 +347,71 @@ def find_page_offset(pdf, refs, probe_text):
     return best, best_hits
 
 
+def rc_passages(pdf, book, rc, report):
+    """Rewrite rc["passages"] from page geometry. Returns the number built."""
+    refs = [r for r in rc.get("passageRefs", []) if r.get("page")]
+    if not refs:
+        report.append(f"{book['code']} RC: no page-bearing passage references")
+        return 0
+
+    offset, hits = find_page_offset(pdf, refs, None)
+    if offset is None:
+        report.append(f"{book['code']} RC: could not resolve the page offset")
+        return 0
+
+    passages, missing = [], []
+    for ref in refs:
+        idx = ref["page"] + offset - 1
+        pid = f"{book['code']}-RC-p{ref['page']}"
+        built = (build_passage(pdf.pages[idx], pid, ref["page"])
+                 if 0 <= idx < len(pdf.pages) else None)
+        if built:
+            passages.append(built)
+        else:
+            missing.append(ref["page"])
+
+    rc["passages"] = passages
+    linked = {p["id"] for p in passages}
+    served = sum(1 for q in rc["questions"] if q.get("passageId") in linked)
+    report.append(
+        f"{book['code']} RC: offset {offset:+d} ({hits}/{len(refs)} probes), "
+        f"{len(passages)}/{len(refs)} passages, {served}/{len(rc['questions'])} "
+        f"questions served" + (f", missing pages {missing}" if missing else ""))
+    return len(passages)
+
+
+def cr_boldface(pdf, book, cr, report):
+    """Write stemHtml for the CR questions that ask about a boldface portion.
+
+    A question excluded ONLY for the missing markup becomes usable again the
+    moment it is recovered. That check is the last one scripts/og/assemble.js
+    applies, so 'boldface-unmarked' means the question is otherwise sound and
+    the flag can be flipped here rather than by another parse.
+    """
+    wanted = [q for q in cr["questions"] if BOLDFACE_STEM.search(q.get("stem") or "")]
+    if not wanted:
+        return 0
+
+    html = boldface_html(pdf, wanted)
+    recovered = 0
+    for q in wanted:
+        got = html.get(q["id"])
+        if not got:
+            q.pop("stemHtml", None)
+            continue
+        q["stemHtml"] = got
+        recovered += 1
+        if q.get("unusable") == "boldface-unmarked":
+            q["usable"] = True
+            q.pop("unusable", None)
+
+    report.append(
+        f"{book['code']} CR: {recovered}/{len(wanted)} boldface stems marked up"
+        + (f", still unmarked {[q['id'] for q in wanted if not html.get(q['id'])]}"
+           if recovered < len(wanted) else ""))
+    return recovered
+
+
 def main():
     merge = "--merge" in sys.argv
     only_book = None
@@ -241,51 +420,29 @@ def main():
     pool = json.load(open(POOL))
     report = []
     total_built = 0
+    total_bold = 0
 
     for book in pool["books"]:
         if only_book and book["code"] != only_book:
             continue
         rc = next((s for s in book["sections"] if s["kind"] == "RC"), None)
-        if not rc:
-            continue
-        refs = [r for r in rc.get("passageRefs", []) if r.get("page")]
-        if not refs:
-            report.append(f"{book['code']} RC: no page-bearing passage references")
+        cr = next((s for s in book["sections"] if s["kind"] == "CR"), None)
+        if not rc and not cr:
             continue
 
         path = os.path.join(ROOT, "docs", PDFS[book["code"]])
         if not os.path.exists(path):
-            report.append(f"{book['code']} RC: missing PDF {path}")
+            report.append(f"{book['code']}: missing PDF {path}")
             continue
 
         with pdfplumber.open(path) as pdf:
-            offset, hits = find_page_offset(pdf, refs, None)
-            if offset is None:
-                report.append(f"{book['code']} RC: could not resolve the page offset")
-                continue
-
-            passages, missing = [], []
-            for ref in refs:
-                idx = ref["page"] + offset - 1
-                pid = f"{book['code']}-RC-p{ref['page']}"
-                built = (build_passage(pdf.pages[idx], pid, ref["page"])
-                         if 0 <= idx < len(pdf.pages) else None)
-                if built:
-                    passages.append(built)
-                else:
-                    missing.append(ref["page"])
-
-        rc["passages"] = passages
-        total_built += len(passages)
-        linked = {p["id"] for p in passages}
-        served = sum(1 for q in rc["questions"] if q.get("passageId") in linked)
-        report.append(
-            f"{book['code']} RC: offset {offset:+d} ({hits}/{len(refs)} probes), "
-            f"{len(passages)}/{len(refs)} passages, {served}/{len(rc['questions'])} "
-            f"questions served" + (f", missing pages {missing}" if missing else ""))
+            if rc:
+                total_built += rc_passages(pdf, book, rc, report)
+            if cr:
+                total_bold += cr_boldface(pdf, book, cr, report)
 
     print("\n".join(report))
-    print(f"\n{total_built} passages built.")
+    print(f"\n{total_built} passages built, {total_bold} boldface stems marked up.")
 
     if merge:
         stamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")

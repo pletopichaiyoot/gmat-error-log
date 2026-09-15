@@ -134,7 +134,7 @@ function buildReprintIndex(explanations) {
     if (!parsed || !parsed.choices.length) continue;
     for (const c of parsed.choices) {
       const k = squashText(c.text).slice(0, PAIR_PREFIX);
-      if (k.length >= REPRINT_MIN_KEY && !index.has(k)) index.set(k, parsed.choices);
+      if (k.length >= REPRINT_MIN_KEY && !index.has(k)) index.set(k, parsed);
     }
   }
   return index;
@@ -148,12 +148,32 @@ function findReprint(q, index) {
     const hit = index.get(k);
     if (hit) counts.set(hit, (counts.get(hit) || 0) + 1);
   }
-  for (const [choices, n] of counts) {
+  for (const [parsed, n] of counts) {
     // Two matching choices is enough to identify the question; one could be a
     // stock option shared between questions.
-    if (n >= 2 && choices.length === q.choices.length) return choices;
+    if (n >= 2 && parsed.choices.length === q.choices.length) return parsed;
   }
   return null;
+}
+
+// Take the stem from the copy the explanations reprint.
+//
+// A stem carrying a leading fragment has no boundary inside itself to cut at,
+// but the explanations reprint the same question in single-column flow, where
+// no column break could have spliced the previous question onto it. The reprint
+// is found through its CHOICES, so this does not depend on the number pairing —
+// which is precisely what fails on the sections needing it most.
+//
+// The whole stem is replaced, not just the head: the reprint comes from a worse
+// OCR pass and gluing its tail onto our head would splice two renderings
+// mid-sentence. A stem with glued words is readable; a stem that opens in the
+// middle of the previous question's answer is not.
+function recoverStem(q, index) {
+  const reprint = findReprint(q, index);
+  if (!reprint || !reprint.stem) return null;
+  const stem = String(reprint.stem).trim();
+  if (isStemFragment(stem) || stem.length < 20) return null;
+  return stem;
 }
 
 // Return the part of `full` that lies beyond `have`, comparing on normalized
@@ -176,17 +196,17 @@ function tailBeyond(fullRaw, haveNormalizedLength) {
 function repairChoices(q, index) {
   const reprint = findReprint(q, index);
   if (!reprint) return null;
-  if (reprint.some(c => !c.text || !c.text.trim())) return null;
+  if (reprint.choices.some(c => !c.text || !c.text.trim())) return null;
 
   const out = [];
   let anyLonger = false;
   for (let i = 0; i < q.choices.length; i++) {
     const haveRaw = q.choices[i].text;
     const have = squashText(haveRaw);
-    const full = squashText(reprint[i].text);
+    const full = squashText(reprint.choices[i].text);
     if (!full.startsWith(have)) return null;
     if (full.length > have.length) {
-      const tail = tailBeyond(reprint[i].text, have.length).trim();
+      const tail = tailBeyond(reprint.choices[i].text, have.length).trim();
       out.push({ label: q.choices[i].label, text: `${haveRaw.trim()} ${tail}`.trim() });
       anyLonger = true;
     } else {
@@ -244,19 +264,27 @@ function isStemFragment(stem) {
 // claim above" is not caught.
 const BOLDFACE_STEM = /\bbold\s?face\b|\bportions?\s+in\s+bold\b|\bboldfaced\b/i;
 
+function hasBoldMarkup(stemHtml) {
+  return /<b[\s>]/i.test(String(stemHtml || ''));
+}
+
 function unusableReason(q, correct, keyDisputed, kind) {
   // Reading Comprehension without its passage cannot be answered. Passages are
   // attached by the pdfplumber pass, so RC stays unusable until that has run.
   if (kind === 'RC' && !q.passageId) return 'no-passage';
   if (!q.stem || !q.stem.trim()) return 'stem';
   if (isStemFragment(q.stem)) return 'stem-fragment';
-  if (BOLDFACE_STEM.test(q.stem) && !/<b[\s>]/i.test(q.stemHtml || '')) return 'boldface-unmarked';
   if (q.choices.length !== 5) return 'choices';
   if (q.choices.some(c => !c.text || !c.text.trim())) return 'blank-choice';
   if (isLopsided(q.choices)) return 'lopsided-choice';
   if (q.choices.some(isTruncated)) return 'truncated-choice';
   if (keyDisputed) return 'key-disputed';
   if (!correct) return 'no-key';
+  // Checked LAST on purpose: the bold spans are recovered by the pdfplumber
+  // pass, which runs after this one and flips the flag when it succeeds. Being
+  // the final check means 'boldface-unmarked' says the question is otherwise
+  // sound, so that flip is safe.
+  if (BOLDFACE_STEM.test(q.stem) && !hasBoldMarkup(q.stemHtml)) return 'boldface-unmarked';
   return null;
 }
 
@@ -359,8 +387,15 @@ function assembleSection({ book, kind, questions, keys, explanations, passageRef
     if (e) stats.explained++;
     if (q.numberInferred) stats.numberInferred++;
 
-    const stem = repairStem(q.stem, q.number);
-    const stemRepaired = stem !== q.stem;
+    let stem = repairStem(q.stem, q.number);
+    let stemSource = stem !== q.stem ? 'renumbered' : null;
+    if (isStemFragment(stem)) {
+      const recovered = recoverStem(q, reprints);
+      if (recovered) {
+        stem = recovered;
+        stemSource = 'explanation';
+      }
+    }
 
     const question = {
       id,
@@ -379,7 +414,7 @@ function assembleSection({ book, kind, questions, keys, explanations, passageRef
       refs: [{ book: book.code, number: q.number }],
     };
     if (q.numberInferred) question.numberInferred = true;
-    if (stemRepaired) question.stemSource = 'renumbered';
+    if (stemSource) question.stemSource = stemSource;
 
     const reason = unverifiable
       ? 'unverifiable-key'
@@ -399,4 +434,7 @@ function assembleSection({ book, kind, questions, keys, explanations, passageRef
   return { section: { kind, passageRefs, questions: out }, stats, warnings };
 }
 
-module.exports = { assembleSection, matchExplanations, unusableReason, isTruncated, repairStem };
+module.exports = {
+  assembleSection, matchExplanations, unusableReason, isTruncated,
+  repairStem, recoverStem, buildReprintIndex, BOLDFACE_STEM, hasBoldMarkup,
+};
