@@ -17,6 +17,7 @@ const { parseAnswerKey } = require('./og/answer-key');
 const { parseQuestions } = require('./og/questions');
 const { parseExplanations } = require('./og/explanations');
 const { assembleSection } = require('./og/assemble');
+const { linkQuestionsToPassages } = require('./og/passage-link');
 
 const OUT = path.join(__dirname, '..', 'data', 'gmat-og-questions.json');
 const REPORT = path.join(__dirname, '..', 'tmp', 'og-parse-report.md');
@@ -87,6 +88,23 @@ for (const book of BOOKS) {
     const expl = parseExplanations(picked.regions.explanations);
     allWarnings.push(...practice.warnings.map(w => `${book.code}-${kind} practice: ${w}`));
     allWarnings.push(...expl.warnings.map(w => `${book.code}-${kind} explanations: ${w}`));
+
+    // RC questions need their passage before they can be judged usable, so
+    // link them to the printed references first.
+    let linkWarnings = [];
+    if (kind === 'RC') {
+      try {
+        const linked = linkQuestionsToPassages(
+          { kind, passageRefs: expl.passageRefs, questions: practice.questions }, book.code);
+        if (linked.unlinked.length) {
+          linkWarnings = [`${book.code}-${kind}: ${linked.unlinked.length} questions ` +
+            'fall outside every printed passage reference'];
+        }
+      } catch (err) {
+        linkWarnings = [`${book.code}-${kind}: ${err.message}`];
+      }
+    }
+    allWarnings.push(...linkWarnings);
 
     const { section, stats, warnings } = assembleSection({
       book, kind,
