@@ -258,6 +258,24 @@ test('a gutter marker does not become choice text', () => {
   assert.equal(questions[0].choices[4].text, 'the final option');
 });
 
+test('a passage reference glued to the front of a stem is stripped', () => {
+  // pdftotext sometimes merges the group header onto the first stem line, so
+  // skipping whole matching lines is not enough.
+  const { questions } = parseQuestions([
+    '1. Questions 61-63 refer to the passage above. The primary purpose of the passage is to',
+    '(A) a', '(B) b', '(C) c', '(D) d', '(E) e',
+  ]);
+  assert.equal(questions[0].stem, 'The primary purpose of the passage is to');
+});
+
+test('a passage reference naming a page is stripped too', () => {
+  const { questions } = parseQuestions([
+    '1. Questions 1-3 refer to the passage on page 358. The author suggests that',
+    '(A) a', '(B) b', '(C) c', '(D) d', '(E) e',
+  ]);
+  assert.equal(questions[0].stem, 'The author suggests that');
+});
+
 test('a page footer run onto the end of a line is trimmed', () => {
   const { questions } = parseQuestions([
     '1. The stem ends here. 542',

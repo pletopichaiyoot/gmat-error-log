@@ -27,6 +27,15 @@ const STOP = [
 function isStop(line) {
   return STOP.some(re => re.test(line));
 }
+
+// pdftotext sometimes merges the passage-group header onto the first line of
+// the stem that follows it, so skipping whole matching lines is not enough.
+const PASSAGE_REF_PREFIX =
+  /^Questions\s+\d{1,3}\s*[-\u2013\u2014]\s*\d{1,3}\s+refer to the passage(?:\s+(?:above|below|on\s+page\s+\d{1,4}))?\.?\s*/i;
+
+function stripPassageRef(text) {
+  return String(text).replace(PASSAGE_REF_PREFIX, '').trim();
+}
 // How far the run may jump forward to absorb a question number the scanner
 // lost. VR2 prints 104 RC questions but only 78 survive as "N." lines, so a
 // strict run would stop at the first gap; a jump larger than this is a page
@@ -125,7 +134,7 @@ function runFrom(lines, seed, startAt) {
     flushChoice();
     const q = {
       number: cur.number,
-      stem: finishText(cur.stemParts),
+      stem: stripPassageRef(finishText(cur.stemParts)),
       choices: cur.choices.map(({ label, text }) => ({ label, text })),
     };
     if (cur.numberInferred) q.numberInferred = true;

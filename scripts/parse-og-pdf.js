@@ -18,6 +18,7 @@ const { parseQuestions } = require('./og/questions');
 const { parseExplanations } = require('./og/explanations');
 const { assembleSection } = require('./og/assemble');
 const { linkQuestionsToPassages } = require('./og/passage-link');
+const { carryRatings } = require('./og/carry-ratings');
 
 const OUT = path.join(__dirname, '..', 'data', 'gmat-og-questions.json');
 const REPORT = path.join(__dirname, '..', 'tmp', 'og-parse-report.md');
@@ -143,6 +144,17 @@ for (const w of allWarnings) lines.push(`- ${w}`);
 fs.mkdirSync(path.dirname(REPORT), { recursive: true });
 fs.writeFileSync(REPORT, lines.join('\n'));
 
+// The difficulty pass is the only step that costs money, and a re-parse would
+// otherwise throw it away.
+let carried = 0;
+if (fs.existsSync(OUT)) {
+  try {
+    carried = carryRatings({ books }, JSON.parse(fs.readFileSync(OUT, 'utf-8')));
+  } catch (err) {
+    console.warn(`could not carry existing difficulty ratings: ${err.message}`);
+  }
+}
+
 if (!dryRun) {
   if (fs.existsSync(OUT)) {
     const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
@@ -152,6 +164,7 @@ if (!dryRun) {
   console.log(`wrote ${OUT}`);
 }
 console.log(`wrote ${REPORT}`);
+if (carried) console.log(`carried ${carried} difficulty ratings from the previous pool`);
 for (const r of rows) {
   if (r.error) { console.log(`${r.book} ${r.kind}  ERROR ${r.error}`); continue; }
   console.log(`${r.book} ${r.kind}  parsed=${String(r.total).padStart(3)} ` +

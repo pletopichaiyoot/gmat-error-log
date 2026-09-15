@@ -7,7 +7,7 @@ const { bookByCode } = require('../../scripts/og/books');
 
 const OG13 = bookByCode('OG13');
 
-const choices = 'ABCDE'.split('').map(l => ({ label: l, text: l.toLowerCase() }));
+const choices = 'ABCDE'.split('').map(l => ({ label: l, text: `the ${l} option` }));
 const q = (number, over = {}) => ({ number, stem: `Stem ${number}.`, choices, ...over });
 const e = (position, over = {}) => ({
   position, number: position, typeLabel: 'Inference', situation: null,
@@ -160,6 +160,41 @@ test('a legitimately long choice set is kept', () => {
   const long = 'ABCDE'.split('').map(l => ({ label: l, text: `${l} `.repeat(90) }));
   const { section } = assembleSection({
     book: OG13, kind: 'CR', questions: [q(1, { choices: long })],
+    keys: new Map([[1, 'A']]), explanations: [e(1)], passageRefs: [],
+  });
+  assert.equal(section.questions[0].usable, true);
+});
+
+test('a choice cut off mid-phrase is not answerable', () => {
+  // The scans truncate a choice at a line break: 58 of 448 end on a dangling
+  // "to", "of" or "and" with no terminal punctuation.
+  const cut = [
+    { label: 'A', text: 'a complete option.' },
+    { label: 'B', text: 'another complete option.' },
+    { label: 'C', text: 'a third complete option.' },
+    { label: 'D', text: 'a fourth complete option.' },
+    { label: 'E', text: 'Immigration Service reports from 1914 to' },
+  ];
+  const { section } = assembleSection({
+    book: OG13, kind: 'CR', questions: [q(1, { choices: cut })],
+    keys: new Map([[1, 'A']]), explanations: [e(1)], passageRefs: [],
+  });
+  assert.equal(section.questions[0].usable, false);
+  assert.equal(section.questions[0].unusable, 'truncated-choice');
+});
+
+test('a short but complete choice is kept', () => {
+  // "Size" and "evaluation of a problem" are real RC options; only a dangling
+  // function word with no terminal punctuation means truncation.
+  const short = [
+    { label: 'A', text: 'Size' },
+    { label: 'B', text: 'evaluation of a problem' },
+    { label: 'C', text: 'records where they came from.' },
+    { label: 'D', text: 'a fourth option' },
+    { label: 'E', text: 'a fifth option' },
+  ];
+  const { section } = assembleSection({
+    book: OG13, kind: 'CR', questions: [q(1, { choices: short })],
     keys: new Map([[1, 'A']]), explanations: [e(1)], passageRefs: [],
   });
   assert.equal(section.questions[0].usable, true);

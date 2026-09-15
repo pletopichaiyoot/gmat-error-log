@@ -200,8 +200,8 @@ Result: 1,718 → 2,117 keyed (79.6%), all 2,117 verified against an independent
 Critical Reasoning and Reading Comprehension questions extracted from three
 Official Guide PDFs into **`data/gmat-og-questions.json`** (gitignored;
 `.bak-*` siblings are the rollback). Sentence Correction is out of scope — the
-Focus exam dropped it. **448 usable questions**: 252 CR, 196 RC, each with the
-book's own question-type label and its full answer explanation.
+Focus exam dropped it. **390 usable questions**, each with the book's own question-type
+label, its full answer explanation, and an LLM difficulty rating.
 
 **The source PDFs in `docs/` are copyrighted and gitignored** (`/docs/*.pdf`,
 `/docs/ocr/`). This repo is public — never commit them.
@@ -216,7 +216,20 @@ Pipeline, in order:
 | Check acceptance criteria | `npm run og:verify` |
 | Rate difficulty (one LLM pass) | `node scripts/classify-og-difficulty.mjs` |
 
-Re-running `og:parse` overwrites the pool, so the later steps must follow it.
+Re-running `og:parse` overwrites the pool, so the later steps must follow it —
+except the difficulty ratings, which `scripts/og/carry-ratings.js` carries
+across a re-parse by question id, since that is the only step that costs money.
+
+**Difficulty is a rough RELATIVE ranking, not a calibrated measure.** The model
+estimates what share of a 655-705 cohort answers each question correctly, and
+the labels are tertiles of those estimates within a subject. Asked for Easy /
+Medium / Hard directly it compressed nearly everything into one bucket
+(319 of 448); asked for a percentage it still clusters in 72-82, and correlates
+only about 0.15-0.22 with printed question order, which the Official Guide
+arranges roughly easy-to-hard. Raising `reasoning.effort` to `high` made it
+slightly worse (0.187 against 0.219). `--relabel` re-cuts the buckets from the
+stored `difficulty_pct` for free, so cutoffs can be revisited without paying
+for the pass again.
 `scripts/extract-og-passages.py` needs `pdfplumber`, which is **not** in
 `package.json` (the repo is JS) — it lives in the user's pyenv Python 3.11.
 
@@ -267,6 +280,10 @@ only `usable` questions.
   choice — the tail alone collided 16 times inside OG12 CR. RC dedups per
   passage so a shared passage takes its whole question group.
 - **pdfplumber splits ligature glyphs**, so "Official" arrives as "Offi cial".
+- **The scans truncate a choice at a line break.** A choice ending on a
+  lower-case dangling function word with no terminal punctuation is the tell;
+  length alone is not, since "Size" and "evaluation of a problem" are real
+  options. This is the largest single exclusion reason — 67 questions.
 
 `loadOgData()` in `server.js` will cache in-process like `loadLsatData`, so
 **restart the API after regenerating the file**.

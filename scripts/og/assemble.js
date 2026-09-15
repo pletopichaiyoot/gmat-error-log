@@ -58,6 +58,20 @@ function isLopsided(choices) {
   return longest > median * LOPSIDED_RATIO;
 }
 
+// The scans cut a choice at a line break. A choice ending on a dangling
+// function word with no terminal punctuation is the reliable tell — a short
+// choice on its own is not ("Size" and "evaluation of a problem" are real
+// options), so length alone would reject 90 good questions to catch these.
+// Lower-case only, deliberately: truncation preserves the original case, and a
+// matching upper-case token is usually a label ("option A"), not an article.
+const DANGLING = /(?:^|\s)(of|the|a|an|to|and|or|in|on|for|with|that|which|as|by|from|at|than|into)$/;
+
+function isTruncated(choice) {
+  const t = (choice.text || '').trim();
+  if (!t || /[.?!"\u201d\u2019)\]]$/.test(t)) return false;
+  return DANGLING.test(t);
+}
+
 function unusableReason(q, correct, keyDisputed, kind) {
   // Reading Comprehension without its passage cannot be answered. Passages are
   // attached by the pdfplumber pass, so RC stays unusable until that has run.
@@ -66,6 +80,7 @@ function unusableReason(q, correct, keyDisputed, kind) {
   if (q.choices.length !== 5) return 'choices';
   if (q.choices.some(c => !c.text || !c.text.trim())) return 'blank-choice';
   if (isLopsided(q.choices)) return 'lopsided-choice';
+  if (q.choices.some(isTruncated)) return 'truncated-choice';
   if (keyDisputed) return 'key-disputed';
   if (!correct) return 'no-key';
   return null;
@@ -140,4 +155,4 @@ function assembleSection({ book, kind, questions, keys, explanations, passageRef
   return { section: { kind, passageRefs, questions: out }, stats, warnings };
 }
 
-module.exports = { assembleSection, matchExplanations, unusableReason };
+module.exports = { assembleSection, matchExplanations, unusableReason, isTruncated };
