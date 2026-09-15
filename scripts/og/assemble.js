@@ -200,6 +200,42 @@ function repairChoices(q, index) {
 // applies when curating a practice set (CLAUDE.md): a non-empty stem, five
 // choices that all carry text, and a key. A disputed key is not a key — a
 // wrong one tells the user they missed a question they answered correctly.
+// A stem that opens mid-sentence is carrying the previous question's material.
+//
+// Where the two-column scan cuts a choice at a column or page break, the part
+// that was cut off does not vanish — it lands at the head of the NEXT question's
+// stem. So the same break damages two questions: the earlier one loses the end
+// of a choice (caught by isTruncated) and the later one gains a fragment in
+// front of its stem. 97 of the pool's questions are affected, all of them in the
+// two scanned books; OG12's native text layer has none.
+//
+// Where the question's own printed number survived inside the stem, it marks the
+// true start exactly and the fragment before it can be cut. The number must be
+// within a couple of the question's own, or a page number glued into a CR
+// stimulus ("...known to have 365 Which of the following...") would cut the
+// stimulus away — and a CR question without its stimulus is unanswerable.
+const STEM_NUMBER_MARK = /(?:^|\s)(\d{1,3})\.\s+(?=[A-Z“"])/g;
+const STEM_NUMBER_WINDOW = 2;
+
+function repairStem(stem, number) {
+  const text = String(stem || '');
+  if (!Number.isFinite(Number(number))) return text;
+  let cut = -1;
+  let m;
+  STEM_NUMBER_MARK.lastIndex = 0;
+  while ((m = STEM_NUMBER_MARK.exec(text))) {
+    if (Math.abs(Number(m[1]) - Number(number)) <= STEM_NUMBER_WINDOW) cut = m.index + m[0].length;
+  }
+  return cut > 0 ? text.slice(cut).trim() : text;
+}
+
+// After the repair, a stem still opening lower-case is a fragment with no
+// recoverable boundary — sometimes with no question in it at all ("largest moons
+// and the planets of the solar system"). A stem defect drops the question.
+function isStemFragment(stem) {
+  return /^[a-z]/.test(String(stem || '').trim());
+}
+
 // "In the argument above, the portion in boldface plays which of the following
 // roles?" is unanswerable unless the bold span survived extraction. It did not:
 // pdftotext drops font weight and the pdfplumber pass never emitted stemHtml, so
@@ -213,6 +249,7 @@ function unusableReason(q, correct, keyDisputed, kind) {
   // attached by the pdfplumber pass, so RC stays unusable until that has run.
   if (kind === 'RC' && !q.passageId) return 'no-passage';
   if (!q.stem || !q.stem.trim()) return 'stem';
+  if (isStemFragment(q.stem)) return 'stem-fragment';
   if (BOLDFACE_STEM.test(q.stem) && !/<b[\s>]/i.test(q.stemHtml || '')) return 'boldface-unmarked';
   if (q.choices.length !== 5) return 'choices';
   if (q.choices.some(c => !c.text || !c.text.trim())) return 'blank-choice';
@@ -322,10 +359,13 @@ function assembleSection({ book, kind, questions, keys, explanations, passageRef
     if (e) stats.explained++;
     if (q.numberInferred) stats.numberInferred++;
 
+    const stem = repairStem(q.stem, q.number);
+    const stemRepaired = stem !== q.stem;
+
     const question = {
       id,
       number: q.number,
-      stem: q.stem,
+      stem,
       choices: q.choices,
       ...(repaired ? { choicesSource: 'explanation' } : {}),
       passageId: q.passageId || null,
@@ -339,10 +379,11 @@ function assembleSection({ book, kind, questions, keys, explanations, passageRef
       refs: [{ book: book.code, number: q.number }],
     };
     if (q.numberInferred) question.numberInferred = true;
+    if (stemRepaired) question.stemSource = 'renumbered';
 
     const reason = unverifiable
       ? 'unverifiable-key'
-      : unusableReason(q, correct, keyDisputed, kind);
+      : unusableReason({ ...q, stem }, correct, keyDisputed, kind);
     question.usable = reason === null;
     if (reason) question.unusable = reason;
     else stats.usable++;
@@ -358,4 +399,4 @@ function assembleSection({ book, kind, questions, keys, explanations, passageRef
   return { section: { kind, passageRefs, questions: out }, stats, warnings };
 }
 
-module.exports = { assembleSection, matchExplanations, unusableReason, isTruncated };
+module.exports = { assembleSection, matchExplanations, unusableReason, isTruncated, repairStem };

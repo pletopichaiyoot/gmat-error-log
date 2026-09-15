@@ -2,7 +2,7 @@
 /* global require */
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { assembleSection, matchExplanations, unusableReason } = require('../../scripts/og/assemble');
+const { assembleSection, matchExplanations, unusableReason, repairStem } = require('../../scripts/og/assemble');
 const { bookByCode } = require('../../scripts/og/books');
 
 const OG13 = bookByCode('OG13');
@@ -442,4 +442,30 @@ test('a boldface question keeps its markup when stemHtml recovered the spans', (
 test('an ordinary stem that merely contains the word bold is untouched', () => {
   const ordinary = { stem: 'The bold claim above depends on which assumption?', choices };
   assert.equal(unusableReason(ordinary, 'A', false, 'CR'), null);
+});
+
+// Where the scan cuts a choice at a column break, the part cut off lands at the
+// head of the NEXT question's stem. The question's own printed number, where it
+// survived inside the stem, marks the true start.
+test('a stem carrying a leading fragment is cut at its own printed number', () => {
+  const stem = "largest moons with the characteristics of the planets of the solar system 13. The author's reference to Jupiter's gravity serves primarily to";
+  assert.equal(repairStem(stem, 13), "The author's reference to Jupiter's gravity serves primarily to");
+});
+
+// A page number glued into a CR stimulus looks like the same marker. Cutting
+// there would take the stimulus with it, and a CR question without its stimulus
+// is unanswerable — so the number has to be close to the question's own.
+test('a page number glued into a stimulus is not mistaken for the question number', () => {
+  const stem = 'Excavation of the ancient city revealed a pattern typical of earthquakes. 365 Which of the following, if true, most strongly supports the hypothesis?';
+  assert.equal(repairStem(stem, 65), stem);
+});
+
+test('a stem still opening mid-sentence after repair is unusable', () => {
+  assert.equal(unusableReason({ stem: 'largest moons and the planets of the solar system', choices }, 'A', false, 'CR'), 'stem-fragment');
+});
+
+test('a clean stem is left alone', () => {
+  const clean = 'The primary purpose of the passage is to';
+  assert.equal(repairStem(clean, 7), clean);
+  assert.equal(unusableReason({ stem: clean, choices }, 'A', false, 'CR'), null);
 });
