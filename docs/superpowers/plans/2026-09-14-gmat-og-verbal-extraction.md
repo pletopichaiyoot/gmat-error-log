@@ -327,14 +327,22 @@ Expected: a version for each. This pulls tesseract, ghostscript and qpdf (~1GB).
 
 ```bash
 mkdir -p docs/ocr
-ocrmypdf --redo-ocr --rotate-pages --deskew --language eng \
+ocrmypdf --redo-ocr --rotate-pages --language eng \
   docs/OG13.pdf docs/ocr/OG13.ocr.pdf
-ocrmypdf --redo-ocr --rotate-pages --deskew --language eng \
+ocrmypdf --redo-ocr --rotate-pages --language eng \
   "docs/The Official Guide for GMAT Verbal Review, 2nd edition.pdf" \
   docs/ocr/VerbalReview2e.ocr.pdf
 ```
 
-`--rotate-pages` is what may rescue OG13's rotated CR answer key. Each run takes 20-40 minutes; run them one at a time so a failure is attributable.
+**Do not add `--deskew`** — ocrmypdf refuses it alongside `--redo-ocr` ("not
+currently compatible with --deskew, --clean-final, and --remove-background")
+and exits immediately. **Do not pipe the command into `tail`** either: the pipe
+reports `tail`'s exit status, so a refusal like that looks like success.
+
+`--rotate-pages` may help OG13's rotated CR answer key, though it rotates whole
+pages by detected text orientation and the key is a rotated table inside an
+otherwise upright page — treat outcome (b) below as the likely one. Each run
+takes 20-40 minutes; run them one at a time so a failure is attributable.
 
 - [ ] **Step 8: Measure the after-scores and decide**
 
@@ -3058,6 +3066,56 @@ Not covered here, by design: migration `0010`, `src/og-dashboard.js`, `/api/og/*
 **Naming consistency.** `findRegions`/`headingsFor` (Task 4) are called in Tasks 5-9 exactly as defined. `parseAnswerKey` returns `{layout, keys, skipped}` in Task 5 and is destructured that way in Task 8. `parseQuestions` returns `{questions, warnings}` in Task 6, consumed that way in Task 8. `parseExplanations` returns `{entries, passageRefs, warnings}` in Task 7, consumed that way in Task 8 and its `passageRefs` flow into Task 10's `linkQuestionsToPassages`. `assembleSection` returns `{section, stats, warnings}` in Task 8 and the CLI in Task 9 destructures all three. `q.id` is `<book>-<kind>-<number>` from Task 8 onward, and Task 10's `passageId` is derived from it.
 
 **Known soft spot.** Task 8's stem fallback re-runs `parseQuestions` over the whole explanations region once per fallback question. That is O(n²) on a region of a few thousand lines and only fires for questions missing from the practice section — measured in single digits, if any. Left simple deliberately; if the fallback count turns out large, hoist the parse out of the loop.
+
+## Execution status (stopped 2026-09-15)
+
+Tasks 1-6 are complete and committed on `feat/og-verbal-extraction`; Task 7 is
+complete for the clean-text book and incomplete for the scans. Tasks 8-13 are
+not started. 55 unit tests pass, lint is clean, and the new files add no
+warnings.
+
+**Question recovery measured against the real books** (printed / parsed /
+five-choice / printed keys recovered):
+
+| Book | Printed | Parsed | 5-choice | Keys |
+|---|---|---|---|---|
+| OG12 RC | 139 | 139 | 100% | 139 |
+| OG12 CR | 124 | 124 | 100% | 124 |
+| OG13 RC | 139 | 136 | 99% | 111 |
+| OG13 CR | 124 | 122 | 86% | 0 — explanations are the only key source |
+| VR2 RC | 104 | 92 | 86% | 104 |
+| VR2 CR | 83 | 84 | 99% | 67 |
+
+**What the plan got wrong, corrected in the code:**
+
+- `--redo-ocr` is incompatible with `--deskew`; ocrmypdf refuses the pair and
+  exits at once. Piping the command into `tail` reports the pipe's status, so
+  the refusal looked like success. (Fixed in Task 2 above.)
+- Re-OCR is not uniformly better. On OG13 it took misread `(C)` labels from 418
+  lines to zero and glued words down to the clean-text baseline, but it
+  rasterized the answer-key tables into numbers with no letter column and lost
+  two thirds of the question numbers in the answer explanations. Neither layer
+  wins everywhere, so `scripts/og/select-source.js` — not in the original plan
+  — picks the layer per region by how well that region actually parses.
+- The `X.4` heading does not start the practice material: its
+  heading-and-directions block is emitted after the section's first passage
+  page, so question 1 precedes it in the text stream. Regions are bounded by
+  `X.3` and `X.5` instead.
+- The scans lose question numbers wholesale, so a strict run stopped at the
+  first gap and one question swallowed the rest of the section. The parser now
+  restarts a question on a second `(A)`, tries every plausible seed and keeps
+  the best parse, and falls back to segmenting on choice runs alone for a
+  section with no surviving numbers.
+
+**Next step if this resumes:** `parseExplanations` still segments on question
+numbers, so it recovers only 1 of 124 entries for OG13 CR and 3 of 104 for
+VR2 RC. It needs the same structural treatment the practice parser got —
+segment on the type-label plus A-E rationale block. This is load-bearing: the
+explanations are the only key source for OG13 CR, and they carry the type
+labels and review text. Task 8 onward assumes it.
+
+**Shippable today without that work:** OG12 alone — 263 questions, fully keyed
+from two agreeing sources, 100% five-choice, 100% type-labelled.
 
 ## Execution Handoff
 
