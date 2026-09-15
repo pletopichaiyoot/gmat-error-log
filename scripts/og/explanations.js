@@ -2,8 +2,17 @@
 // The answer-explanations region carries, per question: the question repeated,
 // an official type label, a reasoning block, one rationale per choice with
 // exactly one opening "Correct.", and usually a closing "The correct answer
-// is X." Those last two are two independent readings of the same key and must
-// agree. RC entries omit Situation/Reasoning and often the closing line.
+// is X." Those last two are two independent readings of the same key.
+//
+// Entries are segmented on the TYPE LABEL, not on question numbers. Measured
+// across the three books, labels survive the scans almost perfectly (124/124
+// for OG13 CR, 83/83 for VR2 CR) while question numbers do not — OG13's CR
+// explanations keep 97 of 124, VR2's RC 81 of 104 — so numbering was the wrong
+// thing to hang segmentation on.
+//
+// The scans also drop the letter in front of a rationale, leaving a bare
+// "Correct." (120 of OG13 CR's 124 entries). The letter is then recovered from
+// the rationale's position in the A-E run.
 //
 // The region also carries the RC passage grouping, which appears nowhere else:
 //   "Questions 1-3 refer to the passage on page 358."
@@ -31,6 +40,7 @@ const LABEL_ALIASES = new Map([
 ]);
 
 const LABEL_BY_KEY = new Map(TYPE_LABELS.map(l => [squash(l), l]));
+const LETTERS = ['A', 'B', 'C', 'D', 'E'];
 
 function canonicalTypeLabel(raw) {
   const line = String(raw).trim();
@@ -41,8 +51,8 @@ function canonicalTypeLabel(raw) {
 }
 
 const Q_START = /^(\d{1,3})\.\s+(?=\S)/;
-const CHOICE_START = /^\(([A-E])\)\s*/;
 const NOTE_START = /^([A-E])\s+(?=\S)/;
+const BARE_CORRECT = /^Correct\./i;
 const SITUATION = /^Situation\s+/;
 const REASONING = /^Reasoning\s+/;
 // "The correct answer is B." — OG12 sometimes loses every space in this line,
@@ -59,125 +69,154 @@ function joinParts(parts) {
   return s || null;
 }
 
-function parseExplanations(lines) {
-  const entries = [];
-  const passageRefs = [];
-  const warnings = [];
+function closingLetter(line) {
+  const m = line.match(CLOSING) || line.match(CLOSING_SQUASHED);
+  return m ? m[1].toUpperCase() : null;
+}
 
-  let cur = null;
-  let bucket = null;   // 'stem' | 'situation' | 'reasoning' | 'note'
+// The body of one entry: everything from its type label up to the next one.
+// Rationales run A-E in order, so a rationale whose letter the scan dropped
+// takes the next letter in the run; an explicit letter resyncs the position.
+function parseBody(lines, warnings, label) {
+  const out = {
+    situation: null, reasoning: null, choiceNotes: {},
+    markerKey: null, closingKey: null,
+  };
+  // RC entries print no "Reasoning" prefix — the prose runs straight on from
+  // the type label — so that is where unprefixed text goes by default.
+  let bucket = 'reasoning';
   let noteLetter = null;
   let parts = [];
+  let nextLetter = 0;
+  // A bare "Correct." only tells us WHICH rationale is right if the run's
+  // position is known. Without an explicit letter earlier in the entry,
+  // assuming it is the first would be a confidently wrong key.
+  let anchored = false;
 
-  const flushBucket = () => {
-    if (!cur || !bucket) return;
+  const flush = () => {
     const text = joinParts(parts);
-    if (bucket === 'situation') cur.situation = text;
-    else if (bucket === 'reasoning') cur.reasoning = joinParts([cur.reasoning || '', text || '']);
-    else if (bucket === 'note') cur.choiceNotes[noteLetter] = text;
+    if (bucket === 'situation') out.situation = text;
+    else if (bucket === 'reasoning') out.reasoning = joinParts([out.reasoning || '', text || '']);
+    else if (bucket === 'note' && noteLetter) out.choiceNotes[noteLetter] = text;
     parts = [];
   };
 
-  const flushEntry = () => {
-    if (!cur) return;
-    flushBucket();
-
-    const marked = Object.keys(cur.choiceNotes)
-      .filter(L => /^Correct\./i.test(cur.choiceNotes[L] || ''));
-    const markerKey = marked.length === 1 ? marked[0] : null;
-    if (marked.length > 1) {
-      warnings.push(`question ${cur.number}: ${marked.length} choices marked Correct.`);
-    }
-
-    const closingKey = cur.closingKey || null;
-    let key = null, keySource = null;
-    if (markerKey && closingKey) {
-      if (markerKey === closingKey) { key = markerKey; keySource = 'both'; }
-      else {
-        warnings.push(`question ${cur.number}: key sources disagree ` +
-          `(Correct. says ${markerKey}, closing line says ${closingKey})`);
-      }
-    } else if (markerKey) { key = markerKey; keySource = 'correct-marker'; }
-    else if (closingKey) { key = closingKey; keySource = 'closing-line'; }
-    else warnings.push(`question ${cur.number}: no key found in explanation`);
-
-    if (!cur.typeLabel) warnings.push(`question ${cur.number}: no type label`);
-
-    entries.push({
-      number: cur.number,
-      typeLabel: cur.typeLabel,
-      situation: cur.situation,
-      reasoning: cur.reasoning,
-      choiceNotes: cur.choiceNotes,
-      key,
-      keySource,
-    });
-    cur = null;
-    bucket = null;
+  const startNote = (letter, rest) => {
+    flush();
+    bucket = 'note';
+    noteLetter = letter;
+    nextLetter = LETTERS.indexOf(letter) + 1;
+    parts = [rest];
   };
 
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
 
-    const pref = line.match(PASSAGE_REF);
-    if (pref) {
-      passageRefs.push({
-        firstQuestion: Number(pref[1]),
-        lastQuestion: Number(pref[2]),
-        page: pref[3] ? Number(pref[3]) : null,
-      });
-      continue;
-    }
-
-    const qm = line.match(Q_START);
-    const expected = cur ? cur.number + 1 : null;
-    // Inside a rationale a sentence can start "1. "; only a number continuing
-    // the run opens the next entry.
-    if (qm && (cur === null || Number(qm[1]) === expected)) {
-      flushEntry();
-      cur = {
-        number: Number(qm[1]), typeLabel: null, situation: null,
-        reasoning: null, choiceNotes: {}, closingKey: null,
-      };
-      bucket = 'stem'; parts = [];
-      continue;
-    }
-    if (!cur) continue;
-
-    const cm = line.match(CLOSING) || line.match(CLOSING_SQUASHED);
-    if (cm) { flushBucket(); bucket = null; cur.closingKey = cm[1].toUpperCase(); continue; }
-
-    const label = canonicalTypeLabel(line);
-    if (label && !cur.typeLabel) {
-      flushBucket();
-      cur.typeLabel = label;
-      // RC runs its reasoning as plain prose straight after the label.
-      bucket = 'reasoning'; parts = [];
-      continue;
-    }
+    const close = closingLetter(line);
+    if (close) { flush(); bucket = null; out.closingKey = close; continue; }
 
     if (SITUATION.test(line)) {
-      flushBucket(); bucket = 'situation';
-      parts = [line.replace(SITUATION, '')]; continue;
+      flush(); bucket = 'situation'; parts = [line.replace(SITUATION, '')]; continue;
     }
     if (REASONING.test(line)) {
-      flushBucket(); bucket = 'reasoning'; cur.reasoning = null;
+      flush(); bucket = 'reasoning'; out.reasoning = null;
       parts = [line.replace(REASONING, '')]; continue;
     }
 
-    // Rationales only start once the type label has been seen; before that an
-    // "(A) ..." line is the question's own choice being repeated.
-    const nm = cur.typeLabel ? line.match(NOTE_START) : null;
-    if (nm) {
-      flushBucket(); bucket = 'note'; noteLetter = nm[1];
-      parts = [line.slice(nm[0].length)]; continue;
+    const nm = line.match(NOTE_START);
+    if (nm && LETTERS.includes(nm[1])) {
+      anchored = true;
+      startNote(nm[1], line.slice(nm[0].length));
+      continue;
+    }
+    if (BARE_CORRECT.test(line)) {
+      // The scan dropped this rationale's letter; take the next in the run,
+      // but only when an explicit letter has fixed where the run is.
+      const letter = anchored ? LETTERS[nextLetter] : null;
+      if (!letter) {
+        out.unanchoredCorrect = true;
+        parts.push(line);
+        continue;
+      }
+      startNote(letter, line);
+      continue;
     }
 
-    if (CHOICE_START.test(line) && !cur.typeLabel) { parts.push(line); continue; }
     parts.push(line);
   }
-  flushEntry();
+  flush();
+
+  const marked = LETTERS.filter(L => BARE_CORRECT.test(out.choiceNotes[L] || ''));
+  if (marked.length === 1) out.markerKey = marked[0];
+  else if (marked.length > 1) {
+    warnings.push(`${label}: ${marked.length} choices marked Correct.`);
+  }
+  return out;
+}
+
+function parseExplanations(lines) {
+  const entries = [];
+  const passageRefs = [];
+  const warnings = [];
+
+  // Passage references can sit anywhere in the region, so collect them first.
+  lines.forEach(raw => {
+    const m = raw.trim().match(PASSAGE_REF);
+    if (m) {
+      passageRefs.push({
+        firstQuestion: Number(m[1]),
+        lastQuestion: Number(m[2]),
+        page: m[3] ? Number(m[3]) : null,
+      });
+    }
+  });
+
+  const labelAt = lines.map(l => canonicalTypeLabel(l));
+  const labelIdx = [];
+  labelAt.forEach((l, i) => { if (l) labelIdx.push(i); });
+
+  for (let n = 0; n < labelIdx.length; n++) {
+    const at = labelIdx[n];
+    const end = n + 1 < labelIdx.length ? labelIdx[n + 1] : lines.length;
+    // Search back only as far as the previous entry's label, so one entry's
+    // number cannot be claimed by the next.
+    const lower = n === 0 ? 0 : labelIdx[n - 1] + 1;
+
+    // The question number, where the scan kept it, is the last numbered line
+    // before this entry's label — the head of the stem the label follows.
+    let number = null;
+    for (let i = at - 1; i >= lower; i--) {
+      const m = lines[i].trim().match(Q_START);
+      if (m) { number = Number(m[1]); break; }
+    }
+
+    const position = n + 1;
+    const label = `entry ${position}${number ? ` (printed ${number})` : ''}`;
+    const body = parseBody(lines.slice(at + 1, end), warnings, label);
+
+    let key = null, keySource = null;
+    if (body.markerKey && body.closingKey) {
+      if (body.markerKey === body.closingKey) { key = body.markerKey; keySource = 'both'; }
+      else {
+        warnings.push(`${label}: key sources disagree (Correct. says ` +
+          `${body.markerKey}, closing line says ${body.closingKey})`);
+      }
+    } else if (body.markerKey) { key = body.markerKey; keySource = 'correct-marker'; }
+    else if (body.closingKey) { key = body.closingKey; keySource = 'closing-line'; }
+    else warnings.push(`${label}: no key found in explanation`);
+
+    entries.push({
+      position,
+      number,
+      typeLabel: labelAt[at],
+      situation: body.situation,
+      reasoning: body.reasoning,
+      choiceNotes: body.choiceNotes,
+      key,
+      keySource,
+    });
+  }
 
   return { entries, passageRefs, warnings };
 }
