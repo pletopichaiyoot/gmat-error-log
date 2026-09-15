@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import PassageLines from './PassageLines';
+import { splitStem, tagsBalanced } from './lib/stemSplit.mjs';
 
 // GMAT Official Guide book practice (#og). Questions come from
 // data/gmat-og-questions.json through /api/og/*; only the answers are stored.
@@ -43,6 +44,41 @@ const IconCheck = () => (
 const IconNext = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
 );
+
+// A CR stem stores the argument and the question as one paragraph. StartTest
+// prints them apart, so split at the final sentence and give the prompt its own
+// line — the eye finds the task before re-reading the argument. RC stems are
+// prompt-only and pass through whole.
+//
+// Boldface stems carry <b> spans, and the split is blind to them: a span
+// crossing a sentence boundary would leave the tag unclosed in one paragraph.
+// Each piece is checked, and an unbalanced split falls back to the stem whole.
+function StemBlock({ question }) {
+  const html = question.stemHtml;
+  const split = question.kind !== 'RC';
+  if (!split) {
+    return html
+      ? <div className="lsat-st-stem" dangerouslySetInnerHTML={{ __html: html }} />
+      : <div className="lsat-st-stem">{question.stem}</div>;
+  }
+
+  const { stimulus, prompt } = splitStem(html || question.stem);
+  const pieces = [...stimulus, prompt];
+  if (html && (!prompt || !pieces.every(tagsBalanced))) {
+    return <div className="lsat-st-stem" dangerouslySetInnerHTML={{ __html: html }} />;
+  }
+
+  return (
+    <div className="lsat-st-stem">
+      {stimulus.map((para, i) => (html
+        ? <p key={i} className="lsat-st-stimulus" dangerouslySetInnerHTML={{ __html: para }} />
+        : <p key={i} className="lsat-st-stimulus">{para}</p>))}
+      {html
+        ? <p className="lsat-st-prompt" dangerouslySetInnerHTML={{ __html: prompt }} />
+        : <p className="lsat-st-prompt">{prompt}</p>}
+    </div>
+  );
+}
 
 // A multi-select chip row. An empty selection means "no constraint", which the
 // label says outright so the user is not left guessing.
@@ -126,15 +162,15 @@ function Builder({ onStart, onExit }) {
   }
 
   if (error && !library) {
-    return <div className="lsat-st-shell"><main className="lsat-st-body"><p className="og-error">{error}</p></main></div>;
+    return <div className="lsat-st-shell is-og"><main className="lsat-st-body"><p className="og-error">{error}</p></main></div>;
   }
   if (!library) {
-    return <div className="lsat-st-shell"><main className="lsat-st-body"><p className="muted">Loading the question pool…</p></main></div>;
+    return <div className="lsat-st-shell is-og"><main className="lsat-st-body"><p className="muted">Loading the question pool…</p></main></div>;
   }
 
   const lib = library.library;
   return (
-    <div className="lsat-st-shell">
+    <div className="lsat-st-shell is-og">
       <header className="lsat-st-topbar">
         <div className="lsat-st-topbar-left">
           <button type="button" className="lsat-st-icon-btn" onClick={onExit} aria-label="Exit to GMAT Dashboard" title="Exit"><IconBack /></button>
@@ -350,7 +386,7 @@ function Runner({ session, onFinish, onExit }) {
   const passage = q.passageId ? passageById.get(q.passageId) : null;
 
   return (
-    <div className="lsat-st-shell">
+    <div className="lsat-st-shell is-og">
       <header className="lsat-st-topbar">
         <div className="lsat-st-topbar-left">
           <button type="button" className="lsat-st-icon-btn" onClick={onExit} aria-label="Back to the set builder" title="Back to the set builder"><IconBack /></button>
@@ -394,9 +430,7 @@ function Runner({ session, onFinish, onExit }) {
             <span>Question {idx + 1} of {questions.length}</span>
             <span>{formatMs(qElapsed)}</span>
           </div>
-          {q.stemHtml
-            ? <div className="lsat-st-stem" dangerouslySetInnerHTML={{ __html: q.stemHtml }} />
-            : <div className="lsat-st-stem">{q.stem}</div>}
+          <StemBlock question={q} />
           {/* .lsat-st-choice is a two-column grid (18px for the control, 1fr for
               the text), so it needs BOTH children: with the span alone the text
               lands in the 18px column and wraps one word per line. A real radio
@@ -455,7 +489,7 @@ function Summary({ result, onAgain, onExit }) {
   const [openId, setOpenId] = useState(null);
 
   return (
-    <div className="lsat-st-shell">
+    <div className="lsat-st-shell is-og">
       <header className="lsat-st-topbar">
         <div className="lsat-st-topbar-left">
           <button type="button" className="lsat-st-icon-btn" onClick={onExit} aria-label="Exit to GMAT Dashboard" title="Exit"><IconBack /></button>
@@ -485,7 +519,7 @@ function Summary({ result, onAgain, onExit }) {
               </button>
               {open && (
                 <div className="og-summary-detail">
-                  <div className="lsat-st-stem">{q.stem}</div>
+                  <StemBlock question={q} />
                   {q.choices.map((c) => (
                     <p key={c.label} className={`og-exp-choice${f && c.label === f.correctAnswer ? ' is-correct' : ''}${a?.answer === c.label && f && !f.isCorrect ? ' is-picked' : ''}`}>
                       <b>{c.label}.</b> {c.text}

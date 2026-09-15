@@ -7534,3 +7534,14 @@ html {
 .difficulty-table .difficulty-detail-row > td:first-child { padding-left: 28px; }
 
 .og-chip:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* The OG runner lets the stem and choices use the full pane width.
+   .lsat-st-stem and .lsat-st-choices cap at 60ch for the LSAT surface, where a
+   passage carries gutter line numbers that questions cite and the narrow
+   measure keeps the two panes balanced. The OG books cite line numbers in their
+   explanations, not in the questions, so nothing here has to line up with the
+   passage — scoped to .is-og so the LSAT and AI Curated runners keep their cap. */
+.lsat-st-shell.is-og .lsat-st-stem,
+.lsat-st-shell.is-og .lsat-st-choices {
+  max-width: none;
+}
