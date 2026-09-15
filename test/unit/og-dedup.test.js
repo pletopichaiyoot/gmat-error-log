@@ -2,7 +2,7 @@
 /* global require */
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { fingerprint, dedupPool } = require('../../scripts/og/dedup');
+const { fingerprint, questionKey, dedupPool } = require('../../scripts/og/dedup');
 
 test('fingerprint ignores punctuation, case and spacing', () => {
   assert.equal(
@@ -16,6 +16,32 @@ test('fingerprint matches a stem whose scan glued its words', () => {
   assert.equal(
     fingerprint('The argument is concerned with what happens when people move.'),
     fingerprint('Theargumentisconcerned with whathappens whenpeople move.'));
+});
+
+test('a leading fragment from the scan does not hide a duplicate', () => {
+  // OG13's CR stems open with a fragment of the previous question, which
+  // shifts any prefix-based key. Anchoring on the stem's END survives it.
+  const clean = { stem: 'Homeowners aged 40 to 50 are more likely to purchase ice cream in larger amounts. Which of the following most weakens the argument?',
+    choices: [{ label: 'A', text: 'Ice cream is cheaper in summer.' }] };
+  const scanned = { stem: 'problem of water shortage Homeowners aged 40 to 50 are more likely to purchase ice cream in larger amounts. Which of the following most weakens the argument?',
+    choices: [{ label: 'A', text: 'Ice cream is cheaper in summer.' }] };
+  assert.equal(questionKey(clean), questionKey(scanned));
+});
+
+test('two questions sharing a boilerplate ending stay distinct', () => {
+  // Many CR stems end "which of the following most weakens the argument?" —
+  // the ending alone collided 16 times inside OG12 CR, so the first choice
+  // is part of the key.
+  const a = { stem: 'Kale has more nutritional value than spinach. Which of the following most weakens the argument?',
+    choices: [{ label: 'A', text: 'Collard greens are cheaper.' }] };
+  const b = { stem: 'Rainfall in Parland has declined. Which of the following most weakens the argument?',
+    choices: [{ label: 'A', text: 'Alligators prey on fish.' }] };
+  assert.notEqual(questionKey(a), questionKey(b));
+});
+
+test('a question with no choices falls back to its whole stem', () => {
+  const q = { stem: 'A stem with no choices at all.', choices: [] };
+  assert.equal(questionKey(q), fingerprint(q.stem));
 });
 
 test('fingerprint separates genuinely different stems', () => {

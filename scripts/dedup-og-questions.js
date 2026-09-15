@@ -6,6 +6,13 @@ const fs = require('fs');
 const path = require('path');
 const { dedupPool } = require('./og/dedup');
 
+// The design said to prefer the newer edition. The extraction reversed that:
+// OG12 has a native text layer and parses at 100% keyed with 100% five-choice,
+// while OG13's copies come from a scan whose stems open with a fragment of the
+// previous question. The two editions reprint the same questions, so the
+// cleaner rendering is the one worth keeping.
+const PREFER = ['OG12', 'OG13', 'VR2'];
+
 const FILE = path.join(__dirname, '..', 'data', 'gmat-og-questions.json');
 const dryRun = process.argv.includes('--dry-run');
 
@@ -14,7 +21,7 @@ const count = p => p.books.flatMap(b => b.sections.map(s =>
 
 const pool = JSON.parse(fs.readFileSync(FILE, 'utf-8'));
 const before = count(pool);
-const { pool: out, report } = dedupPool(pool, { prefer: ['OG13', 'OG12', 'VR2'] });
+const { pool: out, report } = dedupPool(pool, { prefer: PREFER });
 const after = count(out);
 
 console.log('before (total/usable):', before.join(' | '));

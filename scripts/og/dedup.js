@@ -8,11 +8,34 @@
 // Whitespace is dropped entirely, not just collapsed: the scanned editions
 // glue words together, so "the argument" and "theargument" are the same
 // question printed twice and must fingerprint alike.
+function normalize(text) {
+  return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
 function fingerprint(text) {
-  return String(text || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '')
-    .slice(0, 200);
+  return normalize(text).slice(0, 200);
+}
+
+// Matching one printing of a question to another has to survive what the scans
+// did to the text. Measured across the three books:
+//
+//  - OG13's CR stems open with a fragment of the previous question, so any
+//    key built from the START of the stem misses the duplicate.
+//  - Many CR stems END with the same boilerplate ("...most seriously weakens
+//    the argument above?"), which on its own collided 16 times inside OG12 CR
+//    and would have deleted distinct questions.
+//
+// The stem's tail plus the first choice satisfies both: zero collisions within
+// a book, 49 CR and 74 RC duplicates found across the two OG editions, and
+// zero false matches against Verbal Review 2e, which is a distinct pool.
+const KEY_STEM_TAIL = 40;
+const KEY_CHOICE_HEAD = 40;
+
+function questionKey(q) {
+  const first = q.choices && q.choices[0] ? q.choices[0].text : null;
+  if (!first) return fingerprint(q.stem);
+  // The TAIL of the whole stem, not of a truncated fingerprint.
+  return `${normalize(q.stem).slice(-KEY_STEM_TAIL)}|${normalize(first).slice(0, KEY_CHOICE_HEAD)}`;
 }
 
 function sectionsOf(pool, kind) {
@@ -42,7 +65,7 @@ function dedupPool(pool, { prefer }) {
     for (const { book, section } of crSections) {
       for (const q of section.questions) {
         if (Boolean(q.usable) !== pass || q.dropped) continue;
-        const fp = fingerprint(q.stem);
+        const fp = questionKey(q);
         const prior = crSeen.get(fp);
         if (prior) {
           prior.refs.push({ book: book.code, number: q.number });
@@ -85,4 +108,4 @@ function dedupPool(pool, { prefer }) {
   return { pool, report };
 }
 
-module.exports = { fingerprint, dedupPool };
+module.exports = { fingerprint, normalize, questionKey, dedupPool };
