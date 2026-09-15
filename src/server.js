@@ -76,6 +76,13 @@ const {
   isLsatDashboardId,
   updateLsatDashboardAnnotation,
 } = require('./lsat-dashboard');
+const {
+  listOgDashboardSessions,
+  listOgDashboardErrors,
+  getOgDashboardAnalysis,
+  isOgDashboardId,
+  updateOgDashboardAnnotation,
+} = require('./og-dashboard');
 const { ogPool, ogQuestion, ogLibrary } = require('./og-data');
 const { buildOgSet } = require('./og-set-builder');
 const { LlmConfigError, generatePerformanceReview, answerCoachQuestion } = require('./llm-coach-agent');
@@ -573,24 +580,28 @@ app.get('/api/sessions', async (req, res) => {
     const page = Math.max(1, Number(req.query.page || 1));
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
     const offset = (page - 1) * pageSize;
-    const platform = ['gmatclub', 'gmatclub-cat', 'starttest', 'ttp', 'ope-mock', 'lsat'].includes(req.query.platform) ? req.query.platform : null;
+    const platform = ['gmatclub', 'gmatclub-cat', 'starttest', 'ttp', 'ope-mock', 'lsat', 'og'].includes(req.query.platform) ? req.query.platform : null;
     const subject = ['Q', 'V', 'DI', 'RC', 'CR'].includes(String(req.query.subject || '').toUpperCase())
       ? String(req.query.subject).toUpperCase()
       : null;
     const startDate = /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate || '') ? req.query.startDate : null;
     const endDate = /^\d{4}-\d{2}-\d{2}$/.test(req.query.endDate || '') ? req.query.endDate : null;
 
-    // LSAT practice lives in separate tables and is merged in here as the "lsat"
-    // source. GMAT subjects are Q/V/DI; LSAT subjects are RC/CR — so a Q/V/DI
-    // subject filter excludes LSAT, and an RC/CR filter excludes GMAT.
-    const includeGmat = platform !== 'lsat' && !['RC', 'CR'].includes(subject);
+    // LSAT and OG book practice live in separate tables and are merged in here
+    // as their own sources. GMAT subjects are Q/V/DI; both practice tracks use
+    // RC/CR — so a Q/V/DI subject filter excludes them, and an RC/CR filter
+    // excludes GMAT.
+    const isPractice = ['lsat', 'og'].includes(platform);
+    const practiceSubject = ['RC', 'CR'].includes(subject) ? subject : null;
+    const includeGmat = !isPractice && !['RC', 'CR'].includes(subject);
     const includeLsat = (platform === null || platform === 'lsat') && !['Q', 'V', 'DI'].includes(subject);
+    const includeOg = (platform === null || platform === 'og') && !['Q', 'V', 'DI'].includes(subject);
 
     const gmatRows = includeGmat
       ? await listSessions(runId, {
           limit: 1000000,
           offset: 0,
-          platform: platform === 'lsat' ? null : platform,
+          platform: isPractice ? null : platform,
           subject: ['Q', 'V', 'DI'].includes(subject) ? subject : null,
           startDate,
           endDate,
@@ -598,10 +609,13 @@ app.get('/api/sessions', async (req, res) => {
         })
       : [];
     const lsatRows = includeLsat
-      ? await listLsatDashboardSessions({ subject: ['RC', 'CR'].includes(subject) ? subject : null, startDate, endDate })
+      ? await listLsatDashboardSessions({ subject: practiceSubject, startDate, endDate })
+      : [];
+    const ogRows = includeOg
+      ? await listOgDashboardSessions({ subject: practiceSubject, startDate, endDate })
       : [];
 
-    const merged = [...gmatRows, ...lsatRows].sort(
+    const merged = [...gmatRows, ...lsatRows, ...ogRows].sort(
       (a, b) => new Date(b.session_date || 0) - new Date(a.session_date || 0)
     );
     const total = merged.length;
@@ -633,6 +647,17 @@ app.get('/api/sessions/:sessionId/analysis', async (req, res) => {
       return;
     }
 
+    // OG book practice sessions carry a namespaced "og-<n>" id.
+    if (isOgDashboardId(rawId)) {
+      const ogAnalysis = await getOgDashboardAnalysis(rawId);
+      if (!ogAnalysis) {
+        res.status(404).json({ error: 'Session not found.' });
+        return;
+      }
+      res.json({ analysis: ogAnalysis });
+      return;
+    }
+
     const sessionId = Number(rawId);
     if (!Number.isInteger(sessionId) || sessionId <= 0) {
       res.status(400).json({ error: 'Invalid session id.' });
@@ -658,7 +683,7 @@ app.get('/api/errors', async (req, res) => {
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
     const offset = (page - 1) * pageSize;
 
-    const platform = ['gmatclub', 'gmatclub-cat', 'starttest', 'ttp', 'ope-mock', 'lsat'].includes(req.query.platform) ? req.query.platform : null;
+    const platform = ['gmatclub', 'gmatclub-cat', 'starttest', 'ttp', 'ope-mock', 'lsat', 'og'].includes(req.query.platform) ? req.query.platform : null;
     const subjectRaw = String(req.query.subject || '').toUpperCase();
     const categoryRaw = String(req.query.category || '').trim().toUpperCase();
     const topicRaw = String(req.query.topic || '').trim();
@@ -675,36 +700,45 @@ app.get('/api/errors', async (req, res) => {
       confidence: req.query.confidence || '',
       search,
       mistakeTag: req.query.mistakeTag || '',
-      // LSAT rows have no q_code/q_id to bookmark, so the flag also narrows the
-      // merge below to the GMAT side.
+      // Neither practice track has rows in question_attempts to bookmark, so the
+      // flag also narrows the merge below to the GMAT side.
       bookmarked: ['1', 'true', 'yes'].includes(String(req.query.bookmarked || '').toLowerCase()),
-      platform: platform === 'lsat' ? null : platform,
+      platform: ['lsat', 'og'].includes(platform) ? null : platform,
       sortKey,
       sortOrder,
       includeExcluded: wantsExcluded(req),
     };
 
-    // GMAT subjects are Q/V/DI; LSAT subjects are RC/CR. A Q/V/DI subject filter
-    // excludes LSAT errors; an RC/CR filter excludes GMAT errors.
-    const includeGmat = platform !== 'lsat' && !['RC', 'CR'].includes(subjectRaw);
+    // GMAT subjects are Q/V/DI; the LSAT and OG practice tracks use RC/CR. A
+    // Q/V/DI subject filter excludes them; an RC/CR filter excludes GMAT errors.
+    const isPractice = ['lsat', 'og'].includes(platform);
+    const practiceSubject = ['RC', 'CR'].includes(subjectRaw) ? subjectRaw : null;
+    const includeGmat = !isPractice && !['RC', 'CR'].includes(subjectRaw);
     const includeLsat = (platform === null || platform === 'lsat')
+      && !['Q', 'V', 'DI'].includes(subjectRaw)
+      && !filterOptions.bookmarked;
+    const includeOg = (platform === null || platform === 'og')
       && !['Q', 'V', 'DI'].includes(subjectRaw)
       && !filterOptions.bookmarked;
 
     const gmatRows = includeGmat
       ? await listErrors({ ...filterOptions, limit: 1000000, offset: 0 })
       : [];
-    // LSAT rows come from their own reader, which knows nothing about the
-    // GMAT category/subcategory taxonomy — so apply those two filters here
-    // rather than letting LSAT rows through unfiltered.
+    // The practice readers know nothing about the GMAT category/subcategory
+    // taxonomy, so apply those two filters here rather than letting their rows
+    // through unfiltered.
+    const byCategoryAndTopic = (row) =>
+      (!categoryRaw || String(row.category_code || '').toUpperCase() === categoryRaw)
+      && (!topicRaw || String(row.topic || '') === topicRaw);
     const lsatRows = includeLsat
-      ? (await listLsatDashboardErrors({ subject: ['RC', 'CR'].includes(subjectRaw) ? subjectRaw : null, search }))
-        .filter((row) => (!categoryRaw || String(row.category_code || '').toUpperCase() === categoryRaw)
-          && (!topicRaw || String(row.topic || '') === topicRaw))
+      ? (await listLsatDashboardErrors({ subject: practiceSubject, search })).filter(byCategoryAndTopic)
+      : [];
+    const ogRows = includeOg
+      ? (await listOgDashboardErrors({ subject: practiceSubject, search })).filter(byCategoryAndTopic)
       : [];
 
     const dir = sortOrder === 'asc' ? 1 : -1;
-    const merged = [...gmatRows, ...lsatRows].sort((a, b) => {
+    const merged = [...gmatRows, ...lsatRows, ...ogRows].sort((a, b) => {
       const av = a[sortKey];
       const bv = b[sortKey];
       const an = Number(av);
@@ -986,6 +1020,18 @@ app.patch('/api/errors/:errorId', async (req, res) => {
         return;
       }
       res.json({ ok: true, error: updatedLsat });
+      return;
+    }
+
+    // OG practice errors carry a namespaced "og-<attemptId>" id and live in
+    // og_attempts, so they need their own writer too.
+    if (isOgDashboardId(rawId)) {
+      const updatedOg = await updateOgDashboardAnnotation(rawId, annotation);
+      if (!updatedOg) {
+        res.status(404).json({ error: 'Question attempt not found.' });
+        return;
+      }
+      res.json({ ok: true, error: updatedOg });
       return;
     }
 
