@@ -323,6 +323,124 @@ async function lsatStats() {
   return { totals, byKind, byTest };
 }
 
+// ---------- GMAT OG book practice ----------
+// Mirrors the LSAT pair above. The question content lives in
+// data/gmat-og-questions.json, not in the database; question_id ('OG13-CR-56')
+// is the join key into that file.
+
+async function saveOgAttempt({ questionId, bookCode, kind, userAnswer, correctAnswer, confidence, timeMs, sessionId }) {
+  const corr = correctAnswer ? String(correctAnswer).toUpperCase() : null;
+  const isCorrect = corr == null ? null : (String(userAnswer).toUpperCase() === corr ? 1 : 0);
+  const conf = confidence ? String(confidence).toLowerCase() : null;
+  const tMs = Number.isFinite(Number(timeMs)) ? Math.max(0, Math.round(Number(timeMs))) : null;
+  const sId = Number.isFinite(Number(sessionId)) ? Number(sessionId) : null;
+  // Conflict resolution is per-(question, session): re-submitting within the
+  // same session updates the row; a NEW session creates a fresh history entry,
+  // which is what makes the seen / previously-wrong filters meaningful.
+  await run(
+    `INSERT INTO og_attempts (question_id, book_code, kind, user_answer, correct_answer, is_correct, confidence, time_ms, session_id, attempted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now())
+     ON CONFLICT(question_id, session_id) DO UPDATE SET
+       user_answer = excluded.user_answer,
+       correct_answer = excluded.correct_answer,
+       is_correct = excluded.is_correct,
+       confidence = excluded.confidence,
+       time_ms = excluded.time_ms,
+       attempted_at = now()`,
+    [String(questionId), String(bookCode), String(kind), String(userAnswer).toUpperCase(), corr, isCorrect, conf, tMs, sId]
+  );
+  return { isCorrect };
+}
+
+async function createOgSession({ setLabel, mode, filters, questionIds }) {
+  const ids = Array.isArray(questionIds) && questionIds.length ? JSON.stringify(questionIds) : null;
+  const payload = filters && typeof filters === 'object' ? JSON.stringify(filters) : null;
+  const result = await all(
+    `INSERT INTO og_sessions (set_label, mode, filters, question_ids)
+     VALUES (?, ?, ?, ?) RETURNING id`,
+    [setLabel || null, mode || null, payload, ids]
+  );
+  return { id: result[0].id };
+}
+
+async function completeOgSession(id) {
+  // Freeze the actually-answered questions as the session's contents, so History
+  // replays what was worked rather than what was planned.
+  const rows = await all(
+    'SELECT DISTINCT question_id FROM og_attempts WHERE session_id = ? ORDER BY question_id',
+    [id]
+  );
+  const ids = rows.map((r) => r.question_id);
+  await run('UPDATE og_sessions SET completed_at = now(), question_ids = ? WHERE id = ?', [JSON.stringify(ids), id]);
+  return { answeredCount: ids.length };
+}
+
+// og_sessions.filters and .question_ids are JSON stored as text. Parse both back
+// for callers; malformed text degrades to null rather than throwing the whole
+// session list out of the dashboard.
+function parseOgSessionRow(row) {
+  if (!row) return row;
+  const parse = (value) => {
+    if (!value) return null;
+    try { return JSON.parse(value); } catch (e) { return null; }
+  };
+  return { ...row, filters: parse(row.filters), question_ids: parse(row.question_ids) };
+}
+
+async function listOgSessions() {
+  const rows = await all('SELECT * FROM og_sessions ORDER BY started_at DESC');
+  return rows.map(parseOgSessionRow);
+}
+
+async function getOgSession(id) {
+  return parseOgSessionRow(await get('SELECT * FROM og_sessions WHERE id = ?', [id]));
+}
+
+async function listOgAttempts({ sessionId, latestOnly } = {}) {
+  if (latestOnly) {
+    // One row per question: the user's most recent answer. Feeds the builder's
+    // seen / previously-wrong filters.
+    return await all(`
+      SELECT a.* FROM og_attempts a
+      INNER JOIN (
+        SELECT question_id, MAX(attempted_at) AS latest_at
+        FROM og_attempts GROUP BY question_id
+      ) m ON a.question_id = m.question_id AND a.attempted_at = m.latest_at
+      ORDER BY a.question_id
+    `);
+  }
+  if (sessionId != null) {
+    return await all('SELECT * FROM og_attempts WHERE session_id = ? ORDER BY id', [sessionId]);
+  }
+  return await all('SELECT * FROM og_attempts ORDER BY attempted_at DESC');
+}
+
+async function listOgErrors({ limit = 200 } = {}) {
+  // Excludes unscored attempts (is_correct null), like the LSAT reader.
+  return await all(
+    'SELECT * FROM og_attempts WHERE is_correct = 0 ORDER BY attempted_at DESC LIMIT ?',
+    [limit]
+  );
+}
+
+// Same normalization as updateLsatAttemptAnnotation: mistakeType through the
+// shared canonicalizer, empty notes stored as NULL.
+async function updateOgAttemptAnnotation(attemptId, { mistakeType, notes }) {
+  const id = Number(attemptId);
+  if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid error id.');
+  const nextNotes = String(notes || '').trim();
+  const storedMistakeType = canonicalizeMistakeTypeValue(mistakeType);
+  await run('UPDATE og_attempts SET mistake_type = ?, notes = ? WHERE id = ?', [storedMistakeType, nextNotes || null, id]);
+  return get('SELECT id, mistake_type, notes FROM og_attempts WHERE id = ? LIMIT 1', [id]);
+}
+
+async function ogStats() {
+  const totals = await get('SELECT COUNT(*) AS n, SUM(is_correct) AS c FROM og_attempts');
+  const byKind = await all('SELECT kind, COUNT(*) AS n, SUM(is_correct) AS c FROM og_attempts GROUP BY kind');
+  const byBook = await all('SELECT book_code AS "bookCode", COUNT(*) AS n, SUM(is_correct) AS c FROM og_attempts GROUP BY book_code ORDER BY book_code');
+  return { totals, byKind, byBook };
+}
+
 function safeInt(value) {
   return Number.isFinite(Number(value)) ? Number(value) : null;
 }
@@ -5309,6 +5427,15 @@ module.exports = {
   updateLsatAttemptAnnotation,
   listLsatSessions,
   getLsatSession,
+  saveOgAttempt,
+  createOgSession,
+  completeOgSession,
+  listOgSessions,
+  getOgSession,
+  listOgAttempts,
+  listOgErrors,
+  updateOgAttemptAnnotation,
+  ogStats,
   // Study plan
   listStudyPlanTasks,
   getStudyPlanTask,
@@ -5336,5 +5463,5 @@ module.exports = {
   updateMockResult,
   deleteMockResult,
   seedMockResultsIfEmpty,
-  _sqlInternals: { platformWhereClause, normalizeAnswerChoicesForStorage, normalizeStimulusForStorage },
+  _sqlInternals: { platformWhereClause, normalizeAnswerChoicesForStorage, normalizeStimulusForStorage, parseOgSessionRow },
 };
