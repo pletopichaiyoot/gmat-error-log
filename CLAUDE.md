@@ -195,6 +195,211 @@ Result: 1,718 → 2,117 keyed (79.6%), all 2,117 verified against an independent
 
 **Frontend stem rendering.** LR stems are stored as one flat blob (stimulus + prompt). `splitLrStem()` / `<StemBlock>` in `client/src/LsatPractice.jsx` split them at the final sentence so the prompt gets its own line, and break dialogue stimuli into one paragraph per speaker. Sentence splitting is abbreviation-guarded (`Mr.`, `P.M.`) but deliberately does **not** treat a lone capital + period as an initial — LSAT stimuli end sentences on `… from Y.` far more often than they contain `J. Smith`, and that rule merged whole stems into one line.
 
+## GMAT OG verbal practice (PDF-extracted)
+
+Critical Reasoning and Reading Comprehension questions extracted from three
+Official Guide PDFs into **`data/gmat-og-questions.json`** (gitignored;
+`.bak-*` siblings are the rollback). Sentence Correction is out of scope — the
+Focus exam dropped it. **347 usable questions** (CR 166, RC 181), each with a verified answer
+key, a complete stem and choices, and an LLM difficulty rating; 273 also carry
+the book's question-type label and its full answer explanation. 260 of the 347
+come from OG12, whose native text layer is the only clean one.
+
+**The bar for `usable` is that the question is answerable.** A missing or
+dropped explanation does not disqualify it — 74 questions are keyed but
+unenriched. A defect in the passage, stem, choices or key does: those are
+excluded and carry the reason in `unusable`. The exclusion reasons, largest
+first: `unverifiable-key` 73, `stem-fragment` 50, `no-passage` 27,
+`truncated-choice` 13, `choices` 10, `no-key` 10, `blank-choice` 6,
+`key-disputed` 2, `lopsided-choice` 1.
+
+**Serve only `usable` questions**, and note that the extraction is deliberately
+harsher than a structural check: a question can have five choices and a
+double-confirmed key and still be unanswerable as rendered. Two whole classes
+were found that way, both by reading what the app actually shows:
+
+- **Boldface CR questions lose their emphasis.** 17 stems ask what "the portion
+  in boldface" does, and a flat text extraction drops font weight, leaving
+  undifferentiated prose. `scripts/extract-og-passages.py` reads the weight off
+  the page and writes `stemHtml`; the rest are dropped. See the boldface note
+  below.
+- **A cut choice reappears at the head of the next stem.** Where the two-column
+  scan cuts a choice at a column break, the part cut off lands in front of the
+  NEXT question's stem — so one break damages two questions. 97 stems were
+  affected, none of them in OG12. Two repairs run in order: the question's own
+  printed number, where it survived inside the stem, marks the true start and
+  the fragment before it is cut (38, `stemSource: 'renumbered'`); otherwise the
+  stem is taken whole from the copy the explanations reprint (28,
+  `stemSource: 'explanation'`). What neither recovers is dropped as
+  `stem-fragment`, some of it having no question in it at all.
+
+**The source PDFs in `docs/` are copyrighted and gitignored** (`/docs/*.pdf`,
+`/docs/ocr/`). This repo is public — never commit them.
+
+Pipeline, in order:
+
+| Step | Command |
+|---|---|
+| Parse questions, keys, explanations | `npm run og:parse` |
+| Attach RC passages (needs pdfplumber) | `npm run og:passages` |
+| Dedup across editions | `npm run og:dedup` |
+| Check acceptance criteria | `npm run og:verify` |
+| Rate difficulty (one LLM pass) | `node scripts/classify-og-difficulty.mjs` |
+
+Re-running `og:parse` overwrites the pool, so the later steps must follow it —
+except the difficulty ratings, which `scripts/og/carry-ratings.js` carries
+across a re-parse by question id, since that is the only step that costs money.
+
+**Difficulty is a rough RELATIVE ranking, not a calibrated measure.** The model
+estimates what share of a 655-705 cohort answers each question correctly, and
+the labels are tertiles of those estimates within a subject. Asked for Easy /
+Medium / Hard directly it compressed nearly everything into one bucket
+(319 of 448 at the time); asked for a percentage it still clusters in 72-82, and correlates
+only about 0.15-0.22 with printed question order, which the Official Guide
+arranges roughly easy-to-hard. Raising `reasoning.effort` to `high` made it
+slightly worse (0.187 against 0.219). `--relabel` re-cuts the buckets from the
+stored `difficulty_pct` for free, so cutoffs can be revisited without paying
+for the pass again.
+`scripts/extract-og-passages.py` needs `pdfplumber`, which is **not** in
+`package.json` (the repo is JS) — it lives in the user's pyenv Python 3.11.
+
+**Every answer key is derived twice** — from the book's printed key list and
+from the `Correct.` marker plus closing line in the answer explanations — and a
+disagreement leaves the question unkeyed and flagged rather than resolved. This
+is load-bearing, not belt-and-braces: **OG13's printed CR key (section 8.5) is
+a rotated table that OCR destroyed**, so the explanations are its only key
+source, and the cross-check is what caught 22 VR2 RC questions whose guessed
+numbers would otherwise have been silently mis-keyed.
+
+Every question carries a **`usable`** flag (and `unusable` reason when false)
+applying the curation rules in "Curating AI Curated Practice sets" below:
+non-empty stem, five choices all carrying text, an undisputed key, no choice
+several times the median length of its siblings, and for RC a passage. Serve
+only `usable` questions.
+
+### Source hazards, all handled in the parsers
+
+- **Neither text layer wins everywhere.** `ocrmypdf --redo-ocr` on the two
+  scanned books takes OG13's misread `(C)`-as-`(0` from 418 lines to zero, but
+  rasterizes its answer-key tables into numbers with no letters and loses two
+  thirds of the question numbers in the explanations. `scripts/og/select-source.js`
+  picks the layer per region by how well that region parses. **`--redo-ocr` is
+  incompatible with `--deskew`**, and piping ocrmypdf into `tail` hides the
+  refusal behind the pipe's exit status.
+- **The `X.4` heading is not where the practice material starts** — its
+  heading-and-directions block is emitted after the section's first passage
+  page, so question 1 precedes it. Regions run `X.3` → `X.5` → `X.6`.
+- **Every heading appears first in the table of contents**, where it is
+  followed by nothing but a page number. Contents lines are rejected on that,
+  and on being letterless (`8.3`, or key-table noise like `8. 39, 70. 101.`).
+- **Question numbers are lost wholesale by the scans.** Questions are segmented
+  on the choice run restarting at `(A)`, the seed is chosen by trying every
+  candidate and keeping the best parse, and a section with no surviving numbers
+  falls back to choice runs alone (`numberInferred`).
+- **Explanations segment on the type label, not the numbering** — labels
+  survive almost perfectly (124/124 for OG13 CR) where numbers do not. A
+  rationale whose letter the scan dropped takes its place in the A-E run, but
+  only when an explicit letter anchors it; otherwise only the closing line can
+  key it.
+- **A choice must stop at structural lines** (the next passage's "Questions N-M
+  refer" header, a `Line` caption, a gutter number, a bare page number) or the
+  last choice on an RC page swallows the footer, the next header and the
+  following passage entire — one OG12 choice reached 3,100 characters.
+- **Dedup cannot key on the start of a stem**: OG13's CR stems open with a
+  fragment of the previous question. The key is the stem's tail plus the first
+  choice — the tail alone collided 16 times inside OG12 CR. RC dedups per
+  passage so a shared passage takes its whole question group.
+- **pdfplumber splits ligature glyphs**, so "Official" arrives as "Offi cial".
+- **An explanation is only attached when it demonstrably reprints ITS question.**
+  The pairing is checked on the choice text — clean in both copies, where a
+  stem reconstructed from choice runs is not. This is load-bearing: OG13's CR
+  section has no printed key and mostly inferred numbering, so its explanations
+  were matched by a guess. Against OG12, which reprints 49 of the same
+  questions with double-confirmed keys, only 3 of its keys agreed and 4
+  disagreed. A section in that state — no printed key AND mostly inferred
+  numbering, so nothing cross-checks the pairing — is withheld entirely
+  (`unverifiable-key`); a wrong key is worse than none, because it marks a
+  correct answer wrong.
+- **A truncated choice is repaired from whichever reprint contains it.** The
+  explanations are indexed by their reprinted choice text, so the repair does
+  not depend on the number pairing — which is precisely what fails on the
+  sections needing repair most. Only the part that was cut off is taken: the
+  reprint often comes from a worse OCR pass ("plantsthat dowell"), so replacing
+  the whole choice would trade a cut for glued words. 65 questions recovered.
+- **The scans truncate a choice at a line break.** A choice ending on a
+  lower-case dangling function word with no terminal punctuation is the tell;
+  length alone is not, since "Size" and "evaluation of a problem" are real
+  options. This is the largest single exclusion reason — 67 questions.
+
+- **Boldface spans are found by their text, not by locating the question.**
+  Every page is scanned for runs of bold words, and each run is tested against
+  each boldface stem: a run of 20+ characters occurring exactly once in a stem
+  identifies both the page and the span. That needs no page offset, no column
+  ordering and no question number — none of which survive reliably in the
+  scanned books. **Expand ligatures before comparing**: the PDF spells "field"
+  as the two words "fi eld" where the text layer carries the ligature, and
+  without that one question matches nothing. Recovered: OG12 9 of 9, VR2 1 of 2,
+  OG13 0 of 7 (that section is withheld anyway). Each recovered stem carries
+  exactly as many `<b>` spans as its own wording claims.
+- **A fragment stem is recovered from the explanation reprint, found by its
+  CHOICES.** The explanations print each question in single-column flow, where
+  no column break could have spliced the previous question onto it. Matching on
+  choice text rather than on the number pairing is what makes this work on the
+  sections that need it, since their numbering is exactly what failed. The whole
+  stem is replaced, not just the head: the reprint comes from a worse OCR pass
+  ("ofthe", "inthe") and splicing two renderings mid-sentence is worse than
+  glued words — a stem with glued words is readable, a stem that opens in the
+  middle of the previous question's answer is not.
+
+**Two checks are ordered, not incidental.** `boldface-unmarked` is the LAST test
+in `unusableReason`, so the reason implies the question is otherwise sound —
+which is what lets `scripts/extract-og-passages.py` flip `usable` when it
+recovers the markup, instead of needing another parse. And `carry-ratings.js`
+carries `stemHtml` across a re-parse for the same reason it carries the
+difficulty ratings: the pass that produces it runs afterwards.
+
+`loadOgData()` in `server.js` will cache in-process like `loadLsatData`, so
+**restart the API after regenerating the file**.
+
+### The practice track
+
+The pool is served at `#og` (`client/src/GmatOgPractice.jsx`) through
+`/api/og/*`. Answers live in `og_attempts` / `og_sessions` (migration `0010`);
+question content never enters the database — `question_id` (`'OG13-RC-56'`) is
+the join key into the JSON file.
+
+| Module | Responsibility |
+|---|---|
+| `src/og-data.js` | cached reader + index over the pool; library facets. **Restart the API after regenerating the JSON.** |
+| `src/og-set-builder.js` | pure filter → question list. RC draws whole passages |
+| `src/og-dashboard.js` | OG rows → dashboard session/question shapes, `og-<id>` namespaced |
+
+Four things to know before changing any of it:
+
+- **The question payload the browser receives carries neither `correct` nor
+  `explanation`.** Both come back one answer at a time from
+  `POST /api/og/attempts`, which is what makes Timed mode's withheld
+  explanations actually withheld — one rationale in every explanation opens
+  with "Correct.", so shipping them with the questions would leak the whole key
+  list into the network tab.
+- **RC draws whole passages, so the delivered count is approximate.** A group
+  that would overshoot the requested count is skipped, not truncated; the
+  preview states the real count and the passage total. A type-label filter in RC
+  selects *passages containing* a match and still delivers the full group.
+- **Source labels must start `GMAT OG Book`.** `getSourcePlatform`
+  (`client/src/App.jsx`) classifies by substring and three StartTest presets are
+  already named "OG Verbal Review", "OG Quant Review" and "OG 2024-2025 Main" —
+  a bare "OG" in the label puts book practice on the StartTest chip.
+- **`og_attempts` is unique on (question_id, session_id)**, not on question:
+  redoing a question in a NEW session is the point of the seen / previously-wrong
+  filters, while re-submitting inside one session updates in place.
+
+OG rows merge into `/api/sessions` and `/api/errors` under `platform=og`, and
+their subjects are RC/CR — the same namespace the LSAT track uses, so a Q/V/DI
+filter excludes both practice tracks and an RC/CR filter excludes GMAT.
+Bookmarking is excluded for OG exactly as it is for LSAT: neither has rows in
+`question_attempts` for the bookmark join to hydrate.
+
 ## Key Patterns
 
 - **Database (PostgreSQL)**: Local PostgreSQL 16 in Docker (`pgvector/pgvector:pg16`, container `gmat-pg`, `docker-compose.yml`). Connection is env-driven via `DATABASE_URL`; bring the DB up with `npm run db:up` before starting the app. Schema lives in numbered SQL migrations (`migrations/*.sql`) applied by `npm run db:migrate` and tracked in `schema_migrations`. The original SQLite data was copied over once via the `scripts/migrate-sqlite-to-pg.js` ETL (`npm run db:etl`); the old `data/gmat-error-log.db` is retained as the rollback. Types modernized: timestamps are `timestamptz`, `session_external_id` is `bigint`, `session_date` is `date`; booleans kept as integer; JSON kept as text (jsonb deferred). Deferred follow-ups (not yet done): jsonb conversion, pgvector for coach embeddings, full-text search.

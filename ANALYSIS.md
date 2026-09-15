@@ -61,6 +61,8 @@ So "real errors" = `q.correct = 0 AND NOT (<unanswered placeholder>)`.
 
 **Source / platform filtering** uses a substring match — `LOWER(source) LIKE '%gmat club%'` for GMAT Club, the negation for StartTest. The frontend's `getSourcePlatform()` and the backend's `platformWhereClause()` both rely on this single convention, so don't invent your own (see CLAUDE.md "Source-platform identification").
 
+Two platforms are **not** in `question_attempts` at all and so never reach `platformWhereClause`: `lsat` (`lsat_attempts`) and `og` (`og_attempts`, the Official Guide book practice at `#og`). Their rows are read by `src/lsat-dashboard.js` and `src/og-dashboard.js` and merged into `/api/sessions` and `/api/errors` in the route handler. Both use the subjects **RC** and **CR**, so a `Q`/`V`/`DI` subject filter excludes them and an `RC`/`CR` filter excludes the GMAT sources. Neither can be combined with `bookmarked=1`, which only has rows to join on the GMAT side. Their ids are namespaced (`lsat-<n>`, `og-<n>`) — query them with SQL against their own tables, not `question_attempts`.
+
 **Subject inference is not just `q.subject_code`.** A long `CASE` chain in `listErrors` resolves subject from `category_code` → `cat_id` ranges → `subject_sub`/`subject_sub_raw` → topic-keyword fallback → `s.subject`. For ad-hoc subject grouping the simplified version is:
 
 ```sql
@@ -213,7 +215,7 @@ All endpoints are on `http://127.0.0.1:4310` and the Vite dev server proxies `/a
 | Method + Path | Notable params | Returns |
 |---|---|---|
 | `GET /api/runs?limit=N` | `limit` (default 20) | `{ runs: [...] }` — most recent first |
-| `GET /api/sessions` | `runId`, `page`, `pageSize`, `platform` (`gmatclub`\|`starttest`) | `{ sessions, total, page, pageSize, totalPages }` with per-difficulty accuracy + time aggregates already computed |
+| `GET /api/sessions` | `runId`, `page`, `pageSize`, `platform` (`gmatclub`\|`gmatclub-cat`\|`starttest`\|`ttp`\|`ope-mock`\|`lsat`\|`og`) | `{ sessions, total, page, pageSize, totalPages }` with per-difficulty accuracy + time aggregates already computed |
 | `GET /api/sessions/:id/analysis` | — | full session payload: header stats, per-question rows, per-topic and per-difficulty rollups |
 | `GET /api/errors` | `runId`, `subject` (`Q`\|`V`\|`DI` or full label), `difficulty`, `topic`, `confidence`, `search`, `mistakeTag`, `platform`, `sortKey` (`session_date`, `source`, `q_code`, `subject`, `difficulty`, `topic`, `time_sec`, `mistake_type`), `sortOrder`, `page`, `pageSize` | only `correct = 0` rows, with unanswered placeholders excluded |
 | `GET /api/patterns?runId=` | `runId` optional | recurring weak-topic / weak-subject / time-pressure rollups for the pattern view |

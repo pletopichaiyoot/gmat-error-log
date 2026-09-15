@@ -36,6 +36,14 @@ const {
   completeLsatSession,
   listLsatSessions,
   getLsatSession,
+  saveOgAttempt,
+  createOgSession,
+  completeOgSession,
+  listOgSessions,
+  getOgSession,
+  listOgAttempts,
+  listOgErrors,
+  ogStats,
   listStudyPlanTasks,
   getStudyPlanTask,
   createStudyPlanTask,
@@ -68,6 +76,15 @@ const {
   isLsatDashboardId,
   updateLsatDashboardAnnotation,
 } = require('./lsat-dashboard');
+const {
+  listOgDashboardSessions,
+  listOgDashboardErrors,
+  getOgDashboardAnalysis,
+  isOgDashboardId,
+  updateOgDashboardAnnotation,
+} = require('./og-dashboard');
+const { ogPool, ogQuestion, ogLibrary } = require('./og-data');
+const { buildOgSet } = require('./og-set-builder');
 const { LlmConfigError, generatePerformanceReview, answerCoachQuestion } = require('./llm-coach-agent');
 const { classifyScrapedQuestions } = require('./question-topic-classifier');
 const {
@@ -563,24 +580,28 @@ app.get('/api/sessions', async (req, res) => {
     const page = Math.max(1, Number(req.query.page || 1));
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
     const offset = (page - 1) * pageSize;
-    const platform = ['gmatclub', 'gmatclub-cat', 'starttest', 'ttp', 'ope-mock', 'lsat'].includes(req.query.platform) ? req.query.platform : null;
+    const platform = ['gmatclub', 'gmatclub-cat', 'starttest', 'ttp', 'ope-mock', 'lsat', 'og'].includes(req.query.platform) ? req.query.platform : null;
     const subject = ['Q', 'V', 'DI', 'RC', 'CR'].includes(String(req.query.subject || '').toUpperCase())
       ? String(req.query.subject).toUpperCase()
       : null;
     const startDate = /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate || '') ? req.query.startDate : null;
     const endDate = /^\d{4}-\d{2}-\d{2}$/.test(req.query.endDate || '') ? req.query.endDate : null;
 
-    // LSAT practice lives in separate tables and is merged in here as the "lsat"
-    // source. GMAT subjects are Q/V/DI; LSAT subjects are RC/CR — so a Q/V/DI
-    // subject filter excludes LSAT, and an RC/CR filter excludes GMAT.
-    const includeGmat = platform !== 'lsat' && !['RC', 'CR'].includes(subject);
+    // LSAT and OG book practice live in separate tables and are merged in here
+    // as their own sources. GMAT subjects are Q/V/DI; both practice tracks use
+    // RC/CR — so a Q/V/DI subject filter excludes them, and an RC/CR filter
+    // excludes GMAT.
+    const isPractice = ['lsat', 'og'].includes(platform);
+    const practiceSubject = ['RC', 'CR'].includes(subject) ? subject : null;
+    const includeGmat = !isPractice && !['RC', 'CR'].includes(subject);
     const includeLsat = (platform === null || platform === 'lsat') && !['Q', 'V', 'DI'].includes(subject);
+    const includeOg = (platform === null || platform === 'og') && !['Q', 'V', 'DI'].includes(subject);
 
     const gmatRows = includeGmat
       ? await listSessions(runId, {
           limit: 1000000,
           offset: 0,
-          platform: platform === 'lsat' ? null : platform,
+          platform: isPractice ? null : platform,
           subject: ['Q', 'V', 'DI'].includes(subject) ? subject : null,
           startDate,
           endDate,
@@ -588,10 +609,13 @@ app.get('/api/sessions', async (req, res) => {
         })
       : [];
     const lsatRows = includeLsat
-      ? await listLsatDashboardSessions({ subject: ['RC', 'CR'].includes(subject) ? subject : null, startDate, endDate })
+      ? await listLsatDashboardSessions({ subject: practiceSubject, startDate, endDate })
+      : [];
+    const ogRows = includeOg
+      ? await listOgDashboardSessions({ subject: practiceSubject, startDate, endDate })
       : [];
 
-    const merged = [...gmatRows, ...lsatRows].sort(
+    const merged = [...gmatRows, ...lsatRows, ...ogRows].sort(
       (a, b) => new Date(b.session_date || 0) - new Date(a.session_date || 0)
     );
     const total = merged.length;
@@ -623,6 +647,17 @@ app.get('/api/sessions/:sessionId/analysis', async (req, res) => {
       return;
     }
 
+    // OG book practice sessions carry a namespaced "og-<n>" id.
+    if (isOgDashboardId(rawId)) {
+      const ogAnalysis = await getOgDashboardAnalysis(rawId);
+      if (!ogAnalysis) {
+        res.status(404).json({ error: 'Session not found.' });
+        return;
+      }
+      res.json({ analysis: ogAnalysis });
+      return;
+    }
+
     const sessionId = Number(rawId);
     if (!Number.isInteger(sessionId) || sessionId <= 0) {
       res.status(400).json({ error: 'Invalid session id.' });
@@ -648,7 +683,7 @@ app.get('/api/errors', async (req, res) => {
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
     const offset = (page - 1) * pageSize;
 
-    const platform = ['gmatclub', 'gmatclub-cat', 'starttest', 'ttp', 'ope-mock', 'lsat'].includes(req.query.platform) ? req.query.platform : null;
+    const platform = ['gmatclub', 'gmatclub-cat', 'starttest', 'ttp', 'ope-mock', 'lsat', 'og'].includes(req.query.platform) ? req.query.platform : null;
     const subjectRaw = String(req.query.subject || '').toUpperCase();
     const categoryRaw = String(req.query.category || '').trim().toUpperCase();
     const topicRaw = String(req.query.topic || '').trim();
@@ -665,36 +700,45 @@ app.get('/api/errors', async (req, res) => {
       confidence: req.query.confidence || '',
       search,
       mistakeTag: req.query.mistakeTag || '',
-      // LSAT rows have no q_code/q_id to bookmark, so the flag also narrows the
-      // merge below to the GMAT side.
+      // Neither practice track has rows in question_attempts to bookmark, so the
+      // flag also narrows the merge below to the GMAT side.
       bookmarked: ['1', 'true', 'yes'].includes(String(req.query.bookmarked || '').toLowerCase()),
-      platform: platform === 'lsat' ? null : platform,
+      platform: ['lsat', 'og'].includes(platform) ? null : platform,
       sortKey,
       sortOrder,
       includeExcluded: wantsExcluded(req),
     };
 
-    // GMAT subjects are Q/V/DI; LSAT subjects are RC/CR. A Q/V/DI subject filter
-    // excludes LSAT errors; an RC/CR filter excludes GMAT errors.
-    const includeGmat = platform !== 'lsat' && !['RC', 'CR'].includes(subjectRaw);
+    // GMAT subjects are Q/V/DI; the LSAT and OG practice tracks use RC/CR. A
+    // Q/V/DI subject filter excludes them; an RC/CR filter excludes GMAT errors.
+    const isPractice = ['lsat', 'og'].includes(platform);
+    const practiceSubject = ['RC', 'CR'].includes(subjectRaw) ? subjectRaw : null;
+    const includeGmat = !isPractice && !['RC', 'CR'].includes(subjectRaw);
     const includeLsat = (platform === null || platform === 'lsat')
+      && !['Q', 'V', 'DI'].includes(subjectRaw)
+      && !filterOptions.bookmarked;
+    const includeOg = (platform === null || platform === 'og')
       && !['Q', 'V', 'DI'].includes(subjectRaw)
       && !filterOptions.bookmarked;
 
     const gmatRows = includeGmat
       ? await listErrors({ ...filterOptions, limit: 1000000, offset: 0 })
       : [];
-    // LSAT rows come from their own reader, which knows nothing about the
-    // GMAT category/subcategory taxonomy — so apply those two filters here
-    // rather than letting LSAT rows through unfiltered.
+    // The practice readers know nothing about the GMAT category/subcategory
+    // taxonomy, so apply those two filters here rather than letting their rows
+    // through unfiltered.
+    const byCategoryAndTopic = (row) =>
+      (!categoryRaw || String(row.category_code || '').toUpperCase() === categoryRaw)
+      && (!topicRaw || String(row.topic || '') === topicRaw);
     const lsatRows = includeLsat
-      ? (await listLsatDashboardErrors({ subject: ['RC', 'CR'].includes(subjectRaw) ? subjectRaw : null, search }))
-        .filter((row) => (!categoryRaw || String(row.category_code || '').toUpperCase() === categoryRaw)
-          && (!topicRaw || String(row.topic || '') === topicRaw))
+      ? (await listLsatDashboardErrors({ subject: practiceSubject, search })).filter(byCategoryAndTopic)
+      : [];
+    const ogRows = includeOg
+      ? (await listOgDashboardErrors({ subject: practiceSubject, search })).filter(byCategoryAndTopic)
       : [];
 
     const dir = sortOrder === 'asc' ? 1 : -1;
-    const merged = [...gmatRows, ...lsatRows].sort((a, b) => {
+    const merged = [...gmatRows, ...lsatRows, ...ogRows].sort((a, b) => {
       const av = a[sortKey];
       const bv = b[sortKey];
       const an = Number(av);
@@ -976,6 +1020,18 @@ app.patch('/api/errors/:errorId', async (req, res) => {
         return;
       }
       res.json({ ok: true, error: updatedLsat });
+      return;
+    }
+
+    // OG practice errors carry a namespaced "og-<attemptId>" id and live in
+    // og_attempts, so they need their own writer too.
+    if (isOgDashboardId(rawId)) {
+      const updatedOg = await updateOgDashboardAnnotation(rawId, annotation);
+      if (!updatedOg) {
+        res.status(404).json({ error: 'Question attempt not found.' });
+        return;
+      }
+      res.json({ ok: true, error: updatedOg });
       return;
     }
 
@@ -1899,6 +1955,199 @@ app.get('/api/lsat/stats', async (req, res) => {
   try {
     const stats = await lsatStats();
     res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- GMAT OG book practice endpoints ----------
+// Question content comes from data/gmat-og-questions.json through the cached
+// reader in src/og-data.js; only answers touch Postgres. Restart the API after
+// regenerating that file.
+
+// The shape sent to the browser. It deliberately omits BOTH `correct` and
+// `explanation`: the key and the book's rationale are handed back one question
+// at a time by POST /api/og/attempts, when they have been earned. Sending the
+// explanation with the question would undo Timed mode — one of its per-choice
+// rationales opens with "Correct.", so the whole key list would sit in the
+// network tab before the first answer.
+function ogQuestionPayload(q) {
+  return {
+    id: q.id,
+    number: q.number,
+    bookCode: q.bookCode,
+    bookTitle: q.bookTitle,
+    kind: q.kind,
+    stem: q.stem,
+    stemHtml: q.stemHtml || null,
+    choices: q.choices || [],
+    typeLabel: q.typeLabel || null,
+    difficulty: q.difficulty || null,
+    passageId: q.passageId || null,
+  };
+}
+
+// The user's attempt history as two id sets, for the unseen / previously-wrong
+// filters. Latest attempt per question: answering it right on a redo should take
+// it out of "previously wrong".
+async function ogHistory() {
+  const rows = await listOgAttempts({ latestOnly: true });
+  const attempted = new Set();
+  const wrong = new Set();
+  for (const r of rows) {
+    attempted.add(r.question_id);
+    if (r.is_correct === 0) wrong.add(r.question_id);
+  }
+  return { attempted, wrong };
+}
+
+app.get('/api/og/library', async (req, res) => {
+  try {
+    const history = await ogHistory();
+    res.json({
+      library: ogLibrary(),
+      history: { attempted: history.attempted.size, wrong: history.wrong.size },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Resolve filters to a question list for PREVIEW. Writes nothing — the builder
+// can say "18 questions across 5 passages" before the user commits.
+app.post('/api/og/build-set', async (req, res) => {
+  try {
+    const f = req.body?.filters || {};
+    const filters = {
+      books: Array.isArray(f.books) ? f.books : [],
+      kind: f.kind === 'RC' ? 'RC' : 'CR',
+      typeLabels: Array.isArray(f.typeLabels) ? f.typeLabels : [],
+      difficulties: Array.isArray(f.difficulties) ? f.difficulties : [],
+      historyMode: ['unseen', 'wrong'].includes(f.historyMode) ? f.historyMode : 'all',
+      count: Math.min(50, Math.max(1, Number(f.count) || 10)),
+    };
+    const pool = ogPool();
+    const set = buildOgSet({ pool, filters, history: await ogHistory() });
+    const questions = set.questionIds.map((id) => ogQuestionPayload(pool.byId.get(id)));
+    const passages = set.passageIds.map((pid) => pool.passages.get(pid)).filter(Boolean);
+    res.json({ set, filters, questions, passages });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/og/sessions', async (req, res) => {
+  try {
+    const questionIds = Array.isArray(req.body?.questionIds) ? req.body.questionIds.map(String) : [];
+    if (questionIds.length === 0) return res.status(400).json({ error: 'A session needs at least one question.' });
+    const pool = ogPool();
+    const unknown = questionIds.filter((id) => !pool.byId.has(id));
+    if (unknown.length) return res.status(400).json({ error: `Unknown question ids: ${unknown.slice(0, 3).join(', ')}` });
+    const result = await createOgSession({
+      setLabel: req.body?.setLabel || null,
+      mode: req.body?.mode === 'timed' ? 'timed' : 'practice',
+      filters: req.body?.filters || null,
+      questionIds,
+    });
+    res.json({ id: result.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/og/sessions/:id/complete', async (req, res) => {
+  try {
+    const result = await completeOgSession(Number(req.params.id));
+    res.json({ ok: true, answeredCount: result?.answeredCount ?? null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/og/sessions', async (req, res) => {
+  try {
+    res.json({ sessions: await listOgSessions() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// One session, rehydrated: the questions it holds (in stored order), their
+// passages, and what was answered. This is what "resume" and the review screen
+// both read.
+app.get('/api/og/sessions/:id', async (req, res) => {
+  try {
+    const session = await getOgSession(Number(req.params.id));
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    const pool = ogPool();
+    const ids = Array.isArray(session.question_ids) ? session.question_ids : [];
+    const questions = ids.map((id) => pool.byId.get(id)).filter(Boolean).map(ogQuestionPayload);
+    const passageIds = [...new Set(questions.map((q) => q.passageId).filter(Boolean))];
+    res.json({
+      session,
+      questions,
+      passages: passageIds.map((pid) => pool.passages.get(pid)).filter(Boolean),
+      attempts: await listOgAttempts({ sessionId: Number(req.params.id) }),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Grade one answer. The correct letter comes from the pool here, never from the
+// client, and this response is the only place it — and the book's explanation —
+// is revealed.
+app.post('/api/og/attempts', async (req, res) => {
+  try {
+    const { questionId, userAnswer, confidence, timeMs, sessionId } = req.body || {};
+    if (!questionId || !userAnswer) return res.status(400).json({ error: 'Missing required fields' });
+    const q = ogQuestion(questionId);
+    if (!q) return res.status(404).json({ error: 'Question not found' });
+    const result = await saveOgAttempt({
+      questionId: q.id,
+      bookCode: q.bookCode,
+      kind: q.kind,
+      userAnswer: String(userAnswer).toUpperCase(),
+      correctAnswer: q.correct,
+      confidence: confidence || null,
+      timeMs: timeMs != null ? Number(timeMs) : null,
+      sessionId: sessionId != null ? Number(sessionId) : null,
+    });
+    res.json({ ...result, correctAnswer: q.correct, explanation: q.explanation || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/og/attempts', async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId != null ? Number(req.query.sessionId) : null;
+    const latestOnly = req.query.latestOnly === 'true' || req.query.latestOnly === '1';
+    res.json({ attempts: await listOgAttempts({ sessionId, latestOnly }) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/og/errors', async (req, res) => {
+  try {
+    const limit = req.query.limit != null ? Math.min(500, Number(req.query.limit)) : 200;
+    const rows = await listOgErrors({ limit });
+    // The error log reviews questions already answered, so the explanation is no
+    // longer withheld here.
+    const enriched = rows.map((r) => {
+      const q = ogQuestion(r.question_id);
+      return { ...r, question: q ? { ...ogQuestionPayload(q), explanation: q.explanation || null } : null };
+    });
+    res.json({ errors: enriched });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/og/stats', async (req, res) => {
+  try {
+    res.json(await ogStats());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

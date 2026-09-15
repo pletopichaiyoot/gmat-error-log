@@ -36,6 +36,9 @@ coverage/
 /data/lsat-questions.json
 /data/ai-practice-sets/*.json
 /*.pdf
+/docs/*.pdf
+/docs/ocr/
+/data/gmat-og-questions.json*
 /*.ics
 /COACHING.md
 /MBA_APPLICATION_PLAN.md
