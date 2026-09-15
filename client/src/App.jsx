@@ -10,6 +10,7 @@ import PassageLines from './PassageLines';
 // The dashboard (default route) loads without them; they fetch on demand when
 // the user navigates to #lsat or #study-plan.
 const LsatPractice = lazy(() => import('./LsatPractice'));
+const GmatOgPractice = lazy(() => import('./GmatOgPractice'));
 const AiPractice = lazy(() => import('./AiPractice'));
 const StudyPlan = lazy(() => import('./StudyPlan'));
 
@@ -1236,6 +1237,10 @@ function getSourcePlatform(sourceLabel) {
   const raw = String(sourceLabel || '').trim();
   if (!raw) return null;
   if (/lsat/i.test(raw)) return 'lsat';
+  // Before the StartTest fallback, and specific enough not to catch the three
+  // StartTest presets already named "OG Verbal Review" / "OG Quant Review" /
+  // "OG 2024-2025 Main".
+  if (/gmat\s*og\s*book/i.test(raw)) return 'og';
   if (/ai\s*curated/i.test(raw)) return 'ai-curated';
   if (/gmat\s*club\s*cat/i.test(raw)) return 'gmatclub-cat';
   if (/gmat\s*club/i.test(raw)) return 'gmatclub';
@@ -1275,6 +1280,12 @@ function shortSourceLabel(source, platform) {
     return sec ? `TTP ${sec}` : 'Target Test Prep';
   }
   if (platform === 'lsat') return 'LSAT';
+  // `raw` has already had a leading "GMAT" stripped above, so match the
+  // remainder: "GMAT OG Book \u00b7 OG13" arrives here as "OG Book \u00b7 OG13".
+  if (platform === 'og') {
+    const book = raw.replace(/^OG\s*Book\s*\u00b7?\s*/i, '').trim();
+    return book ? `OG Book ${book}` : 'OG Book';
+  }
   if (platform === 'ai-curated') return 'AI Curated';
   if (platform === 'gmatclub-cat') return 'GMAT Club CAT';
   if (platform === 'gmatclub') return 'GMAT Club';
@@ -1671,6 +1682,7 @@ function FirstRunWelcome({
 
 function modeFromHash(hash) {
   if (hash === '#lsat') return 'lsat';
+  if (hash === '#og') return 'og';
   if (hash === '#ai-practice') return 'ai-practice';
   if (hash === '#study-plan' || hash === '#plan') return 'study-plan';
   return 'gmat';
@@ -3739,6 +3751,13 @@ function App() {
       </Suspense>
     );
   }
+  if (appMode === 'og') {
+    return (
+      <Suspense fallback={<RouteFallback />}>
+        <GmatOgPractice onExit={() => { window.location.hash = ''; }} />
+      </Suspense>
+    );
+  }
   if (appMode === 'ai-practice') {
     return (
       <Suspense fallback={<RouteFallback />}>
@@ -3789,6 +3808,9 @@ function App() {
           </Button>
           <Button variant="outline" size="sm" type="button" onClick={() => { window.location.hash = '#lsat'; }}>
             LSAT Practice
+          </Button>
+          <Button variant="outline" size="sm" type="button" onClick={() => { window.location.hash = '#og'; }}>
+            OG Book Practice
           </Button>
           <Button variant="outline" size="sm" type="button" onClick={() => { window.location.hash = '#ai-practice'; }}>
             AI Practice

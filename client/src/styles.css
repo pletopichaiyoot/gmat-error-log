@@ -1412,6 +1412,78 @@ th.sortable:hover {
   border: 1px solid rgba(61, 122, 94, 0.30);
 }
 
+/* GMAT OG book practice — its own chip so book practice is not read as one of
+   the seven StartTest "OG ..." products. Warm-paper tokens only. */
+.source-chip.source-og {
+  background: rgba(196, 168, 67, 0.16);
+  color: #7a6420;
+  border: 1px solid rgba(196, 168, 67, 0.38);
+}
+
+/* Set builder. The runner and summary reuse the shared .lsat-st-* test chrome. */
+.og-builder { display: block; padding: 20px 24px; overflow-y: auto; }
+.og-filter { margin-bottom: 18px; }
+.og-filter-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.og-filter-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.7; margin-bottom: 6px; }
+.og-filter-hint { text-transform: none; letter-spacing: 0; opacity: 0.6; }
+.og-chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.og-chip {
+  border: 1px solid var(--st-divider, rgba(0, 0, 0, 0.16));
+  background: transparent;
+  color: inherit;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.og-chip.is-on { background: rgba(61, 122, 94, 0.16); border-color: rgba(61, 122, 94, 0.5); }
+.og-chip-count { opacity: 0.55; margin-left: 6px; font-size: 11px; }
+.og-count-input {
+  width: 70px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--st-divider, rgba(0, 0, 0, 0.16));
+  background: transparent;
+  color: inherit;
+}
+.og-builder-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.og-preview-note { font-size: 13px; opacity: 0.85; }
+.og-error { color: #b3261e; font-size: 13px; }
+
+/* Explanation + end-of-set review */
+.og-explanation { margin-top: 14px; font-size: 14px; line-height: 1.55; }
+.og-explanation-missing { margin-top: 14px; font-size: 13px; opacity: 0.7; }
+.og-exp-choice { margin: 6px 0; padding-left: 10px; border-left: 3px solid transparent; }
+.og-exp-choice.is-correct { border-left-color: #3d7a5e; }
+.og-exp-choice.is-picked { border-left-color: #b3261e; }
+.og-verdict { margin-top: 14px; font-weight: 600; }
+.og-verdict.is-correct { color: #3d7a5e; }
+.og-verdict.is-wrong { color: #b3261e; }
+.og-timed-note { margin-top: 14px; font-size: 13px; opacity: 0.75; }
+.og-summary { display: block; padding: 16px 24px; overflow-y: auto; }
+.og-summary-row { border-bottom: 1px solid var(--st-divider, rgba(0, 0, 0, 0.12)); }
+.og-summary-head {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  padding: 10px 0;
+  cursor: pointer;
+}
+.og-summary-n { width: 24px; opacity: 0.6; }
+.og-summary-stem { flex: 1; }
+.og-summary-verdict { font-variant-numeric: tabular-nums; }
+.og-summary-row.is-correct .og-summary-verdict { color: #3d7a5e; }
+.og-summary-row.is-wrong .og-summary-verdict { color: #b3261e; }
+.og-summary-time { width: 56px; text-align: right; opacity: 0.6; font-variant-numeric: tabular-nums; }
+.og-summary-detail { padding: 6px 0 16px 36px; }
+
 /* AI Curated Practice — set list, runner, result. Warm-paper tokens only. */
 /* AI Curated Practice. Test chrome is shared with the LSAT surface (.lsat-st-*);
    these are the set-picker, result report, and shared button. Warm-paper tokens. */
@@ -7460,3 +7532,5 @@ html {
   letter-spacing: 0.01em;
 }
 .difficulty-table .difficulty-detail-row > td:first-child { padding-left: 28px; }
+
+.og-chip:disabled { opacity: 0.4; cursor: not-allowed; }
