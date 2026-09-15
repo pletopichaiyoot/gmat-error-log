@@ -19,6 +19,7 @@
     "db:etl": "node scripts/migrate-sqlite-to-pg.js",
     "db:verify": "node scripts/verify-schema-parity.js && node scripts/verify-migration.js",
     "reenrich": "node scripts/reenrich-degraded.js",
+    "og:parse": "node scripts/parse-og-pdf.js",
     "test": "node --test \"test/unit/*.test.js\""
   },
   "dependencies": {
