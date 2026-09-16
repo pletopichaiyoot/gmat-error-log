@@ -23,7 +23,8 @@
     "og:passages": "python3 scripts/extract-og-passages.py --merge",
     "og:dedup": "node scripts/dedup-og-questions.js",
     "og:verify": "node scripts/verify-og-pool.js",
-    "test": "node --test \"test/unit/*.test.js\""
+    "test": "node --test \"test/unit/*.test.js\"",
+    "og:types": "node scripts/classify-og-types.mjs --merge"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

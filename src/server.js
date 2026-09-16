@@ -1982,6 +1982,7 @@ function ogQuestionPayload(q) {
     stemHtml: q.stemHtml || null,
     choices: q.choices || [],
     typeLabel: q.typeLabel || null,
+    questionType: q.questionType || null,
     difficulty: q.difficulty || null,
     passageId: q.passageId || null,
   };
@@ -2022,6 +2023,7 @@ app.post('/api/og/build-set', async (req, res) => {
       books: Array.isArray(f.books) ? f.books : [],
       kind: f.kind === 'RC' ? 'RC' : 'CR',
       typeLabels: Array.isArray(f.typeLabels) ? f.typeLabels : [],
+      questionTypes: Array.isArray(f.questionTypes) ? f.questionTypes : [],
       difficulties: Array.isArray(f.difficulties) ? f.difficulties : [],
       historyMode: ['unseen', 'wrong'].includes(f.historyMode) ? f.historyMode : 'all',
       count: Math.min(50, Math.max(1, Number(f.count) || 10)),

@@ -200,18 +200,19 @@ Result: 1,718 → 2,117 keyed (79.6%), all 2,117 verified against an independent
 Critical Reasoning and Reading Comprehension questions extracted from three
 Official Guide PDFs into **`data/gmat-og-questions.json`** (gitignored;
 `.bak-*` siblings are the rollback). Sentence Correction is out of scope — the
-Focus exam dropped it. **347 usable questions** (CR 166, RC 181), each with a verified answer
-key, a complete stem and choices, and an LLM difficulty rating; 273 also carry
-the book's question-type label and its full answer explanation. 260 of the 347
-come from OG12, whose native text layer is the only clean one.
+Focus exam dropped it. **344 usable questions** (CR 165, RC 179), each with a verified answer
+key, a complete stem and choices, an LLM difficulty rating and — for 324 of them
+— a derived question type; 271 also carry the book's own question-type label and
+its full answer explanation. 260 of the 344 come from OG12, whose native text
+layer is the only clean one.
 
 **The bar for `usable` is that the question is answerable.** A missing or
 dropped explanation does not disqualify it — 74 questions are keyed but
 unenriched. A defect in the passage, stem, choices or key does: those are
 excluded and carry the reason in `unusable`. The exclusion reasons, largest
-first: `unverifiable-key` 73, `stem-fragment` 50, `no-passage` 27,
-`truncated-choice` 13, `choices` 10, `no-key` 10, `blank-choice` 6,
-`key-disputed` 2, `lopsided-choice` 1.
+first: `unverifiable-key` 73, `stem-fragment` 35, `no-passage` 27,
+`stem-junk` 20, `truncated-choice` 13, `no-key` 9, `choices` 9,
+`blank-choice` 6, `key-disputed` 2, `lopsided-choice` 1.
 
 **Serve only `usable` questions**, and note that the extraction is deliberately
 harsher than a structural check: a question can have five choices and a
@@ -232,6 +233,40 @@ were found that way, both by reading what the app actually shows:
   stem is taken whole from the copy the explanations reprint (28,
   `stemSource: 'explanation'`). What neither recovers is dropped as
   `stem-fragment`, some of it having no question in it at all.
+- **Page furniture lands inside stems.** The directions block gets carried onto
+  the end of a stem, the running head turns up mid-stem, and a page number is
+  spliced between two sentences where the scan ran two columns together
+  ("…will very likely be unemployed. 507 Sharon's argument relies on…"). The
+  directions and the page numbers are cut, since the question in front of them
+  is sound; a stem carrying a running head is dropped (`stem-junk`), because
+  those have all turned out to be the previous question's answer choices rather
+  than a question.
+
+### The derived question type
+
+The Official Guide prints its own label ("Argument Construction", "Supporting
+ideas"), but those buckets are too coarse to drill against — one covers
+assumption, conclusion and paradox questions alike — and a third of the pool
+carries no label at all, because the explanation that would have supplied it was
+dropped. `client/src/lib/questionType.mjs` derives the type a test-taker would
+recognise (Assumption, Strengthen, Weaken, Evaluate, Inference, Paradox, Flaw,
+Method, Boldface, Complete the Passage; Main Idea, Detail, Inference, Function,
+Application, Tone, Vocabulary, Weaken for RC) and `npm run og:types` writes it
+back as `questionType`. **Both are kept**: the builder filters on either, and
+the runner shows the derived type with the OG label beside it.
+
+It is a rule table over the stem's PROMPT, not the whole stem — the argument
+routinely contains "weakens" or "assumption" and would decide the type wrongly.
+The prompt comes from `splitStem` (`client/src/lib/stemSplit.mjs`), the same
+split that gives the runner its own line for the question.
+
+Deterministic and free, so it re-runs with every parse and needs no model. Two
+scan artifacts have to be handled or coverage collapses: **ligatures** are
+expanded first (`chieﬂy`, `ﬁrst`, `deﬁned` match nothing otherwise — worth eight
+points on RC alone), and every pattern is retried with its spaces made optional,
+because the scans glue words together (`primarilyconcerned`). Coverage is **94%
+on both subjects**; the rest keep an `(unclassified)` bucket that stays
+selectable rather than being guessed at.
 
 **The source PDFs in `docs/` are copyrighted and gitignored** (`/docs/*.pdf`,
 `/docs/ocr/`). This repo is public — never commit them.
@@ -241,8 +276,9 @@ Pipeline, in order:
 | Step | Command |
 |---|---|
 | Parse questions, keys, explanations | `npm run og:parse` |
-| Attach RC passages (needs pdfplumber) | `npm run og:passages` |
+| Attach RC passages + CR boldface (needs pdfplumber) | `npm run og:passages` |
 | Dedup across editions | `npm run og:dedup` |
+| Derive the question type | `npm run og:types` |
 | Check acceptance criteria | `npm run og:verify` |
 | Rate difficulty (one LLM pass) | `node scripts/classify-og-difficulty.mjs` |
 
@@ -382,6 +418,12 @@ Four things to know before changing any of it:
   explanations actually withheld — one rationale in every explanation opens
   with "Correct.", so shipping them with the questions would leak the whole key
   list into the network tab.
+- **Two type axes, not one.** `Question type` is the derived one and `OG label`
+  is the book's own; `src/og-data.js` carries a `QUESTION_TYPE_ORDER` copy of the
+  rule order so the chips read as a taxonomy rather than alphabetically. It is a
+  plain list rather than an import because that module is ESM and the reader is
+  loaded synchronously — a drifting list only mis-sorts chips, where a drifting
+  rule table would mis-label questions.
 - **RC draws whole passages, so the delivered count is approximate.** A group
   that would overshoot the requested count is skipped, not truncated; the
   preview states the real count and the passage total. A type-label filter in RC

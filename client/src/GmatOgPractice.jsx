@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import PassageLines from './PassageLines';
+import { splitStem, tagsBalanced } from './lib/stemSplit.mjs';
 
 // GMAT Official Guide book practice (#og). Questions come from
 // data/gmat-og-questions.json through /api/og/*; only the answers are stored.
@@ -44,6 +45,41 @@ const IconNext = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
 );
 
+// A CR stem stores the argument and the question as one paragraph. StartTest
+// prints them apart, so split at the final sentence and give the prompt its own
+// line — the eye finds the task before re-reading the argument. RC stems are
+// prompt-only and pass through whole.
+//
+// Boldface stems carry <b> spans, and the split is blind to them: a span
+// crossing a sentence boundary would leave the tag unclosed in one paragraph.
+// Each piece is checked, and an unbalanced split falls back to the stem whole.
+function StemBlock({ question }) {
+  const html = question.stemHtml;
+  const split = question.kind !== 'RC';
+  if (!split) {
+    return html
+      ? <div className="lsat-st-stem" dangerouslySetInnerHTML={{ __html: html }} />
+      : <div className="lsat-st-stem">{question.stem}</div>;
+  }
+
+  const { stimulus, prompt } = splitStem(html || question.stem);
+  const pieces = [...stimulus, prompt];
+  if (html && (!prompt || !pieces.every(tagsBalanced))) {
+    return <div className="lsat-st-stem" dangerouslySetInnerHTML={{ __html: html }} />;
+  }
+
+  return (
+    <div className="lsat-st-stem">
+      {stimulus.map((para, i) => (html
+        ? <p key={i} className="lsat-st-stimulus" dangerouslySetInnerHTML={{ __html: para }} />
+        : <p key={i} className="lsat-st-stimulus">{para}</p>))}
+      {html
+        ? <p className="lsat-st-prompt" dangerouslySetInnerHTML={{ __html: prompt }} />
+        : <p className="lsat-st-prompt">{prompt}</p>}
+    </div>
+  );
+}
+
 // A multi-select chip row. An empty selection means "no constraint", which the
 // label says outright so the user is not left guessing.
 function ChipMulti({ label, options, selected, onToggle }) {
@@ -77,6 +113,7 @@ function Builder({ onStart, onExit }) {
   const [kind, setKind] = useState('CR');
   const [books, setBooks] = useState([]);
   const [typeLabels, setTypeLabels] = useState([]);
+  const [questionTypes, setQuestionTypes] = useState([]);
   const [difficulties, setDifficulties] = useState([]);
   const [historyMode, setHistoryMode] = useState('all');
   const [count, setCount] = useState(10);
@@ -90,9 +127,9 @@ function Builder({ onStart, onExit }) {
 
   // Switching subject invalidates the type-label selection: the two subjects'
   // label vocabularies do not overlap.
-  useEffect(() => { setTypeLabels([]); setPreview(null); }, [kind]);
+  useEffect(() => { setTypeLabels([]); setQuestionTypes([]); setPreview(null); }, [kind]);
 
-  const filters = { books, kind, typeLabels, difficulties, historyMode, count: Number(count) || 10 };
+  const filters = { books, kind, typeLabels, questionTypes, difficulties, historyMode, count: Number(count) || 10 };
 
   const runPreview = useCallback(async () => {
     setBusy(true);
@@ -105,7 +142,7 @@ function Builder({ onStart, onExit }) {
     }
     setBusy(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [books, kind, typeLabels, difficulties, historyMode, count]);
+  }, [books, kind, typeLabels, questionTypes, difficulties, historyMode, count]);
 
   const toggle = (setter, list) => (value) =>
     setter(list.includes(value) ? list.filter((x) => x !== value) : [...list, value]);
@@ -126,15 +163,15 @@ function Builder({ onStart, onExit }) {
   }
 
   if (error && !library) {
-    return <div className="lsat-st-shell"><main className="lsat-st-body"><p className="og-error">{error}</p></main></div>;
+    return <div className="lsat-st-shell is-og"><main className="lsat-st-body"><p className="og-error">{error}</p></main></div>;
   }
   if (!library) {
-    return <div className="lsat-st-shell"><main className="lsat-st-body"><p className="muted">Loading the question pool…</p></main></div>;
+    return <div className="lsat-st-shell is-og"><main className="lsat-st-body"><p className="muted">Loading the question pool…</p></main></div>;
   }
 
   const lib = library.library;
   return (
-    <div className="lsat-st-shell">
+    <div className="lsat-st-shell is-og">
       <header className="lsat-st-topbar">
         <div className="lsat-st-topbar-left">
           <button type="button" className="lsat-st-icon-btn" onClick={onExit} aria-label="Exit to GMAT Dashboard" title="Exit"><IconBack /></button>
@@ -165,7 +202,12 @@ function Builder({ onStart, onExit }) {
           selected={books}
           onToggle={toggle(setBooks, books)}
         />
-        <ChipMulti label="Question type" options={lib.typeLabels[kind]} selected={typeLabels} onToggle={toggle(setTypeLabels, typeLabels)} />
+        {/* Two type axes on purpose. "Question type" is derived from the
+            prompt and is what you would drill by; "OG label" is the book's own
+            classification, authoritative but coarse — one of its buckets covers
+            assumption, conclusion and paradox alike. */}
+        <ChipMulti label="Question type" options={lib.questionTypes[kind]} selected={questionTypes} onToggle={toggle(setQuestionTypes, questionTypes)} />
+        <ChipMulti label="OG label" options={lib.typeLabels[kind]} selected={typeLabels} onToggle={toggle(setTypeLabels, typeLabels)} />
         <ChipMulti label="Difficulty" options={lib.difficulties[kind]} selected={difficulties} onToggle={toggle(setDifficulties, difficulties)} />
 
         <div className="og-filter">
@@ -350,14 +392,17 @@ function Runner({ session, onFinish, onExit }) {
   const passage = q.passageId ? passageById.get(q.passageId) : null;
 
   return (
-    <div className="lsat-st-shell">
+    <div className="lsat-st-shell is-og">
       <header className="lsat-st-topbar">
         <div className="lsat-st-topbar-left">
           <button type="button" className="lsat-st-icon-btn" onClick={onExit} aria-label="Back to the set builder" title="Back to the set builder"><IconBack /></button>
           <span className="lsat-st-section-label">{label}</span>
         </div>
         <div className="lsat-st-topbar-right">
-          <span className="lsat-st-set-meta">{q.bookCode} · {q.typeLabel || q.kind} · {q.difficulty || 'Unrated'} · {isTimed ? 'Timed' : 'Practice'}</span>
+          <span className="lsat-st-set-meta">
+            {q.bookCode} · {q.questionType || q.kind}
+            {q.typeLabel ? ` · ${q.typeLabel}` : ''} · {q.difficulty || 'Unrated'} · {isTimed ? 'Timed' : 'Practice'}
+          </span>
           <button type="button" className="lsat-st-finish-btn" onClick={finish} title="End now and review what was answered">End Session</button>
         </div>
       </header>
@@ -394,26 +439,33 @@ function Runner({ session, onFinish, onExit }) {
             <span>Question {idx + 1} of {questions.length}</span>
             <span>{formatMs(qElapsed)}</span>
           </div>
-          {q.stemHtml
-            ? <div className="lsat-st-stem" dangerouslySetInnerHTML={{ __html: q.stemHtml }} />
-            : <div className="lsat-st-stem">{q.stem}</div>}
-          <div className="lsat-st-choices" role="radiogroup" aria-label="Answer choices">
+          <StemBlock question={q} />
+          {/* .lsat-st-choice is a two-column grid (18px for the control, 1fr for
+              the text), so it needs BOTH children: with the span alone the text
+              lands in the 18px column and wraps one word per line. A real radio
+              in a label also beats role="radio" on a button for keyboard and
+              screen-reader behaviour. */}
+          <div className="lsat-st-choices">
             {q.choices.map((c) => {
               const isPick = chosen === c.label;
               const isKey = revealed && fb.correctAnswer === c.label;
               const isWrongPick = revealed && isPick && !fb.isCorrect;
+              let cls = 'lsat-st-choice';
+              if (isKey) cls += ' is-correct';
+              else if (isWrongPick) cls += ' is-wrong';
+              else if (submitted && isPick) cls += ' is-locked';
               return (
-                <button
-                  key={c.label}
-                  type="button"
-                  role="radio"
-                  aria-checked={isPick}
-                  className={`lsat-st-choice${isPick ? ' is-picked' : ''}${isKey ? ' is-correct' : ''}${isWrongPick ? ' is-wrong' : ''}`}
-                  onClick={() => pick(c.label)}
-                  disabled={submitted}
-                >
-                  <span className="lsat-st-choice-text"><b>{c.label}.</b> {c.text}</span>
-                </button>
+                <label key={c.label} className={cls} data-disabled={submitted ? 'true' : undefined}>
+                  <input
+                    type="radio"
+                    name={`og-q-${q.id}`}
+                    value={c.label}
+                    checked={isPick}
+                    disabled={submitted}
+                    onChange={() => pick(c.label)}
+                  />
+                  <span className="lsat-st-choice-text"><b className="ai-choice-letter">{c.label}.</b> {c.text}</span>
+                </label>
               );
             })}
           </div>
@@ -446,7 +498,7 @@ function Summary({ result, onAgain, onExit }) {
   const [openId, setOpenId] = useState(null);
 
   return (
-    <div className="lsat-st-shell">
+    <div className="lsat-st-shell is-og">
       <header className="lsat-st-topbar">
         <div className="lsat-st-topbar-left">
           <button type="button" className="lsat-st-icon-btn" onClick={onExit} aria-label="Exit to GMAT Dashboard" title="Exit"><IconBack /></button>
@@ -476,7 +528,7 @@ function Summary({ result, onAgain, onExit }) {
               </button>
               {open && (
                 <div className="og-summary-detail">
-                  <div className="lsat-st-stem">{q.stem}</div>
+                  <StemBlock question={q} />
                   {q.choices.map((c) => (
                     <p key={c.label} className={`og-exp-choice${f && c.label === f.correctAnswer ? ' is-correct' : ''}${a?.answer === c.label && f && !f.isCorrect ? ' is-picked' : ''}`}>
                       <b>{c.label}.</b> {c.text}

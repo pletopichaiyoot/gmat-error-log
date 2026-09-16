@@ -14,6 +14,7 @@
 //    the caller reports the real one.
 
 const UNLABELED = '(unlabeled)';
+const UNCLASSIFIED = '(unclassified)';
 
 // Fisher-Yates against an injectable rng, so a test can fix the order.
 function shuffle(items, rng) {
@@ -40,6 +41,7 @@ function matchesHistory(mode, id, history) {
 // than one question.
 function matchesQuestion(q, filters, history) {
   return matchesAxis(filters.typeLabels, q.typeLabel || UNLABELED)
+    && matchesAxis(filters.questionTypes, q.questionType || UNCLASSIFIED)
     && matchesAxis(filters.difficulties, q.difficulty || UNLABELED)
     && matchesHistory(filters.historyMode, q.id, history);
 }
@@ -105,4 +107,4 @@ function buildOgSet({ pool, filters, history, rng = Math.random }) {
   };
 }
 
-module.exports = { buildOgSet, UNLABELED };
+module.exports = { buildOgSet, UNLABELED, UNCLASSIFIED };

@@ -249,6 +249,49 @@ function repairStem(stem, number) {
   return cut > 0 ? text.slice(cut).trim() : text;
 }
 
+// The section's directions get printed once per page and the parser sometimes
+// carries them onto the end of a stem. They always start on one of these
+// phrases and run to the end, so the question in front of them survives the cut.
+const DIRECTIONS_TAIL = /\s*(?:Each of the critical reasoning questions is based|The questions in this group are based|Each of the reading comprehension questions|For each question,? select the best answer)[\s\S]*$/i;
+
+// The running head belongs to the page, never to a question. Unlike the
+// directions it turns up mid-stem as often as at the end, and the stems
+// carrying it have turned out to be the previous question's answer choices
+// rather than a question — so this is a drop, not a cut.
+const RUNNING_HEAD = /Of.?.?icial Guide for GMAT|Verbal Review,? ?2nd Edition|Review \d+th Edition/i;
+
+// A number stranded at the head of a stem: the page number ("120 Large national
+// budget deficits…"), or the question's own printed number that the fragment
+// repair did not reach. Restricted to a bare three-digit number, a number
+// followed by a comma (never natural prose), or one within a few of the
+// question's own — so a stem opening on a year ("1984 saw the first…") is left
+// alone.
+const LEADING_NUMBER = /^\s*(\d{1,4})([,.]?)\s+(?=[A-Z“"])/;
+
+// The same page number, but spliced into the middle of a stem where the scan
+// ran two columns together ("…will very likely be unemployed. 507 Sharon's
+// argument relies on…"). Three digits between a sentence end and a capital: a
+// sentence that genuinely opens on a bare three-digit number is rare enough
+// that this has no false positives in the pool.
+const INLINE_PAGE_NUMBER = /([.?!”])\s+\d{3}\s+(?=[A-Z])/g;
+const LEADING_NUMBER_WINDOW = 3;
+
+// Shorter than this there is no question, only scan noise ("Ls Oe.").
+const MIN_STEM = 25;
+
+function stripStemJunk(stem, number) {
+  let text = String(stem || '').replace(DIRECTIONS_TAIL, '').replace(INLINE_PAGE_NUMBER, '$1 ').trim();
+  const m = text.match(LEADING_NUMBER);
+  if (m) {
+    const value = Number(m[1]);
+    const nearOwn = Number.isFinite(Number(number)) && Math.abs(value - Number(number)) <= LEADING_NUMBER_WINDOW;
+    if (m[2] === ',' || (m[1].length === 3 && m[2] !== '.') || nearOwn || m[2] === '.') {
+      text = text.slice(m[0].length).trim();
+    }
+  }
+  return text;
+}
+
 // After the repair, a stem still opening lower-case is a fragment with no
 // recoverable boundary — sometimes with no question in it at all ("largest moons
 // and the planets of the solar system"). A stem defect drops the question.
@@ -273,6 +316,7 @@ function unusableReason(q, correct, keyDisputed, kind) {
   // attached by the pdfplumber pass, so RC stays unusable until that has run.
   if (kind === 'RC' && !q.passageId) return 'no-passage';
   if (!q.stem || !q.stem.trim()) return 'stem';
+  if (q.stem.trim().length < MIN_STEM || RUNNING_HEAD.test(q.stem)) return 'stem-junk';
   if (isStemFragment(q.stem)) return 'stem-fragment';
   if (q.choices.length !== 5) return 'choices';
   if (q.choices.some(c => !c.text || !c.text.trim())) return 'blank-choice';
@@ -387,12 +431,14 @@ function assembleSection({ book, kind, questions, keys, explanations, passageRef
     if (e) stats.explained++;
     if (q.numberInferred) stats.numberInferred++;
 
-    let stem = repairStem(q.stem, q.number);
+    let stem = stripStemJunk(repairStem(q.stem, q.number), q.number);
     let stemSource = stem !== q.stem ? 'renumbered' : null;
     if (isStemFragment(stem)) {
       const recovered = recoverStem(q, reprints);
       if (recovered) {
-        stem = recovered;
+        // The reprint keeps the question's printed number ("83. It can be
+        // inferred…"), so the recovered stem needs the same cleaning.
+        stem = stripStemJunk(repairStem(recovered, q.number), q.number);
         stemSource = 'explanation';
       }
     }
@@ -436,5 +482,5 @@ function assembleSection({ book, kind, questions, keys, explanations, passageRef
 
 module.exports = {
   assembleSection, matchExplanations, unusableReason, isTruncated,
-  repairStem, recoverStem, buildReprintIndex, BOLDFACE_STEM, hasBoldMarkup,
+  repairStem, recoverStem, buildReprintIndex, BOLDFACE_STEM, hasBoldMarkup, stripStemJunk,
 };

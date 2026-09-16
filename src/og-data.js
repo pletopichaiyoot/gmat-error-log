@@ -20,9 +20,24 @@ const POOL_PATH = path.join(__dirname, '..', 'data', 'gmat-og-questions.json');
 // selectable in the builder under this bucket rather than disappearing from it.
 const UNLABELED = '(unlabeled)';
 
+// The derived question type (Assumption, Weaken, Main Idea, …) sits alongside
+// the book's own label rather than replacing it: the OG's label is the
+// authoritative one, and the derived type is the one worth drilling by. About
+// 7% of questions match no rule and keep this bucket, which stays selectable.
+const UNCLASSIFIED = '(unclassified)';
+
 // Difficulty reads as a scale, not a word list, so it keeps its own order
 // instead of sorting alphabetically into Easy / Hard / Medium.
 const DIFFICULTY_ORDER = ['Easy', 'Medium', 'Hard'];
+
+// Mirrors the rule order in client/src/lib/questionType.mjs. Kept as a plain
+// list rather than imported because that module is ESM and this reader is
+// loaded synchronously on every request; a drifting list only mis-sorts the
+// builder's chips, where a drifting rule table would mis-label questions.
+const QUESTION_TYPE_ORDER = {
+  CR: ['Assumption', 'Strengthen', 'Weaken', 'Evaluate', 'Inference', 'Paradox', 'Flaw', 'Method', 'Boldface', 'Complete the Passage'],
+  RC: ['Main Idea', 'Detail', 'Inference', 'Function', 'Application', 'Tone', 'Vocabulary', 'Weaken'],
+};
 
 let _dataCache = null;
 let _poolCache = null;
@@ -81,7 +96,7 @@ function buildOgLibrary(pool) {
       counts.set(key, (counts.get(key) || 0) + 1);
     }
     const rank = (label) => {
-      if (label === UNLABELED) return Number.MAX_SAFE_INTEGER; // the residue sorts last
+      if (label === UNLABELED || label === UNCLASSIFIED) return Number.MAX_SAFE_INTEGER; // the residue sorts last
       const i = order ? order.indexOf(label) : -1;
       return i >= 0 ? i : Number.MAX_SAFE_INTEGER - 1;
     };
@@ -91,6 +106,7 @@ function buildOgLibrary(pool) {
   };
 
   const typeLabels = {};
+  const questionTypes = {};
   const difficulties = {};
   const totals = { CR: 0, RC: 0, passages: 0 };
   const usedPassages = new Set();
@@ -98,6 +114,9 @@ function buildOgLibrary(pool) {
   for (const kind of kinds) {
     const inKind = (q) => q.kind === kind;
     typeLabels[kind] = tally(inKind, (q) => q.typeLabel || UNLABELED);
+    // Ordered by the rule table's own order, so the list reads as a taxonomy
+    // rather than alphabetically; the unclassified residue still sorts last.
+    questionTypes[kind] = tally(inKind, (q) => q.questionType || UNCLASSIFIED, QUESTION_TYPE_ORDER[kind]);
     difficulties[kind] = tally(inKind, (q) => q.difficulty || UNLABELED, DIFFICULTY_ORDER);
     totals[kind] = pool.questions.filter(inKind).length;
   }
@@ -115,7 +134,7 @@ function buildOgLibrary(pool) {
     }))
     .filter((b) => b.counts.CR + b.counts.RC > 0);
 
-  return { books, typeLabels, difficulties, totals };
+  return { books, typeLabels, questionTypes, difficulties, totals };
 }
 
 function ogPool() {
@@ -132,4 +151,7 @@ function ogLibrary() {
   return _libraryCache;
 }
 
-module.exports = { loadOgData, ogPool, ogQuestion, ogLibrary, buildOgPool, buildOgLibrary, UNLABELED };
+module.exports = {
+  loadOgData, ogPool, ogQuestion, ogLibrary, buildOgPool, buildOgLibrary,
+  UNLABELED, UNCLASSIFIED, QUESTION_TYPE_ORDER,
+};
