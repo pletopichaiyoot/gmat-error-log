@@ -3383,17 +3383,21 @@ th.sortable:hover {
   font-size: 0.9rem;
 }
 
+/* Stays a real table cell — a `display: grid` td drops out of the column
+   layout, so the rule text ran past the column instead of wrapping in it. */
 .process-rule-cell {
-  display: grid;
-  gap: 2px;
   max-width: 520px;
+  white-space: normal;
 }
 
 .process-rule-when {
+  display: block;
   font-weight: 600;
 }
 
 .process-rule-then {
+  display: block;
+  margin-top: 2px;
   color: var(--muted);
 }
 
@@ -3496,12 +3500,20 @@ th.sortable:hover {
   margin-top: 3px;
 }
 
+/* Stacked, not side-by-side: each half gets the modal's full width AND wraps,
+   so a rule carrying a real cue is readable end-to-end. Reusing a trigger
+   verbatim is what makes it countable, and you cannot copy what you cannot see. */
 .review-rule-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: center;
-  gap: 6px;
-  margin-top: 3px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s1);
+  margin-top: var(--s1);
+}
+
+.review-rule-field {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
 }
 
 .review-rule-lead,
@@ -3512,14 +3524,88 @@ th.sortable:hover {
   white-space: nowrap;
 }
 
-@media (max-width: 720px) {
-  .review-rule-row {
-    grid-template-columns: minmax(0, 1fr);
-  }
+.review-rule-arrow {
+  justify-self: center;
+  line-height: 1;
+}
 
-  .review-rule-arrow {
-    justify-self: center;
-  }
+/* Two classes, so this beats the Textarea primitive's own min-h utility. */
+.review-rule-field .review-rule-input {
+  min-height: 0;
+  height: auto;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+/* Typeahead: nothing on screen until you type, so the modal stays quiet. */
+.review-rule-typeahead {
+  position: relative;
+  min-width: 0;
+}
+
+.review-rule-suggestions {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 3px);
+  left: 0;
+  right: 0;
+  max-height: 232px;
+  overflow-y: auto;
+  margin: 0;
+  padding: var(--s1);
+  list-style: none;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-s);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.review-rule-suggestion {
+  display: flex;
+  gap: var(--s2);
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.review-rule-suggestion.is-active {
+  background: var(--primary-lt);
+}
+
+.review-rule-suggestion-hits {
+  flex: none;
+  padding-top: 1px;
+  color: var(--accent-ink);
+  font-weight: 700;
+  font-size: 0.74rem;
+}
+
+.review-rule-suggestion-body {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+/* The trigger wraps — you are about to reuse it verbatim, so you must be able
+   to read all of it. The paired action is context, so one clamped line does. */
+.review-rule-suggestion-when {
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.review-rule-suggestion-then {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ─── Mistake tags ───────────────────────────────────────────── */

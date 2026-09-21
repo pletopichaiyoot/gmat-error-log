@@ -75,6 +75,20 @@ test('a rule survives an ASCII arrow and a missing When', () => {
   });
 });
 
+test('a doubled When is stripped, so stored rows group with freshly typed ones', () => {
+  assert.deepEqual(parseRule('When When the support is in the same sentence \u2192 re-read it'), {
+    when: 'the support is in the same sentence',
+    then: 're-read it',
+  });
+  assert.equal(
+    collectRules([
+      { notes: 'Next time: When When ratios only -> find an anchor' },
+      { notes: 'Next time: When ratios only -> find an anchor' },
+    ]).length,
+    1
+  );
+});
+
 test('a legacy triggerless note becomes the action half, never a fake trigger', () => {
   assert.deepEqual(parseRule('slow down on quantifiers'), { when: '', then: 'slow down on quantifiers' });
   assert.equal(formatRule({ when: '', then: 'slow down on quantifiers' }), 'slow down on quantifiers');

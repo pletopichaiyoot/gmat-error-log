@@ -1788,6 +1788,10 @@ function App() {
     row: null,
   });
   const [reviewRules, setReviewRules] = useState({ rules: [], unruled: 0 });
+  // Typeahead over triggers already written. `index` is -1 until an arrow key
+  // moves it, because the When field is a TEXTAREA: Enter must keep inserting a
+  // newline unless the user is deliberately navigating the list.
+  const [ruleSuggest, setRuleSuggest] = useState({ open: false, index: -1 });
   const [bookmarks, setBookmarks] = useState([]);
   // Keys of every bookmarked question, so the star renders without waiting for
   // a per-row request. Holds both ids of each bookmark's question.
@@ -2720,6 +2724,33 @@ function App() {
     () => (reviewRules.rules.length ? reviewRules.rules : collectRules(errors)),
     [reviewRules.rules, errors]
   );
+
+  // Triggers matching what is being typed. Needs 2 characters so the list does
+  // not flash on the first keystroke, and hides once the text IS one of them —
+  // at that point reuse already happened and the list is just in the way.
+  const ruleSuggestions = useMemo(() => {
+    const typed = (annotation.slots?.when || '').trim().toLowerCase();
+    if (typed.length < 2) return [];
+    if (knownRules.some((rule) => rule.when.toLowerCase() === typed)) return [];
+    return knownRules.filter((rule) => rule.when.toLowerCase().includes(typed)).slice(0, 6);
+  }, [annotation.slots?.when, knownRules]);
+
+  const showRuleSuggestions = ruleSuggest.open && ruleSuggestions.length > 0;
+
+  // Reuse is one interaction: the trigger goes in verbatim (which is what makes
+  // it countable) and the paired action comes with it, unless one is already
+  // being written — never clobber what the user has typed.
+  const applyReviewRule = (rule) => {
+    setAnnotation((prev) => ({
+      ...prev,
+      slots: {
+        ...prev.slots,
+        when: rule.when,
+        then: (prev.slots.then || '').trim() ? prev.slots.then : rule.then,
+      },
+    }));
+    setRuleSuggest({ open: false, index: -1 });
+  };
 
   const sortedCategoryRows = useMemo(() => {
     const rows = [...categoryRows];
@@ -6738,46 +6769,121 @@ function App() {
                       {REVIEW_SLOTS.find((slot) => slot.key === 'next').hint}
                       {knownRules.length > 0 && ' — or reuse one you already wrote'}
                     </span>
+                    {/* Both halves are textareas that WRAP rather than single-line
+                        inputs: a rule long enough to carry a real cue ("When an
+                        Assumption choice names a different actor than...") outruns
+                        any one-line field, and a trigger you cannot read is one you
+                        cannot reuse verbatim - which is what makes a rule countable
+                        in collectRules(). A textarea cannot host a datalist, so the
+                        typeahead below stands in for one. */}
                     <div className="review-rule-row">
-                      <span className="review-rule-lead">When</span>
-                      <Input
-                        list="review-rule-triggers"
-                        value={annotation.slots.when}
-                        placeholder="a DS stem gives only ratios and asks for an absolute value"
-                        onChange={(event) => {
-                          const { value } = event.target;
-                          // Picking a trigger you have used before pulls its action
-                          // across, so reuse stays one interaction.
-                          const match = knownRules.find(
-                            (rule) => rule.when.toLowerCase() === value.trim().toLowerCase()
-                          );
-                          setAnnotation((prev) => ({
-                            ...prev,
-                            slots: {
-                              ...prev.slots,
-                              when: value,
-                              then: !prev.slots.then && match ? match.then : prev.slots.then,
-                            },
-                          }));
-                        }}
-                      />
+                      <div className="review-rule-field">
+                        <span className="review-rule-lead">When</span>
+                        <div className="review-rule-typeahead">
+                          <Textarea
+                            className="review-rule-input"
+                            rows={2}
+                            value={annotation.slots.when}
+                            placeholder="a DS stem gives only ratios and asks for an absolute value"
+                            autoComplete="off"
+                            role="combobox"
+                            aria-expanded={showRuleSuggestions}
+                            aria-controls="review-rule-suggestions"
+                            onFocus={() => setRuleSuggest((prev) => ({ ...prev, open: true }))}
+                            onBlur={() => setRuleSuggest({ open: false, index: -1 })}
+                            onKeyDown={(event) => {
+                              if (!ruleSuggestions.length) return;
+                              if (event.key === 'ArrowDown') {
+                                event.preventDefault();
+                                setRuleSuggest((prev) => ({
+                                  open: true,
+                                  index: (prev.index + 1) % ruleSuggestions.length,
+                                }));
+                              } else if (event.key === 'ArrowUp') {
+                                event.preventDefault();
+                                setRuleSuggest((prev) => ({
+                                  open: true,
+                                  index: (prev.index <= 0 ? ruleSuggestions.length : prev.index) - 1,
+                                }));
+                              } else if (event.key === 'Enter' && ruleSuggest.open && ruleSuggest.index >= 0) {
+                                // Enter is only stolen while arrow-navigating the
+                                // list; otherwise this is a textarea and Enter
+                                // must still insert a newline.
+                                event.preventDefault();
+                                applyReviewRule(ruleSuggestions[ruleSuggest.index]);
+                              } else if (event.key === 'Escape') {
+                                setRuleSuggest({ open: false, index: -1 });
+                              }
+                            }}
+                            onChange={(event) => {
+                              const { value } = event.target;
+                              // Typing a trigger verbatim still pulls its action
+                              // across, so reuse works from the keyboard alone.
+                              const match = knownRules.find(
+                                (rule) => rule.when.toLowerCase() === value.trim().toLowerCase()
+                              );
+                              setRuleSuggest({ open: true, index: -1 });
+                              setAnnotation((prev) => ({
+                                ...prev,
+                                slots: {
+                                  ...prev.slots,
+                                  when: value,
+                                  then: !prev.slots.then && match ? match.then : prev.slots.then,
+                                },
+                              }));
+                            }}
+                          />
+                          {showRuleSuggestions && (
+                            <ul
+                              className="review-rule-suggestions"
+                              id="review-rule-suggestions"
+                              role="listbox"
+                            >
+                              {ruleSuggestions.map((rule, index) => (
+                                <li key={rule.when} role="option" aria-selected={index === ruleSuggest.index}>
+                                  <button
+                                    type="button"
+                                    tabIndex={-1}
+                                    className={`review-rule-suggestion${
+                                      index === ruleSuggest.index ? ' is-active' : ''
+                                    }`}
+                                    // mouseDown, not click: blur fires first and
+                                    // would tear the list down before a click lands.
+                                    onMouseDown={(event) => {
+                                      event.preventDefault();
+                                      applyReviewRule(rule);
+                                    }}
+                                    onMouseEnter={() => setRuleSuggest((prev) => ({ ...prev, index }))}
+                                  >
+                                    <span className="review-rule-suggestion-hits">{`${rule.hits}×`}</span>
+                                    <span className="review-rule-suggestion-body">
+                                      <span className="review-rule-suggestion-when">{rule.when}</span>
+                                      <span className="review-rule-suggestion-then">
+                                        {`${RULE_ARROW} ${rule.then}`}
+                                      </span>
+                                    </span>
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      </div>
                       <span className="review-rule-arrow" aria-hidden="true">{RULE_ARROW}</span>
-                      <Input
-                        value={annotation.slots.then}
-                        placeholder="hunt for an anchor before you consider C"
-                        onChange={(event) => {
-                          const { value } = event.target;
-                          setAnnotation((prev) => ({ ...prev, slots: { ...prev.slots, then: value } }));
-                        }}
-                      />
+                      <label className="review-rule-field">
+                        <span className="review-rule-lead">then</span>
+                        <Textarea
+                          className="review-rule-input"
+                          rows={2}
+                          value={annotation.slots.then}
+                          placeholder="hunt for an anchor before you consider C"
+                          onChange={(event) => {
+                            const { value } = event.target;
+                            setAnnotation((prev) => ({ ...prev, slots: { ...prev.slots, then: value } }));
+                          }}
+                        />
+                      </label>
                     </div>
-                    <datalist id="review-rule-triggers">
-                      {knownRules.map((rule) => (
-                        <option key={rule.when} value={rule.when}>
-                          {`${rule.hits}\u00d7 — ${rule.then}`}
-                        </option>
-                      ))}
-                    </datalist>
                   </div>
 
                   {annotation.slots.other && (

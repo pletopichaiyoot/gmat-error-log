@@ -88,14 +88,18 @@ export function serializeReviewNotes(values) {
 // questions groups into one process item with a count of twenty.
 export const RULE_ARROW = '→';
 
+// Repeated, because the modal prepends "When" to whatever is typed and people
+// type "When …" — rows already stored read "When When the support is …".
+const RULE_WHEN_PREFIX = /^(?:when\s+)+/i;
+
 export function parseRule(value) {
   const text = String(value || '').trim();
   if (!text) return { when: '', then: '' };
   const split = text.match(/^([\s\S]*?)\s*(?:→|->)\s*([\s\S]*)$/);
   // A legacy "Next time:" line has no arrow — it's an action without a trigger.
-  if (!split) return { when: '', then: text.replace(/^when\s+/i, '').trim() };
+  if (!split) return { when: '', then: text.replace(RULE_WHEN_PREFIX, '').trim() };
   return {
-    when: split[1].replace(/^when\s+/i, '').trim(),
+    when: split[1].replace(RULE_WHEN_PREFIX, '').trim(),
     then: split[2].trim(),
   };
 }
