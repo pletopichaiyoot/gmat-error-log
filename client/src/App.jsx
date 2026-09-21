@@ -20,6 +20,7 @@ import DifficultyMatrix from './components/DifficultyMatrix';
 import MiniBar from './components/MiniBar';
 import { buildStartTestSearchPhrase } from './lib/starttestSearchPhrase.mjs';
 import { buildDropdownStatement, splitDropdownAnswers } from './lib/dropdownStem.mjs';
+import { stimulusSortOrder } from './lib/stimulusSort.mjs';
 import {
   REVIEW_SLOTS,
   OTHER_SLOT,
@@ -571,6 +572,73 @@ function extractStimulusTabs(html) {
   return tabs.map((t) => t.innerHTML);
 }
 
+// A captured stimulus is opaque HTML — a data table, a chart, an MSR passage —
+// so the Table Analysis sort control is ATTACHED to whatever tables the HTML
+// rendered rather than replacing the renderer. One "Sort by" dropdown is
+// inserted above each table that has a header row and more than one body row,
+// matching the real exam: pick a column, rows sort ascending; pick the first
+// entry to get the printed order back.
+function useStimulusTableSort(ref, html) {
+  useEffect(() => {
+    const root = ref.current;
+    if (!root) return undefined;
+    const bars = [];
+    root.querySelectorAll('table').forEach((table) => {
+      const body = table.tBodies[0];
+      const headRow = table.tHead && table.tHead.rows[0];
+      if (!body || !headRow || body.rows.length < 2) return;
+      const labels = Array.from(headRow.cells).map((cell) => (cell.textContent || '').trim());
+
+      const select = document.createElement('select');
+      select.setAttribute('aria-label', 'Sort the table by a column');
+      const printed = document.createElement('option');
+      printed.value = '';
+      printed.textContent = 'Original order';
+      select.append(printed);
+      labels.forEach((label, index) => {
+        if (!label) return;                       // spacer / row-label columns
+        const option = document.createElement('option');
+        option.value = String(index);
+        option.textContent = label;
+        select.append(option);
+      });
+      if (select.options.length < 2) return;      // nothing nameable to sort by
+
+      // Captured once: the rows as printed, which is what "Original order"
+      // restores and what every sort is computed from.
+      const original = Array.from(body.rows);
+      select.addEventListener('change', () => {
+        if (select.value === '') {
+          original.forEach((row) => body.append(row));
+          return;
+        }
+        const column = Number(select.value);
+        const cells = original.map((row) => (row.cells[column] ? row.cells[column].textContent : ''));
+        stimulusSortOrder(cells).forEach((index) => body.append(original[index]));
+      });
+
+      const bar = document.createElement('div');
+      bar.className = 'stimulus-table-sort';
+      const caption = document.createElement('span');
+      caption.textContent = 'Sort by';
+      bar.append(caption, select);
+      table.parentNode.insertBefore(bar, table);
+      bars.push(bar);
+    });
+    // React replaces the whole subtree when `html` changes, taking the bars
+    // with it; removing an already-detached node is a no-op.
+    return () => bars.forEach((bar) => bar.remove());
+  }, [ref, html]);
+}
+
+// Renders a block of captured stimulus HTML with the sort control attached.
+function StimulusHtml({ html, className }) {
+  const ref = useRef(null);
+  useStimulusTableSort(ref, html);
+  if (!html) return null;
+  return <div ref={ref} className={className} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
 // Renders one captured stimulus source. Multi-tab MSR passages become a tab
 // strip (tab labels aren't in the captured DOM, so they're numbered "Source N").
 // Everything else renders as a single box, unchanged.
@@ -597,7 +665,7 @@ function StimulusSource({ src }) {
               </button>
             ))}
           </div>
-          <div className="stimulus-tabpanel" dangerouslySetInnerHTML={{ __html: tabs[idx] }} />
+          <StimulusHtml className="stimulus-tabpanel" html={tabs[idx]} />
         </div>
       </section>
     );
@@ -605,7 +673,7 @@ function StimulusSource({ src }) {
   return (
     <section className="question-stimulus-source">
       {src?.title && <h4>{src.title}</h4>}
-      <div dangerouslySetInnerHTML={{ __html: sanitizeStimulusHtml(src?.html || '') }} />
+      <StimulusHtml html={sanitizeStimulusHtml(src?.html || '')} />
     </section>
   );
 }
@@ -6179,7 +6247,7 @@ function App() {
                     const html = sanitizeStimulusHtml(s.html || '');
                     return (
                       <div className="question-stimulus">
-                        {html && <div className="question-stimulus-main" dangerouslySetInnerHTML={{ __html: html }} />}
+                        <StimulusHtml className="question-stimulus-main" html={html} />
                         {Array.isArray(s.sources) && s.sources.map((src, i) => (
                           <StimulusSource src={src} key={i} />
                         ))}
