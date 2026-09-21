@@ -15,7 +15,7 @@ const assert = require('node:assert');
 
 const {
   latexToText, tidyInline, extractChoicesFromLines, extractChoicesFromInline,
-  stemBeforeChoices, DS_CHOICES,
+  stemBeforeChoices, DS_CHOICES, buildDiGridAnswers, parseGraphAnswerKey,
 } = require('../../src/scrapers/gmat_club_question_scraper')._internals;
 
 test('latexToText renders a fraction as an inline quotient', () => {
@@ -117,4 +117,87 @@ test('extractChoicesFromInline needs three sequential labels from A', () => {
 
 test('extractChoicesFromInline rejects a run with an empty choice', () => {
   assert.equal(extractChoicesFromInline('Q? A: 1 B: C: 3'), null);
+});
+
+// DI (Graphs & Tables) answer grid. Verified 2026-09-21 against two Table
+// Analysis topics: `td.official_answer` marks the correct column and
+// `input.selectedAnswer` the user's pick, independently — one topic was
+// answered right (both on the same cell) and one wrong (on different cells).
+const diGrid = {
+  headers: ['Contradicts the hypothesis', 'Does not contradict the hypothesis'],
+  rows: [
+    { label: 'Participant 6', options: [{ isCorrect: true, isUserSelected: false }, { isCorrect: false, isUserSelected: true }] },
+    { label: 'Participant 7', options: [{ isCorrect: false, isUserSelected: false }, { isCorrect: true, isUserSelected: true }] },
+    { label: 'Participant 9', options: [{ isCorrect: true, isUserSelected: true }, { isCorrect: false, isUserSelected: false }] },
+  ],
+};
+
+test('buildDiGridAnswers reports both answers as 1-based column indices per row', () => {
+  const out = buildDiGridAnswers(diGrid);
+  assert.equal(out.correct_answer, '1,2,1');
+  assert.equal(out.my_answer, '2,2,1');
+});
+
+test('buildDiGridAnswers keeps the per-cell flags the matrix renderer reads', () => {
+  const out = buildDiGridAnswers(diGrid);
+  assert.deepEqual(out.choices.map((c) => c.label), ['Q1', 'Q2', 'Q3']);
+  assert.equal(out.choices[0].text, 'Participant 6');
+  assert.equal(out.choices[0].options[0].isCorrect, true);
+  assert.equal(out.choices[0].options[1].isUserSelected, true);
+  assert.deepEqual(out.choices[0].headers, diGrid.headers);
+});
+
+test('buildDiGridAnswers leaves an unanswered grid null rather than "," padding', () => {
+  const unanswered = {
+    headers: ['Yes', 'No'],
+    rows: diGrid.rows.map((r) => ({ label: r.label, options: r.options.map((o) => ({ ...o, isUserSelected: false })) })),
+  };
+  const out = buildDiGridAnswers(unanswered);
+  assert.equal(out.my_answer, null);
+  assert.equal(out.correct_answer, '1,2,1');
+});
+
+test('buildDiGridAnswers ignores a page with no grid', () => {
+  assert.equal(buildDiGridAnswers(null), null);
+  assert.equal(buildDiGridAnswers({ headers: ['Yes', 'No'], rows: [] }), null);
+});
+
+// Graphics Interpretation. The official answer sits in the DOM from the start,
+// hidden by CSS, as ONE line naming every blank: "Dropdown 1: Positive
+// Dropdown 2: less than". The labels are the only separator, which is why it
+// cannot be split on anything simpler.
+const GRAPH_BLANKS = [
+  { label: 'Blank 1', text: '', options: [{ text: 'Positive' }, { text: 'Negative' }, { text: 'Zero' }] },
+  { label: 'Blank 2', text: '', options: [{ text: 'less than' }, { text: 'greater than' }, { text: 'equal to' }] },
+];
+
+test('parseGraphAnswerKey splits the run of blanks on their labels', () => {
+  assert.equal(
+    parseGraphAnswerKey('Dropdown 1: Positive Dropdown 2: less than', GRAPH_BLANKS),
+    'Positive,less than'
+  );
+});
+
+test('parseGraphAnswerKey spells the key the way the menu does', () => {
+  assert.equal(
+    parseGraphAnswerKey('Dropdown 1: POSITIVE Dropdown 2: Less Than', GRAPH_BLANKS),
+    'Positive,less than'
+  );
+});
+
+// Better no key than a wrong one: a half-read line would mis-mark an answer.
+test('parseGraphAnswerKey refuses a line that does not name every blank', () => {
+  assert.equal(parseGraphAnswerKey('Dropdown 1: Positive', GRAPH_BLANKS), null);
+  assert.equal(parseGraphAnswerKey('Official Answer B', GRAPH_BLANKS), null);
+  assert.equal(parseGraphAnswerKey('', GRAPH_BLANKS), null);
+  assert.equal(parseGraphAnswerKey('Dropdown 1: Positive Dropdown 2: less than', []), null);
+});
+
+// An option the menu does not carry is kept rather than dropped — the page is
+// the authority on its own answer, and a missing key reads as ungradeable.
+test('parseGraphAnswerKey keeps an answer that matches no listed option', () => {
+  assert.equal(
+    parseGraphAnswerKey('Dropdown 1: Sideways Dropdown 2: equal to', GRAPH_BLANKS),
+    'Sideways,equal to'
+  );
 });

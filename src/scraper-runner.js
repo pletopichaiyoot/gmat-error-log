@@ -934,6 +934,36 @@ async function runStartTestPhase2FromOpenBrowser(options = {}) {
 // Phase 2 for GMAT Club: visits each topic URL one at a time on the existing
 // gmatclub.com tab and runs `window.gmatClubEnrichCurrentPage()` to extract
 // the stem, choices, and revealed official-answer letter.
+// GMAT Club DI figures (Graphics Interpretation graphs) are images whose URL
+// the dashboard cannot use: GMAT Club's own attachment endpoint needs the
+// session cookie, and many graphs are served from s3.amazonaws.com, which
+// sends no CORS header — so the page scraper can neither canvas-draw nor fetch
+// them. It marks each one `data-shot="N"` instead and leaves a placeholder in
+// the stimulus HTML; Playwright screenshots the element, which no cross-origin
+// rule applies to, and the placeholder is swapped for a self-contained data:
+// PNG. Same trick, and same reason, as the StartTest itdmedia charts.
+async function inlineGmatClubStimulusImages(page, stimulus) {
+  const selectors = Array.isArray(stimulus?.imageSelectors) ? stimulus.imageSelectors : [];
+  if (!stimulus?.html) return null;
+  let html = stimulus.html;
+  for (const selector of selectors) {
+    const shot = (selector.match(/data-shot="(\d+)"/) || [])[1];
+    if (shot === undefined) continue;
+    try {
+      const handle = await page.$(selector);
+      if (!handle) continue;
+      const buffer = await handle.screenshot({ type: 'png' });
+      html = html.replace(
+        new RegExp(`<img\\b[^>]*data-shot="${shot}"[^>]*>`, 'i'),
+        `<img src="data:image/png;base64,${buffer.toString('base64')}">`
+      );
+    } catch (_e) {
+      // Leave the placeholder; the dashboard's sanitizer drops a src-less img.
+    }
+  }
+  return { html };
+}
+
 async function runGmatClubPhase2FromOpenBrowser(options = {}) {
   const requestedCdpUrl = options.cdpUrl || process.env.CHROME_CDP_URL || 'http://localhost:9222';
   const targets = Array.isArray(options.targets) ? options.targets : [];
@@ -1080,6 +1110,7 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
 
         const finalUrl = result.url || page.url();
         const layout = result.layout || 'single';
+        const stimulus = await inlineGmatClubStimulusImages(page, result.stimulus);
 
         if (layout === 'rc' && Array.isArray(result.questions) && result.questions.length) {
           const passage = result.passage || '';
@@ -1138,6 +1169,10 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
               rc_question_count: null,
               rc_attempt_count: group.length,
               stem: result.stem || '',
+              // DI (Graphs & Tables) items: the data table rides along as
+              // `stimulus` HTML and the statement grid as a matrix.
+              stimulus,
+              response_format: result.response_format || null,
               choices: Array.isArray(result.choices) ? result.choices : [],
               correct_answer: result.correct_answer || null,
               my_answer: result.my_answer || null,

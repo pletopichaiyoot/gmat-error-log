@@ -120,7 +120,14 @@
   // A detached copy of the OP body holding ONLY question content. See trap 2.
   function cleanOpClone(opBody) {
     const clone = opBody.cloneNode(true);
-    const answerWidget = clone.querySelector('.item.twoRowsBlock, .correctAnswerBlock');
+    // `table.stoker.di` is the DI answer grid (Yes/No, Contradicts/Does not, …).
+    // Everything from it on is answer UI — the grid itself, the Submit button
+    // and its "Start the Timer above…" hint, then the answer widget. Cutting at
+    // whichever comes first keeps all of it out of the stem; the grid's own
+    // content is read separately by extractDiGrid() straight off the live DOM.
+    const answerWidget = clone.querySelector(
+      'table.stoker.di, .timer_di_submit_button_wrapper, .item.twoRowsBlock, .correctAnswerBlock'
+    );
     if (answerWidget) cutFrom(clone, answerWidget);
     for (const el of clone.querySelectorAll(
       '.spoiler, .spoiler-hidden, .spoilerWrap, .post_signature, .signature, script, style'
@@ -254,6 +261,180 @@
     const cutAt = lines.findIndex((line) => /^\s*\(?[Aa]\)?\s*[\.\)]\s+/.test(line));
     const stemLines = cutAt === -1 ? lines : lines.slice(0, cutAt);
     return tidyInline(stemLines.join('\n')).replace(/\n+/g, ' ').trim();
+  }
+
+  // A DI data table (Graphs & Tables / Table Analysis) renders as GMAT Club's
+  // own `table.stoker` — sortable, with a real thead. Flattening it to text
+  // turns "Participants | Attempts | Probability" into
+  // "ParticipantsAttemptsProbability 1100.2 2150.53 …", which is unreadable and
+  // unusable. Lift it out of the clone as HTML (the dashboard already renders
+  // `stimulus` through a sanitizer that allows table markup) and remove it so
+  // the stem keeps only the prose. Scoped to `.stoker` on purpose: plenty of
+  // posts use a bare <table> for layout, and pulling those would strip content
+  // out of ordinary stems.
+  // A Graphics Interpretation graph is an <img>, and its URL is no use to the
+  // dashboard: GMAT Club's own attachment endpoint needs a signed-in session,
+  // and the stimulus sanitizer keeps only `data:` images for that reason. The
+  // picture therefore has to be inlined at scrape time.
+  //
+  // It cannot be inlined from here. A canvas draw works for GMAT Club's own
+  // attachments (same origin) but throws on the many graphs served from
+  // s3.amazonaws.com, which send no CORS header — `fetch` fails there too. So
+  // each image is MARKED on the live DOM and the runner screenshots it through
+  // Playwright, which no cross-origin rule applies to. Marking has to happen
+  // before the clone is taken, since that is what carries the attribute over.
+  function markStimulusImages(opBody) {
+    let shot = 0;
+    for (const img of Array.from(opBody.querySelectorAll('img'))) {
+      // Forum smilies and rank badges are images too; anything this small is
+      // decoration, not a figure.
+      if (img.naturalWidth < 80 || img.naturalHeight < 80) continue;
+      img.setAttribute('data-shot', String(shot));
+      shot += 1;
+    }
+    return shot;
+  }
+
+  function extractStimulus(clone) {
+    // Document order, so a graph above a table stays above it.
+    const nodes = Array.from(clone.querySelectorAll('table.stoker, table[data-type="sortable"], img'));
+    if (!nodes.length) return null;
+    const parts = [];
+    const imageSelectors = [];
+    for (const node of nodes) {
+      if (node.tagName === 'IMG') {
+        const shot = node.getAttribute('data-shot');
+        if (shot !== null) {
+          parts.push(`<img data-shot="${shot}">`);
+          imageSelectors.push(`img[data-shot="${shot}"]`);
+        }
+        node.remove();
+        continue;
+      }
+      // Sort-arrow glyph spans are icon-font only and render as nothing here.
+      for (const icon of node.querySelectorAll('span[class*="icon-svg"]')) icon.remove();
+      parts.push(node.outerHTML);
+      node.remove();
+    }
+    return parts.length ? { html: parts.join('\n'), imageSelectors } : null;
+  }
+
+  // Graphics Interpretation blanks are `select.di_graph_dropdown`. Store them
+  // the way the StartTest dropdown path already stores and renders its own:
+  // one `answer_choices` entry per blank carrying the menu it offered, and the
+  // stem keeping each blank FLATTENED as a "Select..." marker followed by that
+  // blank's options, which is what `buildDropdownStatement` reads to put the
+  // sentence back together. GMAT Club spells the placeholder "Select", so the
+  // marker is normalized on the way out rather than widening the shared parser.
+  function extractGraphDropdowns(clone) {
+    const selects = Array.from(clone.querySelectorAll('select.di_graph_dropdown'));
+    if (!selects.length) return null;
+    const blanks = [];
+    selects.forEach((select, index) => {
+      const options = Array.from(select.options)
+        .map((option) => tidyInline(option.textContent).replace(/\n/g, ' '))
+        .filter((text) => text && !/^select\.*$/i.test(text));
+      if (!options.length) return;
+      const run = document.createElement('div');
+      ['Select...', ...options].forEach((line) => {
+        const row = document.createElement('div');
+        row.textContent = line;
+        run.append(row);
+      });
+      // The select sits INLINE ("…the air temperature is <select>"), and the
+      // flattener only breaks on a closing tag — without a leading break the
+      // marker lands at the end of the prose line and isMarker (whole-line)
+      // never sees it.
+      select.replaceWith(document.createElement('br'), run);
+      blanks.push({
+        label: `Blank ${index + 1}`,
+        text: '',                       // the page never restores the user's pick
+        options: options.map((text) => ({ text })),
+      });
+    });
+    return blanks.length === selects.length ? blanks : null;
+  }
+
+  // The official answer is already in the DOM, hidden by CSS rather than
+  // fetched on click: `#di_oa_spoiler .downRow.di` reads
+  // "Dropdown 1: Positive Dropdown 2: less than". Stored as the option TEXTS
+  // joined with a comma, which is the dropdown convention (and why
+  // splitDropdownAnswers consumes it against the option lists).
+  function parseGraphAnswerKey(text, blanks) {
+    if (!Array.isArray(blanks) || !blanks.length) return null;
+    // The blanks run together in one line, so the labels are the separator.
+    const parts = String(text || '').split(/\s*Dropdown\s*\d+\s*:\s*/i).slice(1).map((part) => part.trim());
+    if (parts.length !== blanks.length || parts.some((part) => !part)) return null;
+    // Prefer the option as the menu spells it, so the key matches a choice.
+    return parts
+      .map((part, i) => {
+        const options = (blanks[i].options || []).map((option) => option.text);
+        return options.find((option) => option.toLowerCase() === part.toLowerCase()) || part;
+      })
+      .join(',');
+  }
+
+  function extractGraphAnswerKey(blanks) {
+    const block = document.querySelector('#di_oa_spoiler .downRow.di, .item.twoRowsBlock .downRow.di');
+    if (!block) return null;
+    return parseGraphAnswerKey(tidyInline(block.textContent).replace(/\n/g, ' '), blanks);
+  }
+
+  // The DI answer grid: one row per statement, one column per option.
+  //   - the header row's LAST cell is the (blank) statement column
+  //   - `td.official_answer` marks the correct column for that statement
+  //   - `input.selectedAnswer` marks the column the user picked
+  // Both verified 2026-09-21 against two Table Analysis topics, one answered
+  // right (pick inside the official cell) and one wrong (pick beside it).
+  function extractDiGrid(opBody) {
+    const table = opBody.querySelector('table.stoker.di');
+    if (!table) return null;
+    const trs = Array.from(table.rows);
+    if (trs.length < 2) return null;
+    const headerCells = Array.from(trs[0].cells).map((c) => tidyInline(c.textContent).replace(/\n/g, ' '));
+    const headers = headerCells.slice(0, -1);
+    const colCount = headers.length;
+    if (!colCount || headers.some((h) => !h)) return null;
+    const rows = [];
+    for (const tr of trs.slice(1)) {
+      const cells = Array.from(tr.cells);
+      if (cells.length < colCount + 1) continue;
+      rows.push({
+        label: tidyInline(cells[colCount].textContent).replace(/\n/g, ' '),
+        options: cells.slice(0, colCount).map((td) => ({
+          isCorrect: td.classList.contains('official_answer'),
+          isUserSelected: !!td.querySelector('input.selectedAnswer'),
+        })),
+      });
+    }
+    if (!rows.length) return null;
+    return { headers, rows };
+  }
+
+  // Shape the grid the way the StartTest matrix path already stores and renders
+  // it: one answer_choices entry per statement carrying the per-cell flags, and
+  // both answers as a CSV of 1-based column indices (one entry per row).
+  function buildDiGridAnswers(grid) {
+    if (!grid || !Array.isArray(grid.rows) || !grid.rows.length) return null;
+    const headers = Array.isArray(grid.headers) ? grid.headers : [];
+    const csv = (flag) => grid.rows
+      .map((row) => {
+        const idx = (row.options || []).findIndex((o) => o && o[flag]);
+        return idx >= 0 ? String(idx + 1) : '';
+      })
+      .join(',');
+    const correct = csv('isCorrect');
+    const mine = csv('isUserSelected');
+    return {
+      choices: grid.rows.map((row, i) => ({
+        label: `Q${i + 1}`,
+        text: row.label || '',
+        options: row.options || [],
+        headers,
+      })),
+      correct_answer: /\d/.test(correct) ? correct : null,
+      my_answer: /\d/.test(mine) ? mine : null,
+    };
   }
 
   function extractAnswerStats() {
@@ -487,14 +668,24 @@
       };
     }
 
+    // Read the DI answer grid off the LIVE body: cleanOpClone cuts the clone at
+    // that grid, so by the time we have the clone it is gone.
+    const diGrid = extractDiGrid(opBody);
+    markStimulusImages(opBody);
     const questionOnly = cleanOpClone(opBody);
+    const stimulus = extractStimulus(questionOnly);
+    // Rewrites each dropdown into its flattened marker run, so it has to run
+    // before the clone is turned into text.
+    const diBlanks = extractGraphDropdowns(questionOnly);
     const linesText = htmlToLines(questionOnly.innerHTML || '');
     const choicesFromList = extractChoicesFromList(questionOnly);
     const choicesFromText = extractChoicesFromLines(linesText);
     let choices = (choicesFromList && choicesFromList.length >= 2)
       ? choicesFromList
       : choicesFromText;
-    let stem = stemBeforeChoices(linesText);
+    // A dropdown item's stem must KEEP its newlines: buildDropdownStatement is
+    // line-based, and stemBeforeChoices collapses them to spaces.
+    let stem = diBlanks ? tidyInline(linesText) : stemBeforeChoices(linesText);
     if (choices.length < 2) {
       const inline = extractChoicesFromInline(linesText);
       if (inline) { choices = inline.choices; stem = inline.stem; }
@@ -505,6 +696,13 @@
     const stats = extractAnswerStats();
     const correctLetter = stats.correct || extractCorrectLetterFromSpoiler();
 
+    // A DI grid item has no lettered choices and no A-E vote widget: its
+    // answers live in the grid, per statement. Whatever the line parser made of
+    // the grid's stray text is wrong here, so replace it outright.
+    const diAnswers = buildDiGridAnswers(diGrid);
+    const diKey = diBlanks ? extractGraphAnswerKey(diBlanks) : null;
+    const responseFormat = diAnswers ? 'matrix' : (diBlanks ? 'dropdown' : null);
+
     return {
       ok: true,
       url: location.href,
@@ -512,11 +710,16 @@
       format_forum: fmt.format_forum,
       format_code: fmt.format_code,
       layout: 'single',
+      response_format: responseFormat,
       stem,
-      choices,
-      correct_answer: correctLetter,
-      my_answer: stats.mine,
-      answer_distribution: stats.distribution,
+      stimulus,
+      choices: diAnswers ? diAnswers.choices : (diBlanks || choices),
+      // A Graphics Interpretation page never restores the user's own picks —
+      // the selects load on "Select" — so my_answer stays null rather than
+      // being guessed at.
+      correct_answer: diAnswers ? diAnswers.correct_answer : (diBlanks ? diKey : correctLetter),
+      my_answer: diAnswers ? diAnswers.my_answer : (diBlanks ? null : stats.mine),
+      answer_distribution: (diAnswers || diBlanks) ? [] : stats.distribution,
     };
   }
 
@@ -528,7 +731,7 @@
     module.exports = {
       _internals: {
         latexToText, tidyInline, extractChoicesFromLines, extractChoicesFromInline,
-        stemBeforeChoices, DS_CHOICES,
+        stemBeforeChoices, DS_CHOICES, buildDiGridAnswers, parseGraphAnswerKey,
       },
     };
   }

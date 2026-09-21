@@ -3811,12 +3811,21 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
     }
 
     const choices = Array.isArray(item.choices) ? item.choices : [];
-    // Normalize to {label, text} entries that match the dashboard renderer.
+    // Normalize to {label, text} entries that match the dashboard renderer —
+    // but a DI grid item (Graphs & Tables) carries a nested `options[]` of
+    // per-cell isCorrect/isUserSelected flags plus the column `headers`, which
+    // is what the review modal's matrix renderer reads. Flattening those away
+    // would leave a bare list of statement texts saying nothing about what was
+    // answered, so keep them when they are there.
     const answerChoicesArr = choices
-      .map((c) => ({
-        label: String(c?.label || '').trim() || null,
-        text: String(c?.text || '').trim() || null,
-      }))
+      .map((c) => {
+        const base = {
+          label: String(c?.label || '').trim() || null,
+          text: String(c?.text || '').trim() || null,
+        };
+        if (!Array.isArray(c?.options)) return base;
+        return { ...base, options: c.options, headers: Array.isArray(c.headers) ? c.headers : [] };
+      })
       .filter((c) => c.label || c.text);
 
     // Question format (PS vs DS) from the topic page title — see
@@ -3839,7 +3848,9 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
               my_answer = COALESCE(NULLIF(?, ''), my_answer),
               question_url = COALESCE(NULLIF(?, ''), question_url),
               passage_text = COALESCE(NULLIF(?, ''), passage_text),
-              category_code = COALESCE(NULLIF(?, ''), category_code)
+              category_code = COALESCE(NULLIF(?, ''), category_code),
+              response_format = COALESCE(NULLIF(?, ''), response_format),
+              stimulus = COALESCE(?, stimulus)
           WHERE id = ?
         `,
         [
@@ -3851,6 +3862,8 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
           item.final_url || item.source_url || '',
           item.passage_text || '',
           formatCode,
+          item.response_format || '',
+          normalizeStimulusForStorage(item.stimulus),
           targetRow.id,
         ]
       );
