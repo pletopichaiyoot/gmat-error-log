@@ -876,6 +876,7 @@ function buildAttemptSnapshotIndex(rows = []) {
       // these fields from the existing row when the scraper doesn't supply
       // them — same pattern as mistake_type / notes.
       difficulty: normalizedTextOrNull(row?.difficulty),
+      time_sec: Number(row?.time_sec) > 0 ? Number(row.time_sec) : null,
       difficulty_theta: Number.isFinite(Number(row?.difficulty_theta)) ? Number(row.difficulty_theta) : null,
       // Phase-2 DI stimulus (charts/tables/MSR sources) — Phase 1 never supplies
       // it, so preserve across rescrapes exactly like question_stem_html.
@@ -990,7 +991,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
       // snapshot but not here, so every rescrape kept re-wiping them).
       const existingAttempts = await tx.all(
         `
-          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, question_stem_html, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta, taxonomy_path, stimulus, my_answer, correct_answer, confidence
+          SELECT q_id, q_code, cat_id, subject_code, category_code, subcategory, topic, topic_source, content_domain, question_url, question_stem, question_stem_html, answer_choices, response_format, response_details, passage_text, mistake_type, notes, difficulty, difficulty_theta, taxonomy_path, stimulus, my_answer, correct_answer, confidence, time_sec
           FROM question_attempts
           WHERE session_id = ?
         `,
@@ -1211,7 +1212,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
             ? Number(q.difficulty_theta)
             : (preservedSnapshot?.difficulty_theta ?? null),
           q.confidence || preservedSnapshot?.confidence || null,
-          safeInt(q.time_sec),
+          pickTimeSec(q.time_sec, preservedSnapshot),
           q.my_answer || preservedSnapshot?.my_answer || null,
           q.correct_answer || preservedSnapshot?.correct_answer || null,
           topic,
@@ -1230,6 +1231,10 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
         attemptValues
       );
     }
+    // The session row was written from the scraper's own stats, i.e. Phase 1's
+    // coarse times — but pickTimeSec may just have kept exact enriched ones.
+    // Recompute from what is now stored so the pre-aggregated cards agree.
+    await refreshSessionTimingAggregates(sessionId, tx.run);
   }
     return runId;
   });
@@ -1477,6 +1482,35 @@ function preserveStoredJsonText(value) {
   if (value == null) return null;
   if (typeof value === 'string') return value.trim() || null;
   try { return JSON.stringify(value); } catch (_error) { return null; }
+}
+
+// Phase 2 (StartTest's vPreviousTimeSpent) and OPE Phase 3 store the exact
+// per-question time; Phase 1 has only Question History's rounded display,
+// capped at "3+ Minutes". So a rescrape keeps an enriched row's time, and
+// "no reading" stays null rather than 0 — `safeInt(null)` is 0, which filed
+// every question over three minutes as the fastest in its session. Measured
+// 2026-09-29: one set of Phase-1 rescrapes rewrote 78 enriched times, 25 of
+// them to 0; 162 of 1,751 StartTest rows read 0 s.
+// StartTest gives one question two ids: FormQuestionID, from the item-list
+// request (GetPracticeNowReviewItems), which fails intermittently; and the ITD
+// item Key, read from every review frame. Writing whichever one a walk happened
+// to get filed the same question as 37897 on one walk and 428442 on the next —
+// 53 questions had attempts split across both on 2026-09-29, and AI practice
+// set items dropped out whenever a code swung. FormQuestionID is canonical
+// (1,566 of 1,635 coded rows; 75 of 81 set items use it), so it always wins, a
+// walk without it keeps the stored code, and the Key is only a first-time
+// placeholder. null means "keep the stored code" (the UPDATE uses COALESCE).
+function pickStartTestQCode(formQuestionId, itemKey, storedCode) {
+  if (formQuestionId != null && String(formQuestionId).trim()) return String(formQuestionId).trim();
+  if (storedCode) return null;
+  return itemKey ? String(itemKey) : null;
+}
+
+function pickTimeSec(incoming, preserved) {
+  const kept = Number(preserved?.time_sec) > 0 ? Number(preserved.time_sec) : null;
+  if (kept && preserved?.answer_choices) return kept;
+  const fresh = Number(incoming) > 0 ? Math.round(Number(incoming)) : null;
+  return fresh ?? kept;
 }
 
 function pickRicherStem(incoming, preserved) {
@@ -1833,6 +1867,7 @@ async function listBookmarks({ includeExcluded = false } = {}) {
       pick.category_code,
       pick.subcategory,
       pick.topic,
+      pick.topic_source,
       pick.difficulty,
       pick.question_stem,
       pick.question_url,
@@ -1843,7 +1878,7 @@ async function listBookmarks({ includeExcluded = false } = {}) {
     FROM question_bookmarks b
     LEFT JOIN LATERAL (
       SELECT q.id, q.q_code, q.q_id, q.subject_code, q.category_code, q.subcategory,
-             q.topic, q.difficulty, q.question_stem, q.question_url,
+             q.topic, q.topic_source, q.difficulty, q.question_stem, q.question_url,
              s.source, s.session_date
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
@@ -3402,7 +3437,7 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
     // Match on EITHER the Phase 1 composite OR a previously-enriched ItemName.
     const targetRow = await tx.get(
       `
-        SELECT id, mistake_type, notes, correct, q_id
+        SELECT id, mistake_type, notes, correct, q_id, q_code
         FROM question_attempts
         WHERE session_id = ?
           AND (q_id = ? OR q_id = ?)
@@ -3702,7 +3737,7 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
           WHERE id = ?
         `,
         [
-          formQuestionId != null ? String(formQuestionId) : (stableKey || null),
+          pickStartTestQCode(formQuestionId, stableKey, targetRow.q_code),
           item.stem || null,
           item.questionStemHtml || '',
           JSON.stringify(answerChoicesArr),
@@ -5428,6 +5463,9 @@ module.exports = {
   listBookmarks,
   toggleBookmark,
   pickRicherStem,
+  pickTimeSec,
+  pickStartTestQCode,
+  refreshSessionTimingAggregates,
   listReviewRules,
   listAttemptHistory,
   saveLsatAttempt,
