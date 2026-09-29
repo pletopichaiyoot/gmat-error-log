@@ -124,9 +124,12 @@ function parseTimeSpent(raw) {
   const text = String(raw || '').toLowerCase();
   if (!text) return null;
   let total = 0;
-  const hoursMatch = text.match(/(\d+)\s*hours?/);
-  const minsMatch = text.match(/(\d+)\s*minutes?|(\d+)\s*mins?/);
-  const secsMatch = text.match(/(\d+)\s*seconds?|(\d+)\s*secs?/);
+  // Question History caps its display at "3+ Minutes"; the `+` used to defeat
+  // the match, so the slowest questions parsed as no time at all. The cap is a
+  // floor (180 s) — Phase 2 replaces it with the exact vPreviousTimeSpent.
+  const hoursMatch = text.match(/(\d+)\+?\s*hours?/);
+  const minsMatch = text.match(/(\d+)\+?\s*minutes?|(\d+)\+?\s*mins?/);
+  const secsMatch = text.match(/(\d+)\+?\s*seconds?|(\d+)\+?\s*secs?/);
   if (hoursMatch) total += Number(hoursMatch[1]) * 3600;
   if (minsMatch) total += Number(minsMatch[1] || minsMatch[2]) * 60;
   if (secsMatch) total += Number(secsMatch[1] || secsMatch[2]);
@@ -380,58 +383,61 @@ async function listSessionsOnHome(page) {
 //   labelIndex: Map<topicLabel -> listitemid> (for matching QHistory rows by Content Area text)
 //   jsondata_reviewtable (fresh URLs with codes)
 async function readReport(page) {
-  return page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll('tr.review-area[data-index]'));
-    const byPath = new Map();
-    for (const tr of rows) {
-      const path = tr.getAttribute('data-index') || '';
-      if (!path) continue;
-      const depth = Number(tr.getAttribute('data-depth')) || 0;
-      const rowLabel = (tr.querySelector('span.row-text, [id^="RowTxt-"]')?.innerText || '').trim();
-      byPath.set(path, { path, depth, label: rowLabel });
-    }
-
-    // For each leaf (data-has-children=False), collect listitemid + resolve parent labels.
-    const leafRows = rows.filter((tr) => tr.getAttribute('data-has-children') === 'False');
-    const taxonomy = [];
-    const labelIndex = new Map();
-    for (const tr of leafRows) {
-      const path = tr.getAttribute('data-index') || '';
-      if (!path) continue;
-      const parts = path.split('.');
-      const labels = [];
-      for (let i = 1; i <= parts.length; i += 1) {
-        const sub = parts.slice(0, i).join('.');
-        const entry = byPath.get(sub);
-        labels.push(entry?.label || null);
-      }
+  const { rows, cfg } = await page.evaluate(() => ({
+    rows: Array.from(document.querySelectorAll('tr.review-area[data-index]')).map((tr) => ({
+      path: tr.getAttribute('data-index') || '',
+      depth: Number(tr.getAttribute('data-depth')) || 0,
+      hasChildren: tr.getAttribute('data-has-children') !== 'False',
+      label: (tr.querySelector('span.row-text, [id^="RowTxt-"]')?.innerText || '').trim(),
       // Any `a.itemaction[listitemid]` on this row gives us the listitemid
-      const liid = tr.querySelector('a.itemaction[listitemid]')?.getAttribute('listitemid') || null;
-      const record = {
-        listitemid: liid ? Number(liid) : null,
-        path,
-        parts,
-        labels,
-        depth: Number(tr.getAttribute('data-depth')) || parts.length,
-      };
-      taxonomy.push(record);
-      const leafLabel = labels[labels.length - 1] || null;
-      if (leafLabel) {
-        // A leaf label can repeat across subjects (e.g., Percent in Quant and DI).
-        // Key the index by "subject|label" to disambiguate; fall back by label alone is handled in the scraper.
-        const subj = parts[0];
-        labelIndex.set(`${subj}|${leafLabel}`, record);
-        if (!labelIndex.has(leafLabel)) labelIndex.set(leafLabel, record);
-      }
-    }
+      listitemid: tr.querySelector('a.itemaction[listitemid]')?.getAttribute('listitemid') || null,
+    })),
+    cfg: (typeof jsondata_reviewtable !== 'undefined' && jsondata_reviewtable) ? { ...jsondata_reviewtable } : null,
+  }));
+  const { taxonomy, labelIndex } = buildTaxonomy(rows);
+  return {
+    jsondata_reviewtable: cfg,
+    taxonomy,
+    labelIndexEntries: Array.from(labelIndex.entries()),
+  };
+}
 
-    const cfg = (typeof jsondata_reviewtable !== 'undefined' && jsondata_reviewtable) || null;
-    return {
-      jsondata_reviewtable: cfg ? { ...cfg } : null,
-      taxonomy,
-      labelIndexEntries: Array.from(labelIndex.entries()),
+// Report tree rows (DOM order) -> taxonomy leaves + the label index that
+// QHistory Content Area text is matched against.
+//
+// A row is a leaf when nothing in THIS report sits under it. StartTest's
+// `data-has-children` describes the full taxonomy, but a report renders only
+// the branches a session touched, and it can file questions on an interior
+// node: session 404605 put two "Other" questions on Verbal.CR.OTH, a tier-3
+// node flagged as having children and rendered with none. Trusting the flag
+// kept "Other" out of the index, so both rows came back with no path at all.
+function buildTaxonomy(rows) {
+  const withPath = (rows || []).filter((r) => r && r.path);
+  const byPath = new Map(withPath.map((r) => [r.path, r]));
+  const hasRenderedChild = (path) => withPath.some((r) => r.path.startsWith(`${path}.`));
+  const taxonomy = [];
+  const labelIndex = new Map();
+  for (const row of withPath) {
+    if (row.hasChildren && hasRenderedChild(row.path)) continue;
+    const parts = row.path.split('.');
+    const labels = parts.map((_, i) => byPath.get(parts.slice(0, i + 1).join('.'))?.label || null);
+    const record = {
+      listitemid: row.listitemid ? Number(row.listitemid) : null,
+      path: row.path,
+      parts,
+      labels,
+      depth: row.depth || parts.length,
     };
-  });
+    taxonomy.push(record);
+    const leafLabel = labels[labels.length - 1] || null;
+    if (leafLabel) {
+      // A leaf label can repeat across subjects (e.g., Percent in Quant and DI).
+      // Key the index by "subject|label" to disambiguate; fall back by label alone is handled in the scraper.
+      labelIndex.set(`${parts[0]}|${leafLabel}`, record);
+      if (!labelIndex.has(leafLabel)) labelIndex.set(leafLabel, record);
+    }
+  }
+  return { taxonomy, labelIndex };
 }
 
 // ─── Question History ──────────────────────────────────────────────────────
@@ -1144,6 +1150,53 @@ function deriveStimulusDataText(stimulusText, sources) {
 //      where each row has <td class="ITSMatrixOption"> cells. The CORRECT cell
 //      has style "background-image: URL('ITD/radiochecked.gif')". The USER's
 //      selected cell contains <div style="background-color:yellow">.
+// An expired itdmedia URL answers 200 with a sign-in HTML page, not a gif.
+// Storing that as a data: uri renders a permanently broken image, where
+// falling through to the screenshot still produces a readable chart — so the
+// content type decides whether the fetched bytes are usable at all.
+function imageDataUri(contentType, base64) {
+  const type = String(contentType || '').split(';')[0].trim().toLowerCase();
+  if (!base64 || !/^image\/[a-z0-9.+-]+$/.test(type)) return null;
+  return `data:${type};base64,${base64}`;
+}
+
+// Inline one marked itdmedia chart <img> as a data: uri.
+//
+// The bytes are fetched from inside the page rather than screenshotting the
+// element, because a screenshot depends on layout state and this one was wrong
+// twice over. Chrome keeps zoom per host and the scraping profile has
+// www.starttest.com at 90%; Playwright's element clip does not account for
+// browser zoom, so every capture landed 1/0.9 - 1 = 11% of the element's page
+// offset down and to the right — cutting the left edge off each chart and
+// dragging the paragraph underneath it into the shot. A capture taken before
+// the gif had painted came out plain white. Neither can happen to the bytes.
+//
+// itdmedia.aspx is same-origin with the review frame and the auth it needs is
+// the session cookie the page already carries, so a page-side fetch just works.
+// The screenshot stays as the fallback for a URL that has since expired.
+async function captureItdmediaImage(frame, selector) {
+  try {
+    const fetched = await frame.evaluate(async (sel) => {
+      const im = document.querySelector(sel);
+      if (!im || !im.src) return null;
+      const res = await fetch(im.src, { credentials: 'include' });
+      if (!res.ok) return null;
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+      return { contentType: res.headers.get('content-type'), base64: btoa(binary) };
+    }, selector);
+    const uri = fetched && imageDataUri(fetched.contentType, fetched.base64);
+    if (uri) return uri;
+  } catch (_e) { /* fall through to the screenshot */ }
+  try {
+    const handle = await frame.$(selector);
+    if (!handle) return null;
+    const buf = await handle.screenshot({ type: 'png' });
+    return `data:image/png;base64,${buf.toString('base64')}`;
+  } catch (_e) { return null; }
+}
+
 async function readReviewFrame(frame) {
   const data = await frame.evaluate(() => {
     const text = (sel) => {
@@ -1564,21 +1617,17 @@ async function readReviewFrame(frame) {
     if (split.passage && !data.passage) data.passage = split.passage;
   }
 
-  // Build the DI stimulus object: screenshot each itdmedia chart image into a
-  // self-contained data: PNG, then sanitize the whole stimulus region.
+  // Build the DI stimulus object: inline each itdmedia chart image as a
+  // self-contained data: uri, then sanitize the whole stimulus region.
   if (data.itemStimulusPresent) {
     let html = data.stimulusHtmlMarked || '';
     for (const sel of data.itdmediaSelectors || []) {
-      try {
-        const handle = await frame.$(sel);
-        if (!handle) continue;
-        const buf = await handle.screenshot({ type: 'png' });
-        const dataUri = `data:image/png;base64,${buf.toString('base64')}`;
-        // Replace the marked <img ... data-shot="N" ...> with a data: img.
-        const shot = (sel.match(/data-shot="(\d+)"/) || [])[1];
-        const imgRe = new RegExp(`<img\\b[^>]*data-shot="${shot}"[^>]*>`, 'i');
-        html = html.replace(imgRe, `<img src="${dataUri}">`);
-      } catch (_e) { /* leave the (dead) itdmedia img; sanitizer will drop it */ }
+      // Replace the marked <img ... data-shot="N" ...> with a data: img.
+      const shot = (sel.match(/data-shot="(\d+)"/) || [])[1];
+      const imgRe = new RegExp(`<img\\b[^>]*data-shot="${shot}"[^>]*>`, 'i');
+      const dataUri = await captureItdmediaImage(frame, sel);
+      if (!dataUri) continue; // leave the (dead) itdmedia img; sanitizer drops it
+      html = html.replace(imgRe, `<img src="${dataUri}">`);
     }
     const safeHtml = sanitizeStimulusHtml(html);
     const sources = (data.referenceSources || []).map((s) => ({
@@ -1922,6 +1971,7 @@ module.exports = {
   runPhase2,
   normalizeProductHeading,
   deriveStimulusDataText,
+  imageDataUri,
   // Exposed for direct testing + for Phase 2 module to reuse navigation helpers.
   _internals: {
     goto,
@@ -1929,6 +1979,7 @@ module.exports = {
     navigateToProduct,
     listSessionsOnHome,
     readReport,
+    buildTaxonomy,
     readQHistoryRows,
     fetchReviewItemList,
     buildQHistoryUrl,
