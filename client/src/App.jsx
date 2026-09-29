@@ -1195,6 +1195,11 @@ function normalizedSubcategory(row) {
   const category = normalizedCategoryCode(row);
   const raw = pickReadableSubcategory(row);
   if (!raw) return '-';
+  // StartTest rows show StartTest's own Content Area name ("Weaken", not
+  // "Attack") — the user's choice, 2026-09-29. The canonical translation lives
+  // in `topic`, which the pattern charts group by; re-translating here undid
+  // it on screen and mixed the two vocabularies in one table again.
+  if (String(row?.topic_source || '').startsWith('starttest')) return raw;
   const contentDomain = String(row?.content_domain || '').trim();
   return (
     normalizeVerbalSubcategoryDisplay(raw, category) ||

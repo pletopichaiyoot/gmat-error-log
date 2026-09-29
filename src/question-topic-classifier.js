@@ -532,8 +532,14 @@ async function classifyScrapedQuestions(data, options = {}) {
       if (existingSource === 'starttest-report') {
         const canonical = mapStartTestToCanonical(question);
         if (canonical) {
+          // Only `topic` takes the canonical label — it is the key the pattern
+          // charts and topic filter group by, so StartTest lines up with GMAT
+          // Club, TTP and the LLM there. `subcategory` keeps StartTest's own
+          // Content Area name ("Weaken", not "Attack"), which is what the
+          // dashboard tables show: the canonical set is coarser than StartTest's,
+          // and translating only some leaves left one session reading "Attack"
+          // beside "Error", "Premise" and "Conclusion".
           question.topic = canonical;
-          question.subcategory = canonical;
           question.topic_source = 'starttest-canonical';
           canonicalized += 1;
           preserved += 1;
