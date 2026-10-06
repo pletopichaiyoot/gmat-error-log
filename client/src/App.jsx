@@ -543,9 +543,32 @@ function stimulusPlainText(row) {
   return normalizeQuestionText(tpl.content.textContent || '');
 }
 
+// StartTest RC items were captured with an MSR-shaped stimulus: the numbered
+// stem plus a "Passage:" source that passage_text already fills the left pane
+// with. Rendering it inline repeats the whole passage under the question, so
+// skip it when it adds nothing — no chart/table, html that is only the stem,
+// and every source already in passage_text.
+function stimulusRepeatsPassage(row) {
+  if (!rowHasPassage(row) || getPassageTabs(row).length >= 2) return false;
+  let s = null;
+  try { s = row?.stimulus ? JSON.parse(row.stimulus) : null; } catch { return false; }
+  const sources = Array.isArray(s?.sources) ? s.sources : [];
+  if (!sources.length || /<(?:img|table|svg|canvas)\b/i.test(s.html || '')) return false;
+  const key = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const textKey = (html) => {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = sanitizeStimulusHtml(html || '');
+    return key(tpl.content.textContent);
+  };
+  if (!key(row.question_stem).includes(textKey(s.html).replace(/^\d+/, ''))) return false;
+  const passage = key(row.passage_text);
+  return sources.every((src) => passage.includes(textKey(src?.html).replace(/^(?:passage)+/, '').slice(0, 300)));
+}
+
 function isStemShownElsewhere(row) {
   const stem = normalizeQuestionText(row?.question_stem);
   if (!stem) return false;
+  if (stimulusRepeatsPassage(row)) return false;
   // Stems carrying math render as images — never hide those.
   if (sanitizeStemHtml(row?.question_stem_html)) return false;
   // Drop-down items: "Your Responses" renders the whole stem, blanks in place.
@@ -6249,6 +6272,7 @@ function App() {
                     // "Question Information" tab panel; don't re-dump them inline
                     // here (that double-render was the stem/passage mix-up).
                     if (getPassageTabs(questionReview.row).length >= 2) return null;
+                    if (stimulusRepeatsPassage(questionReview.row)) return null;
                     const html = sanitizeStimulusHtml(s.html || '');
                     return (
                       <div className="question-stimulus">
