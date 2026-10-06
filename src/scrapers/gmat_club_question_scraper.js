@@ -44,6 +44,13 @@
   //      drops the spoilers/signature before anything is parsed.
 
   const CHOICE_LABELS = ['A', 'B', 'C', 'D', 'E', 'F'];
+  // Pasted posts sometimes type a label with a Cyrillic or Greek capital that
+  // renders exactly like the Latin one (topic322394 opens "\u0410. 12"), so
+  // its list never starts at "A".
+  const LABEL_LOOKALIKES = {
+    '\u0410': 'A', '\u0412': 'B', '\u0421': 'C', '\u0415': 'E', '\u0430': 'a', '\u0441': 'c', '\u0435': 'e',
+    '\u0391': 'A', '\u0392': 'B', '\u0395': 'E',
+  };
 
   // Data Sufficiency topics never print answer choices — on the real GMAT the
   // five DS options are fixed boilerplate, so GMAT Club omits them. Without
@@ -208,20 +215,23 @@
     // after the letter is REQUIRED here, and the sequence check below rejects
     // anything out of order, so accepting lowercase cannot swallow a sentence
     // that merely starts with "a".
-    const labelRe = /^\(?([A-Fa-f])\)?\s*[\.\)]\s*(.*)$/;
+    // A spaced dash ("A - 18") counts too, but only after a capital: a line
+    // opening "a - b = 4" is algebra, not a label.
+    const labelRe = /^\(?(?:([A-Fa-f\u0410\u0412\u0421\u0415\u0430\u0441\u0435\u0391\u0392\u0395])\)?\s*[\.\)]|([A-F\u0410\u0412\u0421\u0415\u0391\u0392\u0395])\)?\s*[-\u2013\u2014](?=\s))\s*(.*)$/;
     for (const line of lines) {
       if (!line) {
         if (current) { choices.push(current); current = null; }
         continue;
       }
       const m = line.match(labelRe);
-      const label = m ? m[1].toUpperCase() : null;
+      const raw = m ? (m[1] || m[2]) : null;
+      const label = raw ? (LABEL_LOOKALIKES[raw] || raw).toUpperCase() : null;
       const labelIdx = label ? CHOICE_LABELS.indexOf(label) : -1;
       // Only treat as a new choice if the label is the next one in sequence
       // (avoids false positives inside math expressions).
       if (m && labelIdx === lastLabelIdx + 1 && labelIdx < CHOICE_LABELS.length) {
         if (current) choices.push(current);
-        current = { label, text: m[2].trim() };
+        current = { label, text: m[3].trim() };
         lastLabelIdx = labelIdx;
       } else if (current) {
         current.text = (current.text + ' ' + line).trim();
@@ -255,10 +265,40 @@
     return { choices, stem: tidyInline(text.slice(0, run[0].start)).replace(/\n+/g, ' ') };
   }
 
+  // Some posts print bare labels, one per line, with no punctuation at all:
+  // "A 88%" / "A $40" (topic194054, topic462525). A bare capital also opens
+  // ordinary prose ("A certain store…"), so this only accepts a run of at
+  // least four lines labelled A, B, C, D in order, blank lines allowed between,
+  // and only as the last resort after the punctuated parsers found nothing.
+  function extractChoicesFromBareLines(linesText) {
+    const lines = String(linesText || '').split(/\n/).map((l) => l.trim());
+    let run = [];
+    let startAt = -1;
+    for (let i = 0; i < lines.length; i += 1) {
+      if (!lines[i]) continue;
+      const m = lines[i].match(/^([A-F])\s+(\S.*)$/);
+      if (m && CHOICE_LABELS.indexOf(m[1]) === run.length) {
+        if (!run.length) startAt = i;
+        run.push({ label: m[1], text: m[2].trim() });
+        continue;
+      }
+      if (run.length >= 4) break;
+      // An unfinished run was prose ("A wheel is divided…" opens the stem):
+      // drop it and keep looking, restarting here if this line is an "A".
+      run = m && m[1] === 'A' ? [{ label: 'A', text: m[2].trim() }] : [];
+      startAt = run.length ? i : -1;
+    }
+    if (run.length < 4) return null;
+    return { choices: run, stem: tidyInline(lines.slice(0, startAt).join('\n')).replace(/\n+/g, ' ').trim() };
+  }
+
   function stemBeforeChoices(linesText) {
     // Cut the stem at the first "A." / "A)" / "(A)" line.
     const lines = String(linesText || '').split(/\n/);
-    const cutAt = lines.findIndex((line) => /^\s*\(?[Aa]\)?\s*[\.\)]\s+/.test(line));
+    // Same label forms as extractChoicesFromLines: look-alike capitals, and the
+    // spaced dash after a capital only.
+    const cutAt = lines.findIndex((line) =>
+      /^\s*(?:\(?[Aa\u0410\u0430\u0391]\)?\s*[\.\)]|\(?[A\u0410\u0391]\)?\s*[-\u2013\u2014])\s+/.test(line));
     const stemLines = cutAt === -1 ? lines : lines.slice(0, cutAt);
     return tidyInline(stemLines.join('\n')).replace(/\n+/g, ' ').trim();
   }
@@ -496,14 +536,19 @@
   // The h1 carries the thread title WITHOUT the suffix, so read document.title.
   // (Forum <a> text is not usable — topic pages link out to unrelated
   // "Butler" threads whose names also contain "Problem Solving".)
+  // "DS Retired Questions" is GMAT DS filed under GMAT Club's GRE section.
+  function formatCodeFromForum(forum) {
+    if (/data\s*sufficiency|\(\s*DS\s*\)|^DS\b/i.test(forum)) return 'DS';
+    if (/problem\s*solving|\(\s*PS\s*\)/i.test(forum)) return 'PS';
+    return null;
+  }
+
   function extractFormat() {
     const title = String(document.title || '');
     const idx = title.lastIndexOf(' : ');
     const forum = idx === -1 ? '' : title.slice(idx + 3).trim();
     if (!forum) return { format_forum: null, format_code: null };
-    if (/data\s*sufficiency|\(\s*DS\s*\)/i.test(forum)) return { format_forum: forum, format_code: 'DS' };
-    if (/problem\s*solving|\(\s*PS\s*\)/i.test(forum)) return { format_forum: forum, format_code: 'PS' };
-    return { format_forum: forum, format_code: null };
+    return { format_forum: forum, format_code: formatCodeFromForum(forum) };
   }
 
   // RC layout detection. RC topics on GMAT Club render the passage as the
@@ -687,7 +732,7 @@
     // line-based, and stemBeforeChoices collapses them to spaces.
     let stem = diBlanks ? tidyInline(linesText) : stemBeforeChoices(linesText);
     if (choices.length < 2) {
-      const inline = extractChoicesFromInline(linesText);
+      const inline = extractChoicesFromInline(linesText) || extractChoicesFromBareLines(linesText);
       if (inline) { choices = inline.choices; stem = inline.stem; }
     }
     // Data Sufficiency topics print no choices at all — supply the fixed set.
@@ -730,6 +775,7 @@
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
       _internals: {
+        extractChoicesFromBareLines, formatCodeFromForum,
         latexToText, tidyInline, extractChoicesFromLines, extractChoicesFromInline,
         stemBeforeChoices, DS_CHOICES, buildDiGridAnswers, parseGraphAnswerKey,
       },
