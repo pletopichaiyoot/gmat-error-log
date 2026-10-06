@@ -3242,6 +3242,11 @@ function App() {
       } else if (key === 'time_sec') {
         valA = Number.isFinite(Number(valA)) ? Number(valA) : -1;
         valB = Number.isFinite(Number(valB)) ? Number(valB) : -1;
+      } else if (key === 'question_order') {
+        // Rows with no recorded order sink to the bottom either way.
+        const missing = order === 'asc' ? Infinity : -Infinity;
+        valA = Number.isFinite(a?.question_order) ? a.question_order : missing;
+        valB = Number.isFinite(b?.question_order) ? b.question_order : missing;
       } else if (key === 'q_code') {
         valA = String(valA || '');
         valB = String(valB || '');
@@ -5930,6 +5935,7 @@ function App() {
                     <table className="review-table session-analysis-questions-table">
                       <thead>
                         <tr>
+                          <th className="order-col sortable" onClick={() => handleSessionAnalysisSort('question_order')} title="Question number in the test">Q# {sortIndicator(sessionAnalysisSort, 'question_order')}</th>
                           <th className="result-col sortable" onClick={() => handleSessionAnalysisSort('correct')}>Result {sortIndicator(sessionAnalysisSort, 'correct')}</th>
                           <th className="section-col">Subject</th>
                           <th className="category-col">Category</th>
@@ -5945,13 +5951,14 @@ function App() {
                       <tbody>
                         {!sessionAnalysis.data.slowWrongQuestions?.length && (
                           <tr>
-                            <td colSpan="10">No answered questions in this session.</td>
+                            <td colSpan="11">No answered questions in this session.</td>
                           </tr>
                         )}
                         {sortedSessionAnalysisWrongQuestions.map((row, idx) => {
                           const isCorrect = Number(row?.correct) === 1;
                           return (
                           <tr key={`${row.q_code || 'q'}-${idx}`} className={isCorrect ? 'row-correct' : 'row-wrong'}>
+                            <td className="order-col">{formatMaybe(row.question_order)}</td>
                             <td className="result-col">
                               <span className={`result-pill ${isCorrect ? 'result-correct' : 'result-wrong'}`}>
                                 {isCorrect ? 'Correct' : 'Wrong'}

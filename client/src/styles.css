@@ -1637,6 +1637,12 @@ th.sortable:hover {
   word-break: break-word;
 }
 
+.session-analysis-questions-table .order-col {
+  width: 56px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .session-analysis-questions-table .result-col {
   width: 88px;
   min-width: 88px;

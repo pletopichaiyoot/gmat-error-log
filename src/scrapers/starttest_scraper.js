@@ -1526,6 +1526,9 @@ async function readReviewFrame(frame) {
       vPreviousTimeSpent: typeof window.vPreviousTimeSpent === 'number' ? window.vPreviousTimeSpent : null,
       vPassageName: window.vPassageName || null,
       vPublishingKey: window.vPublishingKey || null,
+      // The number StartTest prints beside the stem ("6."): the item's position
+      // in the test. seq is Question History order, which is not the same.
+      itemNumber: Number((text('.ITSStemSequence') || '').match(/\d+/)?.[0]) || null,
       correctKey, // CSV string from <input name="Key1">; "4" for MC, "2,2,1" for matrix
       stem: stemWithStatement,
       passage: text('.passage-block-inner') || text('.passage-block'),

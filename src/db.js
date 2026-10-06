@@ -867,7 +867,11 @@ function buildAttemptSnapshotIndex(rows = []) {
       // their stems). A stored value is already sanitized; pass it through.
       answer_choices: preserveStoredJsonText(row?.answer_choices),
       response_format: normalizedTextOrNull(row?.response_format),
-      response_details: normalizeResponseDetailsForStorage(row?.response_details),
+      // Same trap as answer_choices: the sanitizer only accepts an object, so a
+      // stored (string) value came back null and every rescrape wiped Phase 2's
+      // rationale, passage and item number (1,790 of 3,373 enriched StartTest
+      // rows by 2026-09-30).
+      response_details: preserveStoredJsonText(row?.response_details),
       passage_text: normalizedTextOrNull(row?.passage_text),
       mistake_type: normalizedTextOrNull(row?.mistake_type),
       notes: normalizedTextOrNull(row?.notes),
@@ -928,6 +932,125 @@ function pickAttemptSnapshot(index, question = {}) {
   return null;
 }
 
+// StartTest Phase 1 has no stable question id. q_id is `<sid>-seq-<N>`, and
+// seq indexes the session's ANSWERED items — so resuming a session and
+// answering an item that sorts earlier shifts every later seq by one, and a
+// q_id match hands question N+1's notes, passage, stimulus and q_code to
+// question N. The only per-question text Phase 1 carries is the Question
+// History "Item Preview" (first ~60 chars, math elided as "..." or blanks), so
+// stored rows are aligned to incoming ones by that instead of by position.
+const POSITIONAL_QID = /^\d+-(?:seq|row)-(\d+)$/;
+
+const previewTextKey = (text) =>
+  String(text || '').replace(/\[(?:math|figure)\]/gi, ' ').toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+// The preview is the START of the item: the stem, or for CR the argument that
+// Phase 2 stores as passage_text. `lead` is how far in the first segment may
+// sit — none, unless the preview itself opens with elided math.
+function previewSegments(preview) {
+  const parts = String(preview || '')
+    .replace(/\[item contains image\]/gi, ' ')
+    .split(/\.\.\.|\s{2,}|[^ -~]/);
+  const segs = parts.map(previewTextKey).filter((segment) => segment.length >= 10);
+  return { segs, lead: previewTextKey(parts[0]).length >= 10 ? 0 : 24 };
+}
+
+function textStartsWithPreview(text, { segs, lead }) {
+  let at = text.indexOf(segs[0]);
+  if (at < 0 || at > lead) return false;
+  at += segs[0].length;
+  for (const segment of segs.slice(1)) {
+    const k = text.indexOf(segment, at);
+    if (k < 0) return false;
+    at = k + segment.length;
+  }
+  return true;
+}
+
+// true/false, or null when the preview is too short to tell ("173 + 174 =").
+function previewMatchesRow(preview, row) {
+  if (!preview.segs.length) return null;
+  const texts = [row?.question_stem, row?.passage_text].map(previewTextKey).filter(Boolean);
+  if (!texts.length) return null;
+  return texts.some((text) => textStartsWithPreview(text, preview));
+}
+
+// Map incoming positional q_id -> stored q_id (or null: preserve nothing).
+// Items are only ever inserted into the answered list, so order survives a
+// shift: take the longest in-order run of preview matches (which also settles
+// generic RC prompts like "The primary purpose of the passage is to" that
+// match several rows), then pair what's left positionally inside each gap
+// when the gap sizes agree and the preview doesn't rule the pair out.
+// ponytail: an unequal gap drops its unverifiable rows' enrichment (restored
+// by the next Phase 2) rather than guessing — measured 2 of 335 previews.
+function alignStartTestRows(incoming = [], stored = []) {
+  const seqOf = (row) => Number(String(row?.q_id || '').match(POSITIONAL_QID)?.[1]);
+  const inRows = incoming.filter((q) => POSITIONAL_QID.test(String(q?.q_id || '')) && !q.q_code);
+  const stRows = stored.filter((r) => POSITIONAL_QID.test(String(r?.q_id || '')));
+  const remap = new Map();
+  if (!inRows.length || !stRows.length) return remap;
+  stRows.sort((a, b) => seqOf(a) - seqOf(b));
+
+  const segs = inRows.map((q) => previewSegments(q.question_stem));
+  const check = (i, j) => previewMatchesRow(segs[i], stRows[j]);
+  const n = inRows.length;
+  const m = stRows.length;
+  const lcs = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i -= 1) {
+    for (let j = m - 1; j >= 0; j -= 1) {
+      lcs[i][j] = check(i, j) === true
+        ? lcs[i + 1][j + 1] + 1
+        : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+  const pairs = [];
+  for (let i = 0, j = 0; i < n && j < m;) {
+    if (check(i, j) === true && lcs[i][j] === lcs[i + 1][j + 1] + 1) { pairs.push([i, j]); i += 1; j += 1; }
+    else if (lcs[i + 1][j] >= lcs[i][j + 1]) i += 1;
+    else j += 1;
+  }
+  pairs.push([n, m]);
+
+  let i0 = 0;
+  let j0 = 0;
+  for (const [i1, j1] of pairs) {
+    if (i1 - i0 === j1 - j0) {
+      for (let k = 0; i0 + k < i1; k += 1) {
+        if (check(i0 + k, j0 + k) !== false) remap.set(inRows[i0 + k].q_id, stRows[j0 + k].q_id);
+      }
+    }
+    if (i1 < n) remap.set(inRows[i1].q_id, stRows[j1].q_id);
+    i0 = i1 + 1;
+    j0 = j1 + 1;
+  }
+  for (const q of inRows) if (!remap.has(q.q_id)) remap.set(q.q_id, null);
+
+  const claimed = new Set(remap.values());
+  for (const r of stRows) {
+    if (!claimed.has(r.q_id) && (r.notes || r.mistake_type)) {
+      console.warn(`[rescrape] ${r.q_id}: no incoming question matches it; dropping notes=${JSON.stringify(r.notes)} mistake_type=${JSON.stringify(r.mistake_type)}`);
+    }
+  }
+  return remap;
+}
+
+// The number a question carried in its test, where the source records one.
+// StartTest prints it beside the stem (.ITSStemSequence): Phase 2 stores it as
+// response_details.itemNumber, and older RC/MSR rows carry it inside their
+// captured stimulus. An OPE q_id ends in the position within its section
+// (`-p5`). Anything else is null: StartTest's seq is Question History order,
+// not the order the questions were asked.
+function questionOrderOf(row) {
+  const ope = String(row?.q_id || '').match(/^ope-.+-p(\d+)$/);
+  if (ope) return Number(ope[1]);
+  try {
+    const n = JSON.parse(row?.response_details || 'null')?.itemNumber;
+    if (Number.isInteger(n)) return n;
+  } catch (_e) { /* not JSON */ }
+  const m = String(row?.stimulus || '').match(/ITSStemSequence[^>]*>\s*(\d+)/);
+  return m ? Number(m[1]) : null;
+}
+
 async function saveScrapeResult(data, scrapeOptions = {}) {
   const sessions = Array.isArray(data.sessions) ? data.sessions : [];
   const totalQuestions = sessions.reduce((sum, session) => sum + (session.stats?.total_q_api || 0), 0);
@@ -969,6 +1092,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     let sessionId = null;
     let preservedAnnotationIndex = null;
     let preservedSnapshotIndex = null;
+    let qidRemap = null;
 
     const existing = await tx.get(
       `
@@ -999,6 +1123,7 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
       );
       preservedAnnotationIndex = buildAnnotationIndex(existingAttempts);
       preservedSnapshotIndex = buildAttemptSnapshotIndex(existingAttempts);
+      qidRemap = alignStartTestRows(session.questions, existingAttempts);
 
       await tx.run(
         `
@@ -1109,8 +1234,9 @@ async function saveScrapeResult(data, scrapeOptions = {}) {
     const attempts = Array.isArray(session.questions) ? session.questions : [];
 
     for (const q of attempts) {
-      const preserved = pickPreservedAnnotation(preservedAnnotationIndex, q);
-      const preservedSnapshot = pickAttemptSnapshot(preservedSnapshotIndex, q);
+      const lookup = qidRemap?.has(q.q_id) ? { ...q, q_id: qidRemap.get(q.q_id) } : q;
+      const preserved = pickPreservedAnnotation(preservedAnnotationIndex, lookup);
+      const preservedSnapshot = pickAttemptSnapshot(preservedSnapshotIndex, lookup);
       // A scraped mistake_type wins over the preserved annotation (TTP is
       // authoritative — see CLAUDE.md), but TTP writes its OWN taxonomy as
       // plain-English sentences, so canonicalize onto the picker vocabulary
@@ -3246,6 +3372,7 @@ async function getSessionAnalysis(sessionId) {
         q.content_domain,
         q.mistake_type,
         q.notes,
+        q.q_id,
         s.source
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
@@ -3254,7 +3381,10 @@ async function getSessionAnalysis(sessionId) {
     `,
     [id]
   );
-  const slowWrongQuestions = slowWrongQuestionsRaw.map((row) => enrichQuestionMetadata(row, session));
+  const slowWrongQuestions = slowWrongQuestionsRaw.map((row) => ({
+    ...enrichQuestionMetadata(row, session),
+    question_order: questionOrderOf(row),
+  }));
 
   return {
     session,
@@ -3522,6 +3652,7 @@ async function enrichSessionAttempts({ sessionExternalId, source, enrichedItems 
       vItemInformation: item.vItemInformation || null,
       answerSelection: item.answerSelection ?? null,
       vPreviousTimeSpentMs: typeof item.vPreviousTimeSpent === 'number' ? item.vPreviousTimeSpent : null,
+      itemNumber: Number.isInteger(item.itemNumber) ? item.itemNumber : null,
       passage: item.passage || null,
       keyPoint: item.keyPoint || null,
       rationale: item.rationale || null,
@@ -5438,6 +5569,8 @@ module.exports = {
   saveScrapeResult,
   // Exported for unit testing the Phase-1-rescrape preservation of Phase-2 fields.
   buildAttemptSnapshotIndex,
+  alignStartTestRows,
+  questionOrderOf,
   pickAttemptSnapshot,
   listAiPracticeCandidates,
   resolveAiPracticeSetItems,
