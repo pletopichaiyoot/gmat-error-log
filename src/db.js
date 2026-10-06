@@ -4025,7 +4025,9 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
           answerChoicesArr.length ? JSON.stringify(answerChoicesArr) : null,
           item.correct_answer || '',
           item.my_answer || '',
-          item.final_url || item.source_url || '',
+          // The URL we navigated to (Phase 1's stable topic<N>.html), not
+          // where it redirected: the title slug can 404 later.
+          item.source_url || item.final_url || '',
           item.passage_text || '',
           formatCode,
           item.response_format || '',

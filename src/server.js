@@ -1189,12 +1189,40 @@ app.post('/api/open-question', async (req, res) => {
   }
 });
 
+// One browser job per site tab. Every scrape and enrich drives the user's ONE
+// logged-in tab for that site, and two at once abort each other's navigations
+// (net::ERR_ABORTED) until one trips its too-many-errors abort. The frontend's
+// isEnriching flag can't stop that: a run outlives a page reload, and a second
+// dashboard tab has a flag of its own. StartTest and OPE share starttest.com's
+// tab; the Error Log and the CAT share gmatclub.com's.
+// ponytail: a run that hangs holds its tab until the API restarts — the 409
+// says what is running and since when.
+const BROWSER_TAB_BY_PLATFORM = {
+  starttest: 'starttest', 'ope-mock': 'starttest', gmatclub: 'gmatclub', 'gmatclub-cat': 'gmatclub', ttp: 'ttp',
+};
+const activeBrowserJobs = new Map();
+
+function claimBrowserTab(res, platform, label) {
+  const tab = BROWSER_TAB_BY_PLATFORM[platform] || platform;
+  const running = activeBrowserJobs.get(tab);
+  if (running) {
+    res.status(409).json({
+      ok: false,
+      error: `${running.label} is still running in the ${tab} tab (started ${running.startedAt}). Wait for it to finish, then try again.`,
+    });
+    return null;
+  }
+  activeBrowserJobs.set(tab, { label, startedAt: new Date().toISOString() });
+  return tab;
+}
+
 // Phase 2 endpoint: deep-enrich a single practice session. Takes the DB session
 // id (sessions.id), looks up its session_external_id + source, and runs the
 // per-item iframe loop in the user's logged-in CDP tab. Long-running (~3–5
 // minutes for a 20-question session). Each item adds ~5–8 s for the outer
 // page load + 3–6 s of human-like jitter. Aborts on any anomaly.
 app.post('/api/sessions/:sessionId/enrich', async (req, res) => {
+  let claimedTab = null;
   try {
     const sessionId = Number(req.params.sessionId);
     if (!Number.isInteger(sessionId) || sessionId <= 0) {
@@ -1222,6 +1250,9 @@ app.post('/api/sessions/:sessionId/enrich', async (req, res) => {
       });
       return;
     }
+
+    claimedTab = claimBrowserTab(res, preset.platform, `Phase 2 for session ${sessionId}`);
+    if (!claimedTab) return;
 
     let phase2;
     let dbResult;
@@ -1344,6 +1375,8 @@ app.post('/api/sessions/:sessionId/enrich', async (req, res) => {
       details: clipText(error.stack || error.message || String(error), 4000),
       debug: error.scrapeDebug || null,
     }));
+  } finally {
+    if (claimedTab) activeBrowserJobs.delete(claimedTab);
   }
 });
 
@@ -1436,6 +1469,7 @@ app.get('/api/ope/attempts', async (req, res) => {
 });
 
 app.post('/api/scrape', async (req, res) => {
+  let claimedTab = null;
   try {
     const { source, cdpUrl, scrapeWindow, customSince } = req.body || {};
     const validatedCdpUrl = getValidatedCdpUrl(cdpUrl);
@@ -1447,6 +1481,9 @@ app.post('/api/scrape', async (req, res) => {
       });
       return;
     }
+
+    claimedTab = claimBrowserTab(res, preset.platform, `${preset.label} sync`);
+    if (!claimedTab) return;
 
     const sinceValue = resolveSinceFromWindow({
       windowKey: scrapeWindow,
@@ -1579,6 +1616,8 @@ app.post('/api/scrape', async (req, res) => {
       details: clipText(error.stack || error.message || String(error), 4000),
       debug: error.scrapeDebug || null,
     }));
+  } finally {
+    if (claimedTab) activeBrowserJobs.delete(claimedTab);
   }
 });
 

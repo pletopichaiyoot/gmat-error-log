@@ -952,7 +952,10 @@ async function inlineGmatClubStimulusImages(page, stimulus) {
     try {
       const handle = await page.$(selector);
       if (!handle) continue;
-      const buffer = await handle.screenshot({ type: 'png' });
+      // An element screenshot waits for the element to be visible; a figure
+      // hidden on the page (0px tall) never is, and without a timeout the run
+      // hung on it for hours. Skip it — a hidden figure can't be captured.
+      const buffer = await handle.screenshot({ type: 'png', timeout: 10000 });
       html = html.replace(
         new RegExp(`<img\\b[^>]*data-shot="${shot}"[^>]*>`, 'i'),
         `<img src="data:image/png;base64,${buffer.toString('base64')}">`
@@ -1018,7 +1021,7 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
     if (!page) {
       throw new Error('No gmatclub.com tab found. Open GMAT Club in your logged-in tab first.');
     }
-    page.setDefaultTimeout(0);
+    page.setDefaultTimeout(60000); // no step on one forum page needs longer; 0 let a stuck wait hang the run
     await page.bringToFront();
 
     onConsole = (msg) => pushLog(consoleLogs, {
@@ -1090,7 +1093,13 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
             return document.querySelectorAll('[data-mathml]').length >= sources
               && !document.querySelector('.MJXc-processing');
           },
-          { timeout: 8000 }
+          // Options are the THIRD argument (the second is the page function's
+          // arg). Passed second, the 8s cap was silently dropped and, under
+          // setDefaultTimeout(0), a page whose math never settled — or a Chrome
+          // window not painting, which stops the default rAF polling — hung
+          // the run forever on its first page.
+          null,
+          { timeout: 8000, polling: 250 }
         ).catch(() => null);
         // Make sure the scripts are loaded (re-inject after each navigation).
         await page.addScriptTag({ content: mathTextBundle });
@@ -1481,7 +1490,7 @@ async function runGmatClubCatPhase2FromOpenBrowser(options = {}) {
     const pages = browser.contexts().flatMap((ctx) => ctx.pages());
     page = pages.find((p) => /gmatclub\.com/i.test(p.url())) || pages.find((p) => p.url() === 'about:blank') || pages[0];
     if (!page) throw new Error('No gmatclub.com tab found. Open GMAT Club in your logged-in tab first.');
-    page.setDefaultTimeout(0);
+    page.setDefaultTimeout(60000); // no step on one forum page needs longer; 0 let a stuck wait hang the run
     await page.bringToFront();
     onConsole = (msg) => pushLog(consoleLogs, { at: new Date().toISOString(), type: msg.type(), text: clipText(msg.text(), 1200) });
     onPageError = (e) => pushLog(pageErrors, { at: new Date().toISOString(), text: clipText(e?.stack || e?.message || String(e), 2000) }, 50);
@@ -1517,7 +1526,8 @@ async function runGmatClubCatPhase2FromOpenBrowser(options = {}) {
           }).catch(() => null);
           await page.waitForFunction(
             () => Array.from(document.querySelectorAll('.correctAnswer')).some((e) => /^[A-H]$/.test((e.textContent || '').trim())),
-            { timeout: 5000 }
+            null, // options go third — see the Error Log runner's MathJax wait
+            { timeout: 5000, polling: 250 }
           ).catch(() => null);
         }
         await page.addScriptTag({ content: scraperSource });
