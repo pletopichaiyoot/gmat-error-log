@@ -3439,32 +3439,55 @@ async function loadReviewNotes() {
 // Every if-then rule written in a "Next time" slot, rolled up by trigger, plus
 // the count of misses that still carry no rule. The LIKE is only a cheap
 // narrowing — rollupRules() decides what actually parses as a rule.
-async function listReviewRules({ includeExcluded = false } = {}) {
-  const { rollupRules } = await loadReviewNotes();
-  const sessionClause = excludedSessionClause('s', includeExcluded);
-  const scope = sessionClause ? `AND ${sessionClause}` : '';
-
-  const rows = await all(
-    `
-      SELECT q.q_code, q.notes, q.subject_code, q.category_code, s.session_date
+//
+// Two sources: scraped practice (question_attempts) and OG Book Practice
+// (og_attempts), whose review notes use the same three-slot shape. OG rows take
+// the dashboard's identity for them (`og-<question_id>`, category RC/CR) so a
+// sample q_code matches what the error log shows. Neither table has the other's
+// soft-exclusion flag, so `includeExcluded` only scopes the GMAT half.
+//
+// session_date leaves as TEXT ('YYYY-MM-DD'), not a date: pg hands a `date` back
+// as local midnight, and rollupRules' toISOString() then reads it as the day
+// before in Asia/Bangkok — every rule showed "Last used: yesterday".
+function reviewRuleSourcesSql(scope = '') {
+  return {
+    rules: `
+      SELECT q.q_code, q.notes, q.subject_code, q.category_code, s.session_date::text AS session_date
       FROM question_attempts q
       INNER JOIN sessions s ON s.id = q.session_id
       WHERE LOWER(COALESCE(q.notes, '')) LIKE '%next time:%'
         ${scope}
-    `
-  );
+      UNION ALL
+      SELECT 'og-' || a.question_id AS q_code, a.notes, 'V' AS subject_code, UPPER(a.kind) AS category_code,
+             ((COALESCE(os.started_at, a.attempted_at) AT TIME ZONE 'Asia/Bangkok')::date)::text AS session_date
+      FROM og_attempts a
+      LEFT JOIN og_sessions os ON os.id = a.session_id
+      WHERE LOWER(COALESCE(a.notes, '')) LIKE '%next time:%'
+    `,
+    unruled: `
+      SELECT
+        (SELECT COUNT(*)::int
+           FROM question_attempts q
+           INNER JOIN sessions s ON s.id = q.session_id
+          WHERE q.correct = 0
+            AND NOT (${unansweredPlaceholderExpr('q')})
+            AND LOWER(COALESCE(q.notes, '')) NOT LIKE '%next time:%'
+            ${scope})
+        + (SELECT COUNT(*)::int
+             FROM og_attempts a
+            WHERE a.is_correct = 0
+              AND LOWER(COALESCE(a.notes, '')) NOT LIKE '%next time:%') AS count
+    `,
+  };
+}
 
-  const unruledRow = await get(
-    `
-      SELECT COUNT(*)::int AS count
-      FROM question_attempts q
-      INNER JOIN sessions s ON s.id = q.session_id
-      WHERE q.correct = 0
-        AND NOT (${unansweredPlaceholderExpr('q')})
-        AND LOWER(COALESCE(q.notes, '')) NOT LIKE '%next time:%'
-        ${scope}
-    `
-  );
+async function listReviewRules({ includeExcluded = false } = {}) {
+  const { rollupRules } = await loadReviewNotes();
+  const sessionClause = excludedSessionClause('s', includeExcluded);
+  const sql = reviewRuleSourcesSql(sessionClause ? `AND ${sessionClause}` : '');
+
+  const rows = await all(sql.rules);
+  const unruledRow = await get(sql.unruled);
 
   return { rules: rollupRules(rows), unruled: Number(unruledRow?.count || 0) };
 }
@@ -5649,5 +5672,5 @@ module.exports = {
   updateMockResult,
   deleteMockResult,
   seedMockResultsIfEmpty,
-  _sqlInternals: { platformWhereClause, normalizeAnswerChoicesForStorage, normalizeStimulusForStorage, parseOgSessionRow },
+  _sqlInternals: { platformWhereClause, normalizeAnswerChoicesForStorage, normalizeStimulusForStorage, parseOgSessionRow, reviewRuleSourcesSql },
 };
