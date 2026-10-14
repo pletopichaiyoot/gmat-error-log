@@ -536,7 +536,9 @@ async function findStartTestPage(browser) {
   const pages = browser
     .contexts()
     .flatMap((ctx) => ctx.pages())
-    .filter((page) => STARTTEST_TAB_RE.test(page.url()));
+    // An OPE review popup (ITDStart.aspx) is titled and so outscored a landing
+    // tab without the product menu, handing an OG run a page with no token.
+    .filter((page) => STARTTEST_TAB_RE.test(page.url()) && !/ITDStart\.aspx/i.test(page.url()));
   if (!pages.length) return null;
 
   const scored = [];
