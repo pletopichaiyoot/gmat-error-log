@@ -972,6 +972,16 @@ async function fetchReviewItemNames(page, firstReviewUrl) {
   // Navigate to the ReviewItems shell (used to bootstrap the session and get the
   // AJAX list). After this, jsondata_reviewtable on the page has fresh codes.
   await goto(page, firstReviewUrl);
+  // The list request and the harness's own load of the first ITDReview frame
+  // both ride the page's single-use code. Fired together, StartTest sometimes
+  // served the frame's request its error page (cmd=GetPage&Page=MsgError), the
+  // frame never appeared and the tab was left signed in with no products. Let
+  // the frame finish first; if it never does, seq 0 reports that as before.
+  try {
+    await waitForReviewFrame(page, null, 25000);
+  } catch (_e) {
+    return { items: null, reason: 'review-frame-not-ready' };
+  }
   const ajaxUrl = await page.evaluate(() => {
     const el = document.getElementById('data_reviewitems');
     try { return el ? JSON.parse(el.textContent || '').getreviewitems : null; } catch { return null; }
@@ -1948,7 +1958,9 @@ async function runPhase2({ page, options = {} }) {
       }).catch(() => false);
       if (isSingleChoiceMc) await waitForReviewHighlights(frame);
     } catch (e) {
-      errors.push({ seq, itemName: expectedName, message: e.message });
+      // The snippet carries the page URL and the frames present at the timeout,
+      // the only clue to why a review frame never appeared.
+      errors.push({ seq, itemName: expectedName, message: e.message, snippet: e.snippet || null });
       if (e instanceof ScrapeAnomalyError) {
         aborted = true;
         abortReason = e.message;
