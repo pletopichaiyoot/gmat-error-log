@@ -102,3 +102,10 @@ test('snapshot preserves matrix cells and per-choice flags across a Phase 1 resc
   assert.strictEqual(kept[0].options[0].isCorrect, true);
   assert.strictEqual(kept[0].options[1].isUserSelected, true);
 });
+
+test('snapshot keeps the stored response_details string (rationale, item number)', () => {
+  const stored = JSON.stringify({ itemNumber: 6, rationale: 'Because…', vPreviousTimeSpentMs: 119170 });
+  const index = buildAttemptSnapshotIndex([{ q_id: '410537-seq-1', response_details: stored }]);
+  const snap = pickAttemptSnapshot(index, { q_id: '410537-seq-1', response_details: null });
+  assert.strictEqual(snap.response_details, stored);
+});

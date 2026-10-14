@@ -16,6 +16,7 @@ const assert = require('node:assert');
 const {
   latexToText, tidyInline, extractChoicesFromLines, extractChoicesFromInline,
   stemBeforeChoices, DS_CHOICES, buildDiGridAnswers, parseGraphAnswerKey,
+  extractChoicesFromBareLines, formatCodeFromForum,
 } = require('../../src/scrapers/gmat_club_question_scraper')._internals;
 
 test('latexToText renders a fraction as an inline quotient', () => {
@@ -200,4 +201,55 @@ test('parseGraphAnswerKey keeps an answer that matches no listed option', () => 
     parseGraphAnswerKey('Dropdown 1: Sideways Dropdown 2: equal to', GRAPH_BLANKS),
     'Sideways,equal to'
   );
+});
+
+// topic322394 types its first label as a CYRILLIC capital А (U+0410), and
+// topic352450 separates with a spaced dash. Both stored a stem with the whole
+// choice list (and the poster's trailing junk) glued on, and no choices.
+test('a choice label typed with a Cyrillic look-alike still parses', () => {
+  const text = 'How many sandwiches should be ordered?\n\nА. 12\nB. 16\nC. 20\nD. 24\nE. 48\n\n\nPS84780.02';
+  assert.deepEqual(extractChoicesFromLines(text).map((c) => `${c.label}=${c.text}`), ['A=12', 'B=16', 'C=20', 'D=24', 'E=48']);
+  assert.equal(stemBeforeChoices(text), 'How many sandwiches should be ordered?');
+});
+
+test('a spaced dash after a capital is a choice label', () => {
+  const text = 'answered how many questions correctly?\n\nA - 18\nB - 19\nC - 20\nD - 21\nE - 22\n\nSOURCE: GMAT PREP Exam 5 & 6';
+  assert.deepEqual(extractChoicesFromLines(text).map((c) => `${c.label}=${c.text}`), ['A=18', 'B=19', 'C=20', 'D=21', 'E=22']);
+  assert.equal(stemBeforeChoices(text), 'answered how many questions correctly?');
+});
+
+test('a line of algebra opening with a lowercase letter and a dash is not a label', () => {
+  const text = 'If\na - b = 4\nb - c = 2\nwhat is a - c?';
+  assert.deepEqual(extractChoicesFromLines(text), []);
+  assert.equal(stemBeforeChoices(text), 'If a - b = 4 b - c = 2 what is a - c?');
+});
+
+// topic194054 and topic462525 print bare labels, one per line: "A 88%".
+test('bare capital labels parse when they run A-D or further, one per line', () => {
+  const spaced = 'will be even?\n\nA 88%\n\nB 75%\n\nC 67%\n\nD 63%\n\nE 50%';
+  const r = extractChoicesFromBareLines(spaced);
+  assert.deepEqual(r.choices.map((c) => `${c.label}=${c.text}`), ['A=88%', 'B=75%', 'C=67%', 'D=63%', 'E=50%']);
+  assert.equal(r.stem, 'will be even?');
+  const tight = 'at the two remaining stores?\n\nA $40\nB $50\nC $55\nD $65\nE $70\n\n\nThis is a Butler question';
+  assert.deepEqual(extractChoicesFromBareLines(tight).choices.map((c) => c.text), ['$40', '$50', '$55', '$65', '$70']);
+});
+
+test('a stem that itself opens with a bare "A " does not hide the real list', () => {
+  const text = 'A wheel is divided into 5 sectors.\nIf it is spun three times, what is the probability?\n\nA 88%\n\nB 75%\n\nC 67%\n\nD 63%\n\nE 50%';
+  const r = extractChoicesFromBareLines(text);
+  assert.deepEqual(r.choices.map((c) => c.text), ['88%', '75%', '67%', '63%', '50%']);
+  assert.equal(r.stem, 'A wheel is divided into 5 sectors. If it is spun three times, what is the probability?');
+});
+
+test('prose lines that happen to open with a capital A or B are not a bare-label run', () => {
+  assert.equal(extractChoicesFromBareLines('A certain store sells pens.\nB is twice A.\nWhat is B?'), null);
+});
+
+// "DS Retired Questions" is GMAT DS filed under GMAT Club's GRE section; the
+// page check missed it, so those topics never got the five standard choices.
+test('the forum name in the page title decides DS vs PS, retired DS included', () => {
+  assert.equal(formatCodeFromForum('DS Retired Questions'), 'DS');
+  assert.equal(formatCodeFromForum('GMAT Data Sufficiency (DS)'), 'DS');
+  assert.equal(formatCodeFromForum('GMAT Problem Solving (PS)'), 'PS');
+  assert.equal(formatCodeFromForum('Critical Reasoning (CR)'), null);
 });

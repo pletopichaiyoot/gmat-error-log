@@ -5,26 +5,46 @@
   // scraper-runner.js as `window.runScraper(cfg)`.
   //
   // Target page: https://gmatclub.com/forum/analytics.php#error_log
-  // Table: `table.analytics-table`. Verified column layout (2026-04-26):
-  //   0: checkbox  1: Question  2: Result(svg)  3: Attempts  4: Category
-  //   5: Difficulty band  6: Time  7: Date  8: Mistakes/Notes
-  // The table has NO forum column. Subject must be inferred downstream
-  // (LLM classifier).
+  //
+  // The table on that page is a render of a JSON API, and the render drops the
+  // one field that decides the subject: `forum`, the question FORMAT (PS, DS,
+  // TPA, MSR, G&T, CR, RC). The Category column it does show is a content
+  // topic, and topics are shared across formats — "Word Problems" sits under
+  // both Data Sufficiency and Problem Solving — so scraping the table could only
+  // guess, and it filed every DS and TPA question under Quant. This reads the
+  // API instead, which also returns the whole log in one request rather than a
+  // walk through the pager.
+  //
+  //   POST /api/errorlog/v1/answers  {filters…, sort_by, limit, page} -> {data[], total}
+  //
+  // Same-origin and authorised by the session cookie the tab already holds.
 
-  const PAGE_LOAD_POLL_MS = 250;
-  const PAGE_LOAD_TIMEOUT_MS = 15000;
-  const TABLE_READY_TIMEOUT_MS = 15000;
-  const PREFERRED_PAGE_SIZE = 100;
+  const ERROR_LOG_API = '/api/errorlog/v1/answers';
+  const PAGE_LIMIT = 1000;
+  // ponytail: stops after 20 pages (20k attempts); raise it if a log ever grows past that.
+  const MAX_PAGES = 20;
 
-  const MONTHS = {
-    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
-    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+  // Forum tag -> category code. The tag is the parenthesised abbreviation in
+  // the forum's title ("Two-part Analysis (TPA)"), except for retired DS
+  // questions, whose forum has no abbreviation.
+  const FORUM_TO_CODE = {
+    PS: 'PS',
+    DS: 'DS',
+    // GMAT Club files this forum under its GRE section, but the questions are
+    // GMAT Data Sufficiency — 157 of 995 rows when this was written, so
+    // trusting the section would drop a sixth of the log.
+    'DS Retired Questions': 'DS',
+    TPA: 'TPA',
+    MSR: 'MSR',
+    CR: 'CR',
+    RC: 'RC',
   };
 
-  // GMAT Club's analytics table has no forum column, but the Category cell is
-  // already at the topic level (e.g., "Probability"). Map it directly to a
-  // category code so the LLM classifier can be skipped — the category itself
-  // is the subject signal. Keys are case-insensitive.
+  // Fallback only: a row whose forum is missing or unrecognised (SC, the GRE
+  // forums, a G&T row with no Graphs/Tables chip) is guessed from its topic
+  // chips, as every row used to be. The guess goes in subject_sub_raw alone,
+  // never category_code, so question-metadata's Data Sufficiency stem check
+  // and the classifier can still overrule it.
   const GMATCLUB_CATEGORY_TO_CODE = {
     // Quant — PS
     'probability': 'PS', 'combinations': 'PS', 'permutations': 'PS',
@@ -47,7 +67,12 @@
     // Verbal — CR
     'strengthen': 'CR', 'weaken': 'CR', 'logical flaw': 'CR', 'flaw': 'CR',
     'assumption': 'CR', 'evaluate': 'CR', 'resolve': 'CR', 'explain': 'CR',
-    'inference': 'CR', 'must or could be true': 'CR', 'must be true': 'CR',
+    'inference': 'CR',
+    // "Must or Could be True" is a QUANT tag on GMAT Club — its own CAT score
+    // report files it under Quant / PS — so it is deliberately absent here and
+    // from the keyword list. Compound categories resolve on their quant half
+    // ("Inequalities,Must or Could be True" -> PS); a bare one gets no code and
+    // falls through to the LLM classifier rather than being guessed at.
     'boldface': 'CR', 'method': 'CR', 'parallel': 'CR', 'complete': 'CR',
     'argument structure': 'CR', 'cr': 'CR',
     // Verbal — RC
@@ -62,7 +87,9 @@
     'two-part analysis': 'TPA', 'tpa': 'TPA',
     'di': 'DI',
   };
-  const CODE_TO_SUBJECT = { PS: 'Q', DS: 'Q', CR: 'V', RC: 'V', GI: 'DI', TA: 'DI', MSR: 'DI', TPA: 'DI', DI: 'DI' };
+  // DS is Data Insights under GMAT Focus, not Quant — the same split
+  // normalizeSubjectCode uses in src/question-metadata.js.
+  const CODE_TO_SUBJECT = { PS: 'Q', DS: 'DI', CR: 'V', RC: 'V', GI: 'DI', TA: 'DI', MSR: 'DI', TPA: 'DI', DI: 'DI' };
 
   // Keyword fallback for compound GMAT Club categories like
   // "Statistics and Sets Problems" that aren't a direct entry in the table.
@@ -70,7 +97,7 @@
   // Drop trailing \b so plurals/suffixes (e.g., "statistics", "fractions",
   // "ratios", "rates", "sets") still match the stem.
   const KEYWORD_TO_CODE = [
-    [/\b(must be true|could be true|inference|infer)/, 'CR'],
+    [/\b(inference|infer)/, 'CR'],
     [/\b(strengthen|weaken|flaw|assumption|evaluate|resolve|explain|boldface|argument|parallel)/, 'CR'],
     [/\b(main idea|purpose|author|detail|structure|application|organization)/, 'RC'],
     // GMAT Club tags RC passages by subject + length, e.g. "Science,Short Passage",
@@ -103,43 +130,11 @@
     return { code, subject: code ? CODE_TO_SUBJECT[code] || null : null };
   }
 
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  function parseDateRaw(raw) {
-    // "7 Mar 2026" → Date at local midnight, or null
-    const m = String(raw || '').trim().match(/^(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{4})$/);
-    if (!m) return null;
-    const day = parseInt(m[1], 10);
-    const month = MONTHS[m[2].slice(0, 3).toLowerCase()];
-    const year = parseInt(m[3], 10);
-    if (month === undefined || !Number.isFinite(day) || !Number.isFinite(year)) return null;
-    return new Date(year, month, day);
-  }
-
-  function formatDateISO(d) {
-    if (!d) return '';
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-  }
-
   function parseSinceDateKey(since) {
     // YYYYMMDDHHmmss → "YYYY-MM-DD" (day granularity — the table only shows date)
     const s = String(since || '');
     if (s.length < 8) return '';
     return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
-  }
-
-  function parseTimeSec(raw) {
-    if (!raw) return null;
-    const parts = String(raw).trim().split(':').map((x) => parseInt(x, 10));
-    if (parts.some((p) => !Number.isFinite(p))) return null;
-    if (parts.length === 2) return parts[0] * 60 + parts[1];
-    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-    return null;
   }
 
   function mapDifficulty(raw) {
@@ -174,349 +169,172 @@
     return Math.abs(hash);
   }
 
-  function getShowingText() {
-    const m = document.body.innerText.match(/Showing\s+(\d+)-(\d+)\s+of\s+(\d+)/i);
-    if (!m) return null;
-    return { start: +m[1], end: +m[2], total: +m[3], raw: m[0] };
-  }
-
-  async function waitForSelector(selector, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (document.querySelector(selector)) return true;
-      await sleep(PAGE_LOAD_POLL_MS);
-    }
-    return !!document.querySelector(selector);
-  }
-
-  async function waitForTableReady() {
-    await waitForSelector('.analytics-table', TABLE_READY_TIMEOUT_MS);
-    // Wait for either rows to appear or for "Showing" text to materialize.
-    const deadline = Date.now() + TABLE_READY_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      const hasRow = document.querySelector('.analytics-table tbody tr');
-      const showing = getShowingText();
-      if (hasRow || (showing && showing.total === 0)) return showing;
-      await sleep(PAGE_LOAD_POLL_MS);
-    }
-    return getShowingText();
-  }
-
-  // The pager container is the nearest ancestor of the table that also contains
-  // the "Showing N-N of M" text. Scoping page-button lookups to this container
-  // avoids a false match against the row-level Attempts buttons (which are
-  // also `<button>{N}</button>`).
-  function findPagerContainer() {
-    const table = document.querySelector('.analytics-table');
-    if (!table) return null;
-    let node = table.parentElement;
-    for (let i = 0; i < 6 && node; i++, node = node.parentElement) {
-      if (/Showing\s+\d+-\d+\s+of\s+\d+/i.test(node.textContent || '')) return node;
+  function forumToCode(forum, topics) {
+    const key = String(forum || '').trim();
+    if (FORUM_TO_CODE[key]) return FORUM_TO_CODE[key];
+    // "Graphs and Tables" is one forum covering two Focus formats; the topic
+    // chips say which.
+    if (key === 'G&T') {
+      const chips = (topics || []).join(',').toLowerCase();
+      if (/\bgraphs?\b/.test(chips)) return 'GI';
+      if (/\btables?\b/.test(chips)) return 'TA';
     }
     return null;
   }
 
-  function findPageButton(targetPage) {
-    const pager = findPagerContainer();
-    if (!pager) return null;
-    const candidates = Array.from(pager.querySelectorAll('button'))
-      .filter((b) => !b.closest('tbody'))
-      .filter((b) => b.textContent.trim() === String(targetPage))
-      .filter((b) => !b.disabled);
-    // Prefer the rounded-md pager style if multiple match.
-    const styled = candidates.find((b) => /rounded-md/.test(b.className || ''));
-    return styled || candidates[0] || null;
+  // The day a row belongs to, as YYYY-MM-DD in `timeZone`. Session ids hash
+  // this key, so it has to match the day the old table scraper read off the
+  // page — which GMAT Club renders in the BROWSER's zone, not the API's
+  // -08:00. Verified against every stored attempt: 910 of 910 land on their
+  // existing session this way, where keying on the timestamp's own date would
+  // have moved 345 of them to the previous day and duplicated their sessions.
+  function dayKey(iso, timeZone) {
+    const d = new Date(iso);
+    if (!iso || Number.isNaN(d.getTime())) return '';
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(d);
   }
 
-  async function waitForShowingChange(prev) {
-    const deadline = Date.now() + PAGE_LOAD_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      const cur = getShowingText();
-      if (cur && (!prev || cur.start !== prev.start)) return cur;
-      await sleep(PAGE_LOAD_POLL_MS);
-    }
-    return getShowingText();
+  function toQuestion(r) {
+    const topics = Array.isArray(r.category) ? r.category.filter(Boolean) : [];
+    const topic = topics.join(',') || null;
+    const tagged = forumToCode(r.forum, topics);
+    const code = tagged || mapGmatClubCategory(topic).code;
+    // The id names its table — phpbb_topics_timer_{,di_,rc_}history-N — and
+    // only N is kept, which is what every stored gc-att- id was built from.
+    // ponytail: assumes N never repeats across those tables (none did in 995
+    // rows); namespace the q_id by table if one ever does.
+    const attemptId = (String(r.id || '').match(/(\d+)$/) || [])[1] || null;
+    const questionId = r.question_id ? String(r.question_id) : extractTopicId(r.question_url);
+    // Same text the table's Mistakes/Notes cell rendered: the mistake chips,
+    // then the note.
+    const notes = [...(Array.isArray(r.mistakes) ? r.mistakes : []), r.note]
+      .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    return {
+      // q_id = stable per-attempt id (timer history). q_code = per-question
+      // topic id. Both prefixed for cross-source uniqueness.
+      q_id: attemptId ? `gc-att-${attemptId}` : null,
+      q_code: questionId ? `gc-q-${questionId}` : null,
+      cat_id: null,
+      correct: r.is_correct === true,
+      difficulty: mapDifficulty(r.difficulty),
+      confidence: null,
+      time_sec: Number.isFinite(r.spent_time) ? r.spent_time : null,
+      my_answer: null,
+      correct_answer: null,
+      topic,
+      subcategory: topic,
+      topic_source: code ? 'gmatclub-canonical' : null,
+      question_url: r.question_url ? new URL(r.question_url, 'https://gmatclub.com').href : null,
+      // RC rows carry the passage position here ("… epidemi (№6)"), which
+      // Phase 2 pins sub-questions on — keep the API's text verbatim.
+      question_stem: r.question || null,
+      answer_choices: null,
+      // The forum tag is authoritative, so it is written as category_code and
+      // subject_code. saveScrapeResult prefers an incoming category_code over
+      // the stored one, which is what lets a re-scrape correct rows the old
+      // guess filed wrongly — left in subject_sub_raw alone, the stale stored
+      // category would win.
+      category_code: tagged,
+      subject_code: tagged ? CODE_TO_SUBJECT[tagged] : null,
+      subject_sub: null,
+      subject_sub_raw: code,
+      content_domain: null,
+      response_format: null,
+      response_details: null,
+      notes: notes || null,
+      mistake_type: null,
+    };
   }
 
-  async function waitForRowCount(expected, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const count = document.querySelectorAll('.analytics-table tbody tr').length;
-      if (count === expected) return count;
-      await sleep(PAGE_LOAD_POLL_MS);
-    }
-    return document.querySelectorAll('.analytics-table tbody tr').length;
-  }
-
-  async function trySetPageSize(targetSize) {
-    // The page-size <select> sits outside the table. Match it by the option text.
-    const selects = Array.from(document.querySelectorAll('select'));
-    const sel = selects.find((s) =>
-      Array.from(s.options).some((o) => /\d+\s*Entries/i.test(o.textContent || ''))
-    );
-    if (!sel) return null;
-    const option = Array.from(sel.options).find(
-      (o) => parseInt(o.textContent || '', 10) === targetSize
-    );
-    if (!option) return null;
-    if (sel.value === option.value) return targetSize;
-
-    sel.value = option.value;
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
-    sel.dispatchEvent(new Event('input', { bubbles: true }));
-
-    // Showing text updates synchronously; rows re-render async. Wait for the
-    // row count to actually match the new "Showing X-Y of Z" range.
-    const showing = getShowingText();
-    const expectedRows = showing ? Math.min(targetSize, showing.end - showing.start + 1) : targetSize;
-    await waitForRowCount(expectedRows, PAGE_LOAD_TIMEOUT_MS);
-    return targetSize;
-  }
-
-  function scrapeCurrentPage() {
-    const table = document.querySelector('.analytics-table');
-    if (!table) return [];
-
-    const rows = Array.from(table.querySelectorAll('tbody tr'));
-    return rows.map((row) => {
-      const cells = Array.from(row.querySelectorAll('td'));
-      if (cells.length < 9) return null;
-
-      const stemLink = cells[1] ? cells[1].querySelector('a[href]') : null;
-      const stem = cells[1] ? cells[1].textContent.replace(/\s+/g, ' ').trim() : '';
-      const questionUrl = stemLink ? stemLink.href : '';
-
-      const resultSvg = cells[2] ? cells[2].querySelector('svg') : null;
-      const svgClass = resultSvg ? resultSvg.getAttribute('class') || '' : '';
-      const correct = /text-green/.test(svgClass);
-
-      const attemptsText = cells[3] ? cells[3].textContent.trim() : '';
-      const attempts = parseInt(attemptsText, 10) || null;
-
-      // Category cell may render multiple chips plus a "+N topics" hover
-      // affordance, which textContent joins as e.g. "Combinations+1 topic".
-      // Strip the trailing "+N topic(s)" so the value is the visible label.
-      const category = cells[4]
-        ? cells[4].textContent.replace(/\s+/g, ' ').trim().replace(/\s*\+\s*\d+\s+topics?$/i, '').trim()
-        : '';
-      const difficultyRaw = cells[5] ? cells[5].textContent.trim() : '';
-      const timeRaw = cells[6] ? cells[6].textContent.trim() : '';
-      const dateRaw = cells[7] ? cells[7].textContent.trim() : '';
-
-      // Per-attempt + per-question stable ids live on the mistake button.
-      const mistakeBtn = cells[8] ? cells[8].querySelector('button[data-row]') : null;
-      const dataRow = mistakeBtn ? mistakeBtn.getAttribute('data-row') || '' : '';
-      const attemptIdMatch = dataRow.match(/(\d+)$/);
-      const attemptId = attemptIdMatch ? attemptIdMatch[1] : null;
-      const questionIdAttr = mistakeBtn
-        ? mistakeBtn.getAttribute('data-analytics-question-id') || ''
-        : '';
-      const questionId = questionIdAttr || extractTopicId(questionUrl);
-
-      // The note cell renders its text TWICE: a visible truncated preview
-      // <span> plus a `hidden group-hover:block` hover-popup holding the full
-      // note. textContent concatenates both (doubling every note); innerText
-      // excludes the hidden popup, so it returns the note exactly once. CSS
-      // `truncate` clips the preview visually only — innerText still yields the
-      // full text. (Thai notes come back as literal '?' here: GMAT Club's own
-      // note field mangles non-Latin text on save, so the source is already
-      // corrupted — nothing the scraper can recover.)
-      const notes = cells[8] ? cells[8].innerText.replace(/\s+/g, ' ').trim() : '';
-
-      return {
-        attemptId,
-        questionId,
-        questionUrl,
-        questionStem: stem,
-        category,
-        difficultyRaw,
-        timeRaw,
-        dateRaw,
-        correct,
-        attempts,
-        notes,
-      };
-    }).filter(Boolean);
-  }
-
-  window.runScraper = async function runScraper(cfg) {
-    const sinceKey = parseSinceDateKey(cfg && cfg.since);
-    const source = (cfg && cfg.source) || 'GMAT Club Error Log';
-    console.log(`[gmat-club-scraper] start since=${cfg && cfg.since} (key=${sinceKey}) source=${source}`);
-
-    const initialShowing = await waitForTableReady();
-    if (!initialShowing) {
-      console.warn('[gmat-club-scraper] No "Showing N-N of M" text found — table may not have loaded');
-    }
-    const total = initialShowing ? initialShowing.total : 0;
-    console.log(`[gmat-club-scraper] total entries: ${total}`);
-
-    if (total === 0) {
-      return {
-        extracted_at: new Date().toISOString(),
-        config: { since: cfg && cfg.since, source, sinceTimezone: 'Asia/Bangkok' },
-        sessions: [],
-      };
-    }
-
-    const usedPageSize = (await trySetPageSize(PREFERRED_PAGE_SIZE)) || (initialShowing
-      ? Math.max(1, initialShowing.end - initialShowing.start + 1)
-      : 20);
-
-    // Always start on page 1. The user (or a prior scrape) may have left the
-    // table on a later page; otherwise we'd skip the head of the list.
-    const showingNow = getShowingText() || initialShowing;
-    if (showingNow && showingNow.start > 1) {
-      const page1 = findPageButton(1);
-      if (page1) {
-        page1.click();
-        const after = await waitForShowingChange(showingNow);
-        if (after) {
-          await waitForRowCount(Math.min(usedPageSize, after.end - after.start + 1), PAGE_LOAD_TIMEOUT_MS);
-        }
-      }
-    }
-
-    const showingAfterResize = getShowingText() || initialShowing;
-    const totalPages = Math.ceil((showingAfterResize ? showingAfterResize.total : total) / usedPageSize) || 1;
-    console.log(`[gmat-club-scraper] page size=${usedPageSize}, pages=${totalPages}`);
-
-    const seenAttemptIds = new Set();
-    const collected = [];
-    let reachedEnd = false;
-
-    for (let page = 1; page <= totalPages; page++) {
-      const showing = getShowingText();
-      console.log(`[gmat-club-scraper] page ${page}/${totalPages} (${showing ? showing.raw : 'no showing text'})`);
-
-      const rows = scrapeCurrentPage();
-      if (!rows.length) {
-        console.warn(`[gmat-club-scraper] empty page ${page}, stopping`);
-        break;
-      }
-
-      for (const r of rows) {
-        const dedupKey = r.attemptId || `${r.questionId || 'q'}|${r.dateRaw}|${r.timeRaw}`;
-        if (seenAttemptIds.has(dedupKey)) continue;
-        seenAttemptIds.add(dedupKey);
-
-        const d = parseDateRaw(r.dateRaw);
-        const dateKey = d ? formatDateISO(d) : '';
-        if (sinceKey && dateKey && dateKey < sinceKey) {
-          reachedEnd = true;
-          continue;
-        }
-        collected.push({ ...r, dateKey });
-      }
-
-      if (reachedEnd) {
-        console.log(`[gmat-club-scraper] hit since cutoff at page ${page}`);
-        break;
-      }
-      if (page >= totalPages) break;
-
-      const before = getShowingText();
-      const nextBtn = findPageButton(page + 1);
-      if (!nextBtn) {
-        console.warn(`[gmat-club-scraper] no pager button for page ${page + 1}`);
-        break;
-      }
-      nextBtn.click();
-      const after = await waitForShowingChange(before);
-      if (!after || (before && after.start === before.start)) {
-        console.warn(`[gmat-club-scraper] page did not advance after clicking ${page + 1}`);
-        break;
-      }
-      const expectedRows = Math.min(usedPageSize, after.end - after.start + 1);
-      await waitForRowCount(expectedRows, PAGE_LOAD_TIMEOUT_MS);
-    }
-
-    console.log(`[gmat-club-scraper] collected ${collected.length} rows`);
-
-    // Group rows into sessions by date. GMAT Club Error Log is not session-
-    // based, so each calendar day becomes one synthetic session. The session
-    // id is hashed from `${source}|${dateKey}` so different sources don't
-    // collide on the same day.
+  // GMAT Club Error Log is not session-based, so each calendar day becomes one
+  // synthetic session, id hashed from `${source}|${dateKey}`.
+  function buildSessions(rows, { source, sinceKey = '', timeZone } = {}) {
     const byDate = new Map();
-    for (const r of collected) {
-      const key = r.dateKey || 'unknown';
+    for (const r of rows) {
+      // Whole practice tests and quizzes appear in the log as one row with no
+      // question; they are not attempts (the CAT has its own scraper).
+      if (r.type !== 'answer') continue;
+      const dateKey = dayKey(r.date, timeZone);
+      if (sinceKey && dateKey && dateKey < sinceKey) continue;
+      const key = dateKey || 'unknown';
       if (!byDate.has(key)) byDate.set(key, []);
-      byDate.get(key).push(r);
+      byDate.get(key).push(toQuestion(r));
     }
 
-    const sessions = Array.from(byDate.entries())
+    const avg = (arr) => (arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0);
+    const timesOf = (qs) => qs.map((q) => q.time_sec).filter((t) => t !== null);
+    return Array.from(byDate.entries())
       .sort((a, b) => b[0].localeCompare(a[0]))
-      .map(([dateKey, rows]) => {
-        const correctCount = rows.filter((r) => r.correct).length;
-        const errorCount = rows.length - correctCount;
-        const times = rows.map((r) => parseTimeSec(r.timeRaw)).filter((t) => t !== null);
-        const correctTimes = rows.filter((r) => r.correct).map((r) => parseTimeSec(r.timeRaw)).filter((t) => t !== null);
-        const errorTimes = rows.filter((r) => !r.correct).map((r) => parseTimeSec(r.timeRaw)).filter((t) => t !== null);
-        const avg = (arr) => (arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0);
-
-        const questions = rows.map((r) => {
-          const mapped = mapGmatClubCategory(r.category);
-          // If the category maps to a known code, mark the row as
-          // 'gmatclub-canonical' so the LLM classifier skips it. Otherwise
-          // leave `topic_source` null and let the classifier handle it.
-          const topicSource = mapped.code ? 'gmatclub-canonical' : null;
-          return ({
-          // q_id = stable per-attempt id (timer history). q_code = per-question
-          // topic id. Both prefixed for cross-source uniqueness.
-          q_id: r.attemptId ? `gc-att-${r.attemptId}` : null,
-          q_code: r.questionId ? `gc-q-${r.questionId}` : null,
-          cat_id: null,
-          correct: r.correct,
-          difficulty: mapDifficulty(r.difficultyRaw),
-          confidence: null,
-          time_sec: parseTimeSec(r.timeRaw),
-          my_answer: null,
-          correct_answer: null,
-          // The category cell is the topic. Carry it through as `topic` and
-          // also mirror to `subcategory` so the existing UI columns render.
-          topic: r.category || null,
-          subcategory: r.category || null,
-          topic_source: topicSource,
-          question_url: r.questionUrl || null,
-          question_stem: r.questionStem || null,
-          answer_choices: null,
-          // Feed the inferred category code into `subject_sub_raw` so
-          // deriveQuestionMetadata can compute category_code/subject_code
-          // without any LLM call.
-          subject_sub: null,
-          subject_sub_raw: mapped.code,
-          content_domain: null,
-          response_format: null,
-          response_details: null,
-          notes: r.notes || null,
-          mistake_type: null,
-          });
-        });
-
+      .map(([dateKey, questions]) => {
+        const correct = questions.filter((q) => q.correct);
+        const wrong = questions.filter((q) => !q.correct);
         return {
           session_id: hashSessionId(`${source}|${dateKey}`),
           date: dateKey,
           source,
-          // No subject signal exists in the GMAT Club table. Leave null and
-          // let downstream code (or the user) fill it in.
+          // A day mixes all three sections; downstream derives the session
+          // subject from its questions.
           subject: null,
           review_category_id: null,
           stats: {
-            total_q_api: rows.length,
-            total_q_categories: rows.length,
-            correct: correctCount,
-            errors: errorCount,
-            accuracy_pct: rows.length > 0 ? Math.round((correctCount / rows.length) * 1000) / 10 : 0,
-            avg_time_sec: avg(times),
-            avg_correct_time_sec: avg(correctTimes),
-            avg_incorrect_time_sec: avg(errorTimes),
+            total_q_api: questions.length,
+            total_q_categories: questions.length,
+            correct: correct.length,
+            errors: wrong.length,
+            accuracy_pct: questions.length > 0 ? Math.round((correct.length / questions.length) * 1000) / 10 : 0,
+            avg_time_sec: avg(timesOf(questions)),
+            avg_correct_time_sec: avg(timesOf(correct)),
+            avg_incorrect_time_sec: avg(timesOf(wrong)),
           },
           questions,
-          wrong_q_ids: questions
-            .filter((q) => !q.correct)
-            .map((q) => ({ q_id: q.q_id, cat_id: null })),
+          wrong_q_ids: wrong.map((q) => ({ q_id: q.q_id, cat_id: null })),
         };
       });
+  }
+
+  async function fetchErrorLogRows() {
+    const rows = [];
+    const seen = new Set();
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const res = await fetch(ERROR_LOG_API, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          category_ids: [], topic_ids: [], sources: [], difficulties: [],
+          time_preset: '', time_from: '', time_to: '',
+          groups_only: false, hide_groups: false, mistakes: [],
+          sort_by: 'date', sort_asc: false, limit: PAGE_LIMIT, page,
+        }),
+      });
+      // A signed-out tab gets an HTML page back; say so rather than failing on
+      // the JSON parse.
+      if (!res.ok || !/json/i.test(res.headers.get('content-type') || '')) {
+        throw new Error(`GMAT Club error-log API answered HTTP ${res.status} (${res.headers.get('content-type') || 'no type'}) — is the gmatclub.com tab signed in?`);
+      }
+      const body = await res.json();
+      const data = Array.isArray(body && body.data) ? body.data : [];
+      for (const r of data) {
+        if (seen.has(r.id)) continue;
+        seen.add(r.id);
+        rows.push(r);
+      }
+      if (!data.length || rows.length >= (Number(body && body.total) || 0)) break;
+    }
+    return rows;
+  }
+
+  async function runScraper(cfg) {
+    const sinceKey = parseSinceDateKey(cfg && cfg.since);
+    const source = (cfg && cfg.source) || 'GMAT Club Error Log';
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    console.log(`[gmat-club-scraper] start since=${cfg && cfg.since} (key=${sinceKey}) source=${source} tz=${timeZone}`);
+
+    const rows = await fetchErrorLogRows();
+    const sessions = buildSessions(rows, { source, sinceKey, timeZone });
+    console.log(`[gmat-club-scraper] ${rows.length} log rows -> ${sessions.length} sessions`);
 
     return {
       extracted_at: new Date().toISOString(),
@@ -529,5 +347,15 @@
       },
       sessions,
     };
-  };
+  }
+
+  if (typeof window !== 'undefined') window.runScraper = runScraper;
+
+  // Node-side unit tests reach the pure helpers here; in the browser `module`
+  // is undefined and this is a no-op.
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+      _internals: { forumToCode, mapGmatClubCategory, dayKey, toQuestion, buildSessions, hashSessionId },
+    };
+  }
 })();

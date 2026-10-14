@@ -176,6 +176,20 @@ async function connectBrowserOverCdp(rawUrl) {
   throw error;
 }
 
+// Every runner ends with this. On a connectOverCDP browser, close() drops only
+// this run's WebSocket: Chrome, its tabs and their logins are untouched
+// (Playwright 1.58 closes the transport and nothing else; checked live on
+// 2026-10-14). Left open, each run leaked a client, and every client pauses a
+// new frame until it releases it: 13 leaked clients left StartTest's review
+// frame paused for good ("No ITDReview.aspx frame ever appeared").
+async function disconnectBrowser(browser) {
+  try {
+    await browser?.close();
+  } catch (_error) {
+    // Already disconnected.
+  }
+}
+
 async function inferClientId(page, fallbackClientId) {
   try {
     const detected = await page.evaluate(() => {
@@ -494,10 +508,8 @@ async function openUrlInOpenBrowser(options = {}) {
 //   1. Tab pattern matches starttest.com, not gmatofficialpractice.mba.com.
 //   2. The scraper is a Node-side module (starttest_scraper.js) — we call its
 //      functions directly, no page.evaluate-injection.
-//   3. We do NOT call browser.close() anywhere. Playwright's connectOverCDP
-//      tears down wrapped contexts on close, which would close the user's
-//      logged-in tab and invalidate their StartTest session token. Leaving
-//      the WS to disconnect on process exit is the safe alternative.
+//   3. Each run disconnects when it ends (disconnectBrowser), which leaves the
+//      user's Chrome, tabs and session token alone.
 
 const {
   SOURCE_PRODUCTS: STARTTEST_SOURCE_PRODUCTS,
@@ -505,6 +517,7 @@ const {
   runPhase1: runStartTestPhase1,
   runPhase2: runStartTestPhase2,
   normalizeProductHeading,
+  imageDataUri,
   _internals: startTestInternals,
 } = require('./scrapers/starttest_scraper');
 
@@ -535,7 +548,9 @@ async function findStartTestPage(browser) {
   const pages = browser
     .contexts()
     .flatMap((ctx) => ctx.pages())
-    .filter((page) => STARTTEST_TAB_RE.test(page.url()));
+    // An OPE review popup (ITDStart.aspx) is titled and so outscored a landing
+    // tab without the product menu, handing an OG run a page with no token.
+    .filter((page) => STARTTEST_TAB_RE.test(page.url()) && !/ITDStart\.aspx/i.test(page.url()));
   if (!pages.length) return null;
 
   const scored = [];
@@ -728,8 +743,7 @@ async function runStartTestScrapeFromOpenBrowser(options = {}) {
   } finally {
     if (startTestPage && onConsole) startTestPage.off('console', onConsole);
     if (startTestPage && onPageError) startTestPage.off('pageerror', onPageError);
-    // Intentionally DO NOT call browser.close() — it would tear down the user's
-    // logged-in StartTest tab and force a re-login. Let the WS disconnect on exit.
+    await disconnectBrowser(browser);
   }
 }
 
@@ -800,11 +814,12 @@ async function openStartTestProductInOpenBrowser(options = {}) {
       tabUrl: startTestPage?.url?.() || null,
     };
     throw wrapped;
+  } finally {
+    await disconnectBrowser(browser);
   }
-  // No `finally { browser.close() }` — same reason as above.
 }
 
-// Phase 2: per-session deep enrichment. Same no-close discipline.
+// Phase 2: per-session deep enrichment.
 // Long-running (~3–5 minutes for 20 items at jittered pacing). Caller is
 // expected to handle async/progress UX — server.js exposes this behind a
 // dedicated endpoint and times out generously.
@@ -927,21 +942,30 @@ async function runStartTestPhase2FromOpenBrowser(options = {}) {
   } finally {
     if (startTestPage && onConsole) startTestPage.off('console', onConsole);
     if (startTestPage && onPageError) startTestPage.off('pageerror', onPageError);
-    // Same no-close discipline.
+    await disconnectBrowser(browser);
   }
 }
 
 // Phase 2 for GMAT Club: visits each topic URL one at a time on the existing
 // gmatclub.com tab and runs `window.gmatClubEnrichCurrentPage()` to extract
 // the stem, choices, and revealed official-answer letter.
-// GMAT Club DI figures (Graphics Interpretation graphs) are images whose URL
-// the dashboard cannot use: GMAT Club's own attachment endpoint needs the
-// session cookie, and many graphs are served from s3.amazonaws.com, which
-// sends no CORS header — so the page scraper can neither canvas-draw nor fetch
-// them. It marks each one `data-shot="N"` instead and leaves a placeholder in
-// the stimulus HTML; Playwright screenshots the element, which no cross-origin
-// rule applies to, and the placeholder is swapped for a self-contained data:
-// PNG. Same trick, and same reason, as the StartTest itdmedia charts.
+// GMAT Club figures are images whose URL the dashboard cannot use, so the page
+// scraper marks each `data-shot="N"` (markStimulusImages says why the bytes are
+// copied, not screenshotted) and this swaps each placeholder for a data: image.
+// A page-side fetch carries the session cookie that attachments need; graphs on
+// s3.amazonaws.com send no CORS header, so that fetch throws, and being public
+// they are fetched from Node instead.
+// The URL comes from a forum post, so Node fetches only public S3 over https and
+// follows no redirect: anything else could point it at localhost or the LAN.
+function isPublicS3Url(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && /(^|\.)s3([.-][a-z0-9-]+)*\.amazonaws\.com$/i.test(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
 async function inlineGmatClubStimulusImages(page, stimulus) {
   const selectors = Array.isArray(stimulus?.imageSelectors) ? stimulus.imageSelectors : [];
   if (!stimulus?.html) return null;
@@ -950,12 +974,34 @@ async function inlineGmatClubStimulusImages(page, stimulus) {
     const shot = (selector.match(/data-shot="(\d+)"/) || [])[1];
     if (shot === undefined) continue;
     try {
-      const handle = await page.$(selector);
-      if (!handle) continue;
-      const buffer = await handle.screenshot({ type: 'png' });
+      // `page.evaluate` has no default timeout, so the fetch carries its own.
+      const fetched = await page.evaluate(async (sel) => {
+        const img = document.querySelector(sel);
+        const url = img && (img.currentSrc || img.src);
+        if (!url) return null;
+        try {
+          const res = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(15000) });
+          if (!res.ok) return { url, error: `HTTP ${res.status}` };
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          let binary = '';
+          for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+          return { url, type: res.headers.get('content-type'), base64: btoa(binary) };
+        } catch (e) {
+          return { url, error: String((e && e.message) || e) };
+        }
+      }, selector);
+      if (!fetched) continue;
+      let uri = imageDataUri(fetched.type, fetched.base64);
+      if (!uri && isPublicS3Url(fetched.url)) {
+        const res = await fetch(fetched.url, { redirect: 'error', signal: AbortSignal.timeout(15000) });
+        if (res.ok) {
+          uri = imageDataUri(res.headers.get('content-type'), Buffer.from(await res.arrayBuffer()).toString('base64'));
+        }
+      }
+      if (!uri) continue;
       html = html.replace(
         new RegExp(`<img\\b[^>]*data-shot="${shot}"[^>]*>`, 'i'),
-        `<img src="data:image/png;base64,${buffer.toString('base64')}">`
+        `<img src="${uri}">`
       );
     } catch (_e) {
       // Leave the placeholder; the dashboard's sanitizer drops a src-less img.
@@ -1018,7 +1064,7 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
     if (!page) {
       throw new Error('No gmatclub.com tab found. Open GMAT Club in your logged-in tab first.');
     }
-    page.setDefaultTimeout(0);
+    page.setDefaultTimeout(60000); // no step on one forum page needs longer; 0 let a stuck wait hang the run
     await page.bringToFront();
 
     onConsole = (msg) => pushLog(consoleLogs, {
@@ -1090,7 +1136,13 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
             return document.querySelectorAll('[data-mathml]').length >= sources
               && !document.querySelector('.MJXc-processing');
           },
-          { timeout: 8000 }
+          // Options are the THIRD argument (the second is the page function's
+          // arg). Passed second, the 8s cap was silently dropped and, under
+          // setDefaultTimeout(0), a page whose math never settled — or a Chrome
+          // window not painting, which stops the default rAF polling — hung
+          // the run forever on its first page.
+          null,
+          { timeout: 8000, polling: 250 }
         ).catch(() => null);
         // Make sure the scripts are loaded (re-inject after each navigation).
         await page.addScriptTag({ content: mathTextBundle });
@@ -1237,7 +1289,7 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
   } finally {
     if (page && onConsole) page.off('console', onConsole);
     if (page && onPageError) page.off('pageerror', onPageError);
-    // No browser.close() — same discipline as other runners.
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1246,8 +1298,6 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
 // category's `?page=N` URLs. The TTP error tracker is fully cumulative (no
 // since-date concept on the page), so the `since` parameter is currently
 // unused — the user filters the resulting rows in the dashboard.
-//
-// Same no-close discipline as the other CDP-attached runners.
 
 function findTtpPage(browser) {
   const pages = browser.contexts().flatMap((ctx) => ctx.pages());
@@ -1373,7 +1423,7 @@ async function runTtpScrapeFromOpenBrowser(options = {}) {
   } finally {
     if (ttpPage && onConsole) ttpPage.off('console', onConsole);
     if (ttpPage && onPageError) ttpPage.off('pageerror', onPageError);
-    // No browser.close() — preserve the user's logged-in TTP session.
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1453,7 +1503,7 @@ async function runGmatClubCatScrapeFromOpenBrowser(options = {}) {
   } finally {
     if (page && onConsole) page.off('console', onConsole);
     if (page && onPageError) page.off('pageerror', onPageError);
-    // No browser.close() — preserve the user's logged-in GMAT Club session.
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1481,7 +1531,7 @@ async function runGmatClubCatPhase2FromOpenBrowser(options = {}) {
     const pages = browser.contexts().flatMap((ctx) => ctx.pages());
     page = pages.find((p) => /gmatclub\.com/i.test(p.url())) || pages.find((p) => p.url() === 'about:blank') || pages[0];
     if (!page) throw new Error('No gmatclub.com tab found. Open GMAT Club in your logged-in tab first.');
-    page.setDefaultTimeout(0);
+    page.setDefaultTimeout(60000); // no step on one forum page needs longer; 0 let a stuck wait hang the run
     await page.bringToFront();
     onConsole = (msg) => pushLog(consoleLogs, { at: new Date().toISOString(), type: msg.type(), text: clipText(msg.text(), 1200) });
     onPageError = (e) => pushLog(pageErrors, { at: new Date().toISOString(), text: clipText(e?.stack || e?.message || String(e), 2000) }, 50);
@@ -1517,7 +1567,8 @@ async function runGmatClubCatPhase2FromOpenBrowser(options = {}) {
           }).catch(() => null);
           await page.waitForFunction(
             () => Array.from(document.querySelectorAll('.correctAnswer')).some((e) => /^[A-H]$/.test((e.textContent || '').trim())),
-            { timeout: 5000 }
+            null, // options go third — see the Error Log runner's MathJax wait
+            { timeout: 5000, polling: 250 }
           ).catch(() => null);
         }
         await page.addScriptTag({ content: scraperSource });
@@ -1547,7 +1598,7 @@ async function runGmatClubCatPhase2FromOpenBrowser(options = {}) {
   } finally {
     if (page && onConsole) page.off('console', onConsole);
     if (page && onPageError) page.off('pageerror', onPageError);
-    // No browser.close().
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1598,7 +1649,7 @@ async function runOpeListAttemptsFromOpenBrowser(options = {}) {
       },
     };
   } finally {
-    void browser;
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1745,7 +1796,7 @@ async function runOpeMockScrapeFromOpenBrowser(options = {}) {
     };
     throw error;
   } finally {
-    void browser;
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1909,7 +1960,7 @@ async function runOpePhase3FromOpenBrowser(options = {}) {
     };
     throw error;
   } finally {
-    void browser;
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1929,6 +1980,7 @@ module.exports = {
   // Exported for test/unit/starttest-tab-pick.test.js — the pick is what decides
   // whether a run gets a live tab or a spent harness shell.
   findStartTestPage,
+  isPublicS3Url,
   STARTTEST_SOURCE_PRODUCTS,
   TTP_SECTION_PRESETS,
   OPE_SOURCE_PRODUCTS: opeScraper.SOURCE_PRODUCTS,

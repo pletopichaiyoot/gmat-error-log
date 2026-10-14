@@ -1637,6 +1637,12 @@ th.sortable:hover {
   word-break: break-word;
 }
 
+.session-analysis-questions-table .order-col {
+  width: 56px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .session-analysis-questions-table .result-col {
   width: 88px;
   min-width: 88px;
@@ -2658,10 +2664,11 @@ th.sortable:hover {
 }
 
 /* DI stimulus (charts/tables/MSR sources), sanitized via sanitizeStimulusHtml
-   and rendered above the answer choices. Mirrors the boxed-surface treatment
-   of .question-stem-card / .question-passage-card above. */
+   and rendered first, above the question stem, as StartTest lays an item out.
+   Mirrors the boxed-surface treatment of .question-stem-card /
+   .question-passage-card above. */
 .question-stimulus {
-  margin: 0 0 var(--s5);
+  margin: 0;
   padding: var(--s4) var(--s5);
   border: 1px solid var(--border);
   border-radius: var(--r);
@@ -2690,6 +2697,18 @@ th.sortable:hover {
   font-size: 0.82rem;
   font-weight: 500;
   color: var(--ink);
+}
+
+.ta-sort-label {
+  display: block;
+  margin: var(--s2) 0 var(--s1);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.ta-sort-views.has-sort .ta-sort-label {
+  display: none;
 }
 
 .question-stimulus table {

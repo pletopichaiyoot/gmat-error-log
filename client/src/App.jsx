@@ -515,7 +515,9 @@ function sanitizeStimulusHtml(html) {
 // otherwise the plain-text stem. All non-OPE sources have no question_stem_html,
 // so they fall through to the original plain-text <p> render unchanged.
 function StemContent({ row }) {
-  const html = sanitizeStemHtml(row?.question_stem_html);
+  let html = sanitizeStemHtml(row?.question_stem_html);
+  // The figure the "[figure]" marker stood for renders in the stimulus block.
+  if (html && row?.stimulus) html = html.replace(/\[figure\]/gi, '').replace(/^(?:\s|&nbsp;|<br\s*\/?>|<p>(?:\s|&nbsp;)*<\/p>)+/i, '').trim();
   if (html) {
     return <div className="question-stem-html" dangerouslySetInnerHTML={{ __html: html }} />;
   }
@@ -543,9 +545,32 @@ function stimulusPlainText(row) {
   return normalizeQuestionText(tpl.content.textContent || '');
 }
 
+// StartTest RC items were captured with an MSR-shaped stimulus: the numbered
+// stem plus a "Passage:" source that passage_text already fills the left pane
+// with. Rendering it inline repeats the whole passage under the question, so
+// skip it when it adds nothing — no chart/table, html that is only the stem,
+// and every source already in passage_text.
+function stimulusRepeatsPassage(row) {
+  if (!rowHasPassage(row) || getPassageTabs(row).length >= 2) return false;
+  let s = null;
+  try { s = row?.stimulus ? JSON.parse(row.stimulus) : null; } catch { return false; }
+  const sources = Array.isArray(s?.sources) ? s.sources : [];
+  if (!sources.length || /<(?:img|table|svg|canvas)\b/i.test(s.html || '')) return false;
+  const key = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const textKey = (html) => {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = sanitizeStimulusHtml(html || '');
+    return key(tpl.content.textContent);
+  };
+  if (!key(row.question_stem).includes(textKey(s.html).replace(/^\d+/, ''))) return false;
+  const passage = key(row.passage_text);
+  return sources.every((src) => passage.includes(textKey(src?.html).replace(/^(?:passage)+/, '').slice(0, 300)));
+}
+
 function isStemShownElsewhere(row) {
   const stem = normalizeQuestionText(row?.question_stem);
   if (!stem) return false;
+  if (stimulusRepeatsPassage(row)) return false;
   // Stems carrying math render as images — never hide those.
   if (sanitizeStemHtml(row?.question_stem_html)) return false;
   // Drop-down items: "Your Responses" renders the whole stem, blanks in place.
@@ -625,9 +650,45 @@ function useStimulusTableSort(ref, html) {
       table.parentNode.insertBefore(bar, table);
       bars.push(bar);
     });
+    // A StartTest Table Analysis table is captured as one image per sort order
+    // (`.ta-sort-views`, labelled by the scraper), so sorting here means
+    // showing the chosen image. Without this hook the views render stacked
+    // with their labels, which is still the whole table.
+    const restores = [];
+    root.querySelectorAll('.ta-sort-views').forEach((views) => {
+      const panes = Array.from(views.querySelectorAll(':scope > .ta-sort-view'));
+      if (panes.length < 2) return;
+      const select = document.createElement('select');
+      select.setAttribute('aria-label', 'Sort the table by a column');
+      panes.forEach((pane, index) => {
+        const option = document.createElement('option');
+        option.value = String(index);
+        option.textContent = (pane.querySelector('.ta-sort-label')?.textContent || '').trim() || `View ${index + 1}`;
+        select.append(option);
+      });
+      const show = (chosen) => panes.forEach((pane, index) => { pane.hidden = index !== chosen; });
+      select.addEventListener('change', () => show(Number(select.value)));
+      show(0);
+      views.classList.add('has-sort');
+      restores.push(() => {
+        views.classList.remove('has-sort');
+        panes.forEach((pane) => { pane.hidden = false; });
+      });
+
+      const bar = document.createElement('div');
+      bar.className = 'stimulus-table-sort';
+      const caption = document.createElement('span');
+      caption.textContent = 'Sort by';
+      bar.append(caption, select);
+      views.parentNode.insertBefore(bar, views);
+      bars.push(bar);
+    });
     // React replaces the whole subtree when `html` changes, taking the bars
     // with it; removing an already-detached node is a no-op.
-    return () => bars.forEach((bar) => bar.remove());
+    return () => {
+      bars.forEach((bar) => bar.remove());
+      restores.forEach((restore) => restore());
+    };
   }, [ref, html]);
 }
 
@@ -699,16 +760,20 @@ function getPassageTabs(row) {
     if (!html || !/tabcontent/i.test(html)) return;
     const tpl = document.createElement('template');
     tpl.innerHTML = sanitizeStimulusHtml(html);
-    tpl.content.querySelectorAll('.tabcontent').forEach((t) => {
+    // An OPE pane keeps its tab strip as `.tablinks` spans, one per `.tabcontent`
+    // in order; StartTest captures carry no labels.
+    const labels = Array.from(tpl.content.querySelectorAll('.tablinks')).map((el) => (el.textContent || '').trim());
+    const panes = Array.from(tpl.content.querySelectorAll('.tabcontent'));
+    panes.forEach((t, i) => {
       const inner = t.innerHTML.trim();
-      if (inner) tabs.push(inner);
+      if (inner) tabs.push({ html: inner, label: labels.length === panes.length ? labels[i] : '' });
     });
   });
   return tabs;
 }
 
-// Tabbed "Question Information" panel — one tab per MSR source passage. Tab
-// labels aren't in the captured DOM, so they're numbered "Passage N".
+// Tabbed "Question Information" panel — one tab per MSR source passage,
+// labelled as the pane labelled it (Situation / Debate / Options) or "Passage N".
 function PassageTabs({ tabs }) {
   const [active, setActive] = useState(0);
   if (!Array.isArray(tabs) || tabs.length === 0) return null;
@@ -725,14 +790,14 @@ function PassageTabs({ tabs }) {
             className={`qr-info-tab${i === idx ? ' active' : ''}`}
             onClick={() => setActive(i)}
           >
-            {`Passage ${i + 1}`}
+            {tabs[i].label || `Passage ${i + 1}`}
           </button>
         ))}
       </div>
       <div
         className="qr-info-tabpanel question-stem-html"
         role="tabpanel"
-        dangerouslySetInnerHTML={{ __html: tabs[idx] }}
+        dangerouslySetInnerHTML={{ __html: tabs[idx].html }}
       />
     </div>
   );
@@ -1195,6 +1260,11 @@ function normalizedSubcategory(row) {
   const category = normalizedCategoryCode(row);
   const raw = pickReadableSubcategory(row);
   if (!raw) return '-';
+  // StartTest rows show StartTest's own Content Area name ("Weaken", not
+  // "Attack") — the user's choice, 2026-09-29. The canonical translation lives
+  // in `topic`, which the pattern charts group by; re-translating here undid
+  // it on screen and mixed the two vocabularies in one table again.
+  if (String(row?.topic_source || '').startsWith('starttest')) return raw;
   const contentDomain = String(row?.content_domain || '').trim();
   return (
     normalizeVerbalSubcategoryDisplay(raw, category) ||
@@ -3214,6 +3284,11 @@ function App() {
       } else if (key === 'time_sec') {
         valA = Number.isFinite(Number(valA)) ? Number(valA) : -1;
         valB = Number.isFinite(Number(valB)) ? Number(valB) : -1;
+      } else if (key === 'question_order') {
+        // Rows with no recorded order sink to the bottom either way.
+        const missing = order === 'asc' ? Infinity : -Infinity;
+        valA = Number.isFinite(a?.question_order) ? a.question_order : missing;
+        valB = Number.isFinite(b?.question_order) ? b.question_order : missing;
       } else if (key === 'q_code') {
         valA = String(valA || '');
         valB = String(valB || '');
@@ -5902,6 +5977,7 @@ function App() {
                     <table className="review-table session-analysis-questions-table">
                       <thead>
                         <tr>
+                          <th className="order-col sortable" onClick={() => handleSessionAnalysisSort('question_order')} title="Question number in the test">Q# {sortIndicator(sessionAnalysisSort, 'question_order')}</th>
                           <th className="result-col sortable" onClick={() => handleSessionAnalysisSort('correct')}>Result {sortIndicator(sessionAnalysisSort, 'correct')}</th>
                           <th className="section-col">Subject</th>
                           <th className="category-col">Category</th>
@@ -5917,13 +5993,14 @@ function App() {
                       <tbody>
                         {!sessionAnalysis.data.slowWrongQuestions?.length && (
                           <tr>
-                            <td colSpan="10">No answered questions in this session.</td>
+                            <td colSpan="11">No answered questions in this session.</td>
                           </tr>
                         )}
                         {sortedSessionAnalysisWrongQuestions.map((row, idx) => {
                           const isCorrect = Number(row?.correct) === 1;
                           return (
                           <tr key={`${row.q_code || 'q'}-${idx}`} className={isCorrect ? 'row-correct' : 'row-wrong'}>
+                            <td className="order-col">{formatMaybe(row.question_order)}</td>
                             <td className="result-col">
                               <span className={`result-pill ${isCorrect ? 'result-correct' : 'result-wrong'}`}>
                                 {isCorrect ? 'Correct' : 'Wrong'}
@@ -6227,16 +6304,9 @@ function App() {
                 })()}
 
                 <div className="question-review-col question-review-main-col">
-                  {!isStemShownElsewhere(questionReview.row) && (
-                    <div className="question-review-section">
-                      <h3>Question Stem</h3>
-                      <div className="question-stem-card">
-                        <StemContent row={questionReview.row} />
-                      </div>
-                    </div>
-                  )}
-
                   {(() => {
+                    // StartTest order: the graphic or table comes first and the
+                    // prose that refers to it follows.
                     let s = null;
                     try { s = questionReview.row?.stimulus ? JSON.parse(questionReview.row.stimulus) : null; } catch { s = null; }
                     if (!s) return null;
@@ -6244,6 +6314,7 @@ function App() {
                     // "Question Information" tab panel; don't re-dump them inline
                     // here (that double-render was the stem/passage mix-up).
                     if (getPassageTabs(questionReview.row).length >= 2) return null;
+                    if (stimulusRepeatsPassage(questionReview.row)) return null;
                     const html = sanitizeStimulusHtml(s.html || '');
                     return (
                       <div className="question-stimulus">
@@ -6254,6 +6325,15 @@ function App() {
                       </div>
                     );
                   })()}
+
+                  {!isStemShownElsewhere(questionReview.row) && (
+                    <div className="question-review-section">
+                      <h3>Question Stem</h3>
+                      <div className="question-stem-card">
+                        <StemContent row={questionReview.row} />
+                      </div>
+                    </div>
+                  )}
 
                   <div className="question-review-section">
                   <h3>

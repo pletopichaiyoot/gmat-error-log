@@ -48,6 +48,13 @@ test('an evaluate that throws does not lose the tab list', async () => {
   assert.strictEqual(await findStartTestPage(fakeBrowser([broken])), broken);
 });
 
+test('never picks an OPE review popup, even over a weaker landing tab', async () => {
+  const landing = fakePage('https://www.starttest.com/starttest2/13.2/router?session=1', 2);
+  const popup = fakePage('https://www.starttest.com/ITDStart.aspx?take=1', 2);
+  assert.strictEqual(await findStartTestPage(fakeBrowser([landing, popup])), landing);
+  assert.strictEqual(await findStartTestPage(fakeBrowser([popup])), null);
+});
+
 test('ignores non-starttest tabs and returns null when there are none', async () => {
   const other = fakePage('https://gmatclub.com/forum/', 3);
   assert.strictEqual(await findStartTestPage(fakeBrowser([other])), null);

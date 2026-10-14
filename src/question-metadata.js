@@ -49,6 +49,27 @@ function inferCategoryCodeFromCatId(catId) {
   return '';
 }
 
+// GMAT Club's Error Log names only the CONTENT topic on a row — its category
+// chips read "Word Problems", "Number Properties", "Overlapping Sets" — and
+// never the question FORMAT. A Data Sufficiency question therefore arrives
+// tagged exactly like a Problem Solving one, and the scraper's category map,
+// having nothing else to go on, codes every quant topic 'PS'. Under GMAT Focus
+// that is the wrong section: DS is Data Insights, not Quant.
+//
+// The statement pair is the format's signature and the Error Log's Question
+// cell carries it, so it is the one format signal the row holds. Measured over
+// the 813 stored quant rows it splits them 189/624, and spot-checking both
+// sides found no misfile in either direction.
+//
+// Deliberately positive-only: a stem truncated before "(1)" stays PS. Missing
+// a DS question leaves it where it already was, whereas a false positive would
+// push a genuine PS question out of Quant.
+const DS_STATEMENT_PAIR = /\(1\)[\s\S]{0,600}\(2\)/;
+
+function looksLikeDataSufficiency(stem) {
+  return DS_STATEMENT_PAIR.test(String(stem || ''));
+}
+
 function inferCategoryCodeFromTopic(value) {
   const upper = String(value || '').trim().toUpperCase();
   if (!upper) return '';
@@ -142,11 +163,21 @@ function deriveQuestionMetadata(question = {}, session = {}) {
     }) ||
     '';
 
-  const resolvedSubjectCode = normalizeSubjectCode(categoryCode) || subjectCode || '';
+  // Rescue a Data Sufficiency row that only had a quant CONTENT topic to go on
+  // (see looksLikeDataSufficiency). Gated on the row carrying no authoritative
+  // category_code, which is what keeps StartTest and the GMAT Club CAT out of
+  // it: both name the format outright, so their 'PS' is a fact rather than the
+  // Error Log's inference from a topic chip.
+  const resolvedCategoryCode =
+    !question.category_code && categoryCode === 'PS' && looksLikeDataSufficiency(question.question_stem)
+      ? 'DS'
+      : categoryCode;
+
+  const resolvedSubjectCode = normalizeSubjectCode(resolvedCategoryCode) || subjectCode || '';
 
   return {
     subject_code: resolvedSubjectCode || null,
-    category_code: categoryCode || null,
+    category_code: resolvedCategoryCode || null,
     subcategory: normalizedTextOrNull(question.subcategory || question.topic) || null,
   };
 }
