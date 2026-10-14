@@ -2664,10 +2664,11 @@ th.sortable:hover {
 }
 
 /* DI stimulus (charts/tables/MSR sources), sanitized via sanitizeStimulusHtml
-   and rendered above the answer choices. Mirrors the boxed-surface treatment
-   of .question-stem-card / .question-passage-card above. */
+   and rendered first, above the question stem, as StartTest lays an item out.
+   Mirrors the boxed-surface treatment of .question-stem-card /
+   .question-passage-card above. */
 .question-stimulus {
-  margin: 0 0 var(--s5);
+  margin: 0;
   padding: var(--s4) var(--s5);
   border: 1px solid var(--border);
   border-radius: var(--r);

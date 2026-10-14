@@ -6304,16 +6304,9 @@ function App() {
                 })()}
 
                 <div className="question-review-col question-review-main-col">
-                  {!isStemShownElsewhere(questionReview.row) && (
-                    <div className="question-review-section">
-                      <h3>Question Stem</h3>
-                      <div className="question-stem-card">
-                        <StemContent row={questionReview.row} />
-                      </div>
-                    </div>
-                  )}
-
                   {(() => {
+                    // StartTest order: the graphic or table comes first and the
+                    // prose that refers to it follows.
                     let s = null;
                     try { s = questionReview.row?.stimulus ? JSON.parse(questionReview.row.stimulus) : null; } catch { s = null; }
                     if (!s) return null;
@@ -6332,6 +6325,15 @@ function App() {
                       </div>
                     );
                   })()}
+
+                  {!isStemShownElsewhere(questionReview.row) && (
+                    <div className="question-review-section">
+                      <h3>Question Stem</h3>
+                      <div className="question-stem-card">
+                        <StemContent row={questionReview.row} />
+                      </div>
+                    </div>
+                  )}
 
                   <div className="question-review-section">
                   <h3>
