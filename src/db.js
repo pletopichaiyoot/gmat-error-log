@@ -4027,6 +4027,9 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
       ? String(item.format_code).trim().toUpperCase()
       : '';
 
+    // A parsed page is the authority on its figures: write its stimulus even
+    // when null, or a logo the old selector captured would survive every
+    // re-enrichment (COALESCE kept it).
     try {
       await tx.run(
         `
@@ -4039,7 +4042,7 @@ async function enrichGmatClubSessionAttempts({ sessionExternalId, source, enrich
               passage_text = COALESCE(NULLIF(?, ''), passage_text),
               category_code = COALESCE(NULLIF(?, ''), category_code),
               response_format = COALESCE(NULLIF(?, ''), response_format),
-              stimulus = COALESCE(?, stimulus)
+              stimulus = ?
           WHERE id = ?
         `,
         [

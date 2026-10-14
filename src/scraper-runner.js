@@ -505,6 +505,7 @@ const {
   runPhase1: runStartTestPhase1,
   runPhase2: runStartTestPhase2,
   normalizeProductHeading,
+  imageDataUri,
   _internals: startTestInternals,
 } = require('./scrapers/starttest_scraper');
 
@@ -934,14 +935,12 @@ async function runStartTestPhase2FromOpenBrowser(options = {}) {
 // Phase 2 for GMAT Club: visits each topic URL one at a time on the existing
 // gmatclub.com tab and runs `window.gmatClubEnrichCurrentPage()` to extract
 // the stem, choices, and revealed official-answer letter.
-// GMAT Club DI figures (Graphics Interpretation graphs) are images whose URL
-// the dashboard cannot use: GMAT Club's own attachment endpoint needs the
-// session cookie, and many graphs are served from s3.amazonaws.com, which
-// sends no CORS header — so the page scraper can neither canvas-draw nor fetch
-// them. It marks each one `data-shot="N"` instead and leaves a placeholder in
-// the stimulus HTML; Playwright screenshots the element, which no cross-origin
-// rule applies to, and the placeholder is swapped for a self-contained data:
-// PNG. Same trick, and same reason, as the StartTest itdmedia charts.
+// GMAT Club figures are images whose URL the dashboard cannot use, so the page
+// scraper marks each `data-shot="N"` (markStimulusImages says why the bytes are
+// copied, not screenshotted) and this swaps each placeholder for a data: image.
+// A page-side fetch carries the session cookie that attachments need; graphs on
+// s3.amazonaws.com send no CORS header, so that fetch throws, and being public
+// they are fetched from Node instead.
 async function inlineGmatClubStimulusImages(page, stimulus) {
   const selectors = Array.isArray(stimulus?.imageSelectors) ? stimulus.imageSelectors : [];
   if (!stimulus?.html) return null;
@@ -950,15 +949,34 @@ async function inlineGmatClubStimulusImages(page, stimulus) {
     const shot = (selector.match(/data-shot="(\d+)"/) || [])[1];
     if (shot === undefined) continue;
     try {
-      const handle = await page.$(selector);
-      if (!handle) continue;
-      // An element screenshot waits for the element to be visible; a figure
-      // hidden on the page (0px tall) never is, and without a timeout the run
-      // hung on it for hours. Skip it — a hidden figure can't be captured.
-      const buffer = await handle.screenshot({ type: 'png', timeout: 10000 });
+      // `page.evaluate` has no default timeout, so the fetch carries its own.
+      const fetched = await page.evaluate(async (sel) => {
+        const img = document.querySelector(sel);
+        const url = img && (img.currentSrc || img.src);
+        if (!url) return null;
+        try {
+          const res = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(15000) });
+          if (!res.ok) return { url, error: `HTTP ${res.status}` };
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          let binary = '';
+          for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+          return { url, type: res.headers.get('content-type'), base64: btoa(binary) };
+        } catch (e) {
+          return { url, error: String((e && e.message) || e) };
+        }
+      }, selector);
+      if (!fetched) continue;
+      let uri = imageDataUri(fetched.type, fetched.base64);
+      if (!uri && /^https?:/i.test(fetched.url)) {
+        const res = await fetch(fetched.url, { signal: AbortSignal.timeout(15000) });
+        if (res.ok) {
+          uri = imageDataUri(res.headers.get('content-type'), Buffer.from(await res.arrayBuffer()).toString('base64'));
+        }
+      }
+      if (!uri) continue;
       html = html.replace(
         new RegExp(`<img\\b[^>]*data-shot="${shot}"[^>]*>`, 'i'),
-        `<img src="data:image/png;base64,${buffer.toString('base64')}">`
+        `<img src="${uri}">`
       );
     } catch (_e) {
       // Leave the placeholder; the dashboard's sanitizer drops a src-less img.

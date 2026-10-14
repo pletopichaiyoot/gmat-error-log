@@ -317,18 +317,24 @@
   // and the stimulus sanitizer keeps only `data:` images for that reason. The
   // picture therefore has to be inlined at scrape time.
   //
-  // It cannot be inlined from here. A canvas draw works for GMAT Club's own
-  // attachments (same origin) but throws on the many graphs served from
-  // s3.amazonaws.com, which send no CORS header — `fetch` fails there too. So
-  // each image is MARKED on the live DOM and the runner screenshots it through
-  // Playwright, which no cross-origin rule applies to. Marking has to happen
-  // before the clone is taken, since that is what carries the attribute over.
+  // The bytes are copied, not screenshotted: a screenshot depends on where
+  // the element sits when it fires, and lazy-loaded neighbours shifted stored
+  // figures ~45px off the real attachment. Each image is MARKED on the live
+  // DOM and the runner copies it — a page-side `fetch` with the session cookie
+  // returns the exact bytes, login-gated attachments included, and the graphs
+  // served from s3.amazonaws.com (no CORS header, so that fetch throws) are
+  // public, so the runner fetches those from Node instead. Marking has to
+  // happen before the clone is taken, since that is what carries the
+  // attribute over.
   function markStimulusImages(opBody) {
     let shot = 0;
     for (const img of Array.from(opBody.querySelectorAll('img'))) {
-      // Forum smilies and rank badges are images too; anything this small is
-      // decoration, not a figure.
-      if (img.naturalWidth < 80 || img.naturalHeight < 80) continue;
+      // Forum smilies, rank badges and expert-promo logos are images too, and
+      // a spoiler's hidden duplicate of a figure renders at 0x0. The RENDERED
+      // box decides: natural size let a 150px logo drawn at 60px and a 405px
+      // SVG drawn at nothing through as figures.
+      const { width, height } = img.getBoundingClientRect();
+      if (width < 80 || height < 80) continue;
       img.setAttribute('data-shot', String(shot));
       shot += 1;
     }
