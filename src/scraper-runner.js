@@ -941,6 +941,17 @@ async function runStartTestPhase2FromOpenBrowser(options = {}) {
 // A page-side fetch carries the session cookie that attachments need; graphs on
 // s3.amazonaws.com send no CORS header, so that fetch throws, and being public
 // they are fetched from Node instead.
+// The URL comes from a forum post, so Node fetches only public S3 over https and
+// follows no redirect: anything else could point it at localhost or the LAN.
+function isPublicS3Url(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && /(^|\.)s3([.-][a-z0-9-]+)*\.amazonaws\.com$/i.test(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
 async function inlineGmatClubStimulusImages(page, stimulus) {
   const selectors = Array.isArray(stimulus?.imageSelectors) ? stimulus.imageSelectors : [];
   if (!stimulus?.html) return null;
@@ -967,8 +978,8 @@ async function inlineGmatClubStimulusImages(page, stimulus) {
       }, selector);
       if (!fetched) continue;
       let uri = imageDataUri(fetched.type, fetched.base64);
-      if (!uri && /^https?:/i.test(fetched.url)) {
-        const res = await fetch(fetched.url, { signal: AbortSignal.timeout(15000) });
+      if (!uri && isPublicS3Url(fetched.url)) {
+        const res = await fetch(fetched.url, { redirect: 'error', signal: AbortSignal.timeout(15000) });
         if (res.ok) {
           uri = imageDataUri(res.headers.get('content-type'), Buffer.from(await res.arrayBuffer()).toString('base64'));
         }
@@ -1957,6 +1968,7 @@ module.exports = {
   // Exported for test/unit/starttest-tab-pick.test.js — the pick is what decides
   // whether a run gets a live tab or a spent harness shell.
   findStartTestPage,
+  isPublicS3Url,
   STARTTEST_SOURCE_PRODUCTS,
   TTP_SECTION_PRESETS,
   OPE_SOURCE_PRODUCTS: opeScraper.SOURCE_PRODUCTS,
