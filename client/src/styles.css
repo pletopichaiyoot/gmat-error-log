@@ -2698,6 +2698,18 @@ th.sortable:hover {
   color: var(--ink);
 }
 
+.ta-sort-label {
+  display: block;
+  margin: var(--s2) 0 var(--s1);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.ta-sort-views.has-sort .ta-sort-label {
+  display: none;
+}
+
 .question-stimulus table {
   border-collapse: collapse;
   margin: var(--s2) 0;

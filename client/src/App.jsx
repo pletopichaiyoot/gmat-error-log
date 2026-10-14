@@ -515,7 +515,9 @@ function sanitizeStimulusHtml(html) {
 // otherwise the plain-text stem. All non-OPE sources have no question_stem_html,
 // so they fall through to the original plain-text <p> render unchanged.
 function StemContent({ row }) {
-  const html = sanitizeStemHtml(row?.question_stem_html);
+  let html = sanitizeStemHtml(row?.question_stem_html);
+  // The figure the "[figure]" marker stood for renders in the stimulus block.
+  if (html && row?.stimulus) html = html.replace(/\[figure\]/gi, '').replace(/^(?:\s|&nbsp;|<br\s*\/?>|<p>(?:\s|&nbsp;)*<\/p>)+/i, '').trim();
   if (html) {
     return <div className="question-stem-html" dangerouslySetInnerHTML={{ __html: html }} />;
   }
@@ -648,9 +650,45 @@ function useStimulusTableSort(ref, html) {
       table.parentNode.insertBefore(bar, table);
       bars.push(bar);
     });
+    // A StartTest Table Analysis table is captured as one image per sort order
+    // (`.ta-sort-views`, labelled by the scraper), so sorting here means
+    // showing the chosen image. Without this hook the views render stacked
+    // with their labels, which is still the whole table.
+    const restores = [];
+    root.querySelectorAll('.ta-sort-views').forEach((views) => {
+      const panes = Array.from(views.querySelectorAll(':scope > .ta-sort-view'));
+      if (panes.length < 2) return;
+      const select = document.createElement('select');
+      select.setAttribute('aria-label', 'Sort the table by a column');
+      panes.forEach((pane, index) => {
+        const option = document.createElement('option');
+        option.value = String(index);
+        option.textContent = (pane.querySelector('.ta-sort-label')?.textContent || '').trim() || `View ${index + 1}`;
+        select.append(option);
+      });
+      const show = (chosen) => panes.forEach((pane, index) => { pane.hidden = index !== chosen; });
+      select.addEventListener('change', () => show(Number(select.value)));
+      show(0);
+      views.classList.add('has-sort');
+      restores.push(() => {
+        views.classList.remove('has-sort');
+        panes.forEach((pane) => { pane.hidden = false; });
+      });
+
+      const bar = document.createElement('div');
+      bar.className = 'stimulus-table-sort';
+      const caption = document.createElement('span');
+      caption.textContent = 'Sort by';
+      bar.append(caption, select);
+      views.parentNode.insertBefore(bar, views);
+      bars.push(bar);
+    });
     // React replaces the whole subtree when `html` changes, taking the bars
     // with it; removing an already-detached node is a no-op.
-    return () => bars.forEach((bar) => bar.remove());
+    return () => {
+      bars.forEach((bar) => bar.remove());
+      restores.forEach((restore) => restore());
+    };
   }, [ref, html]);
 }
 
@@ -722,16 +760,20 @@ function getPassageTabs(row) {
     if (!html || !/tabcontent/i.test(html)) return;
     const tpl = document.createElement('template');
     tpl.innerHTML = sanitizeStimulusHtml(html);
-    tpl.content.querySelectorAll('.tabcontent').forEach((t) => {
+    // An OPE pane keeps its tab strip as `.tablinks` spans, one per `.tabcontent`
+    // in order; StartTest captures carry no labels.
+    const labels = Array.from(tpl.content.querySelectorAll('.tablinks')).map((el) => (el.textContent || '').trim());
+    const panes = Array.from(tpl.content.querySelectorAll('.tabcontent'));
+    panes.forEach((t, i) => {
       const inner = t.innerHTML.trim();
-      if (inner) tabs.push(inner);
+      if (inner) tabs.push({ html: inner, label: labels.length === panes.length ? labels[i] : '' });
     });
   });
   return tabs;
 }
 
-// Tabbed "Question Information" panel — one tab per MSR source passage. Tab
-// labels aren't in the captured DOM, so they're numbered "Passage N".
+// Tabbed "Question Information" panel — one tab per MSR source passage,
+// labelled as the pane labelled it (Situation / Debate / Options) or "Passage N".
 function PassageTabs({ tabs }) {
   const [active, setActive] = useState(0);
   if (!Array.isArray(tabs) || tabs.length === 0) return null;
@@ -748,14 +790,14 @@ function PassageTabs({ tabs }) {
             className={`qr-info-tab${i === idx ? ' active' : ''}`}
             onClick={() => setActive(i)}
           >
-            {`Passage ${i + 1}`}
+            {tabs[i].label || `Passage ${i + 1}`}
           </button>
         ))}
       </div>
       <div
         className="qr-info-tabpanel question-stem-html"
         role="tabpanel"
-        dangerouslySetInnerHTML={{ __html: tabs[idx] }}
+        dangerouslySetInnerHTML={{ __html: tabs[idx].html }}
       />
     </div>
   );

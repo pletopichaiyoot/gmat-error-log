@@ -4254,7 +4254,9 @@ async function enrichOpeSessionAttempts({ sessionExternalId, source, enrichedIte
               my_answer = COALESCE(NULLIF(?, ''), my_answer),
               difficulty = COALESCE(NULLIF(?, ''), difficulty),
               difficulty_theta = COALESCE(?, difficulty_theta),
-              time_sec = COALESCE(?, time_sec)
+              time_sec = COALESCE(?, time_sec),
+              passage_text = COALESCE(NULLIF(?, ''), passage_text),
+              stimulus = CASE WHEN ? THEN ? ELSE stimulus END
           WHERE id = ?
         `,
         [
@@ -4267,6 +4269,12 @@ async function enrichOpeSessionAttempts({ sessionExternalId, source, enrichedIte
           difficultyLabel || '',
           thetaNum,
           timeSecPrecise,
+          item.passage || '',
+          // A page the scraper read is the authority on the item's figure, so
+          // its stimulus is written even when null (a status icon once passed
+          // for a chart on every item); a read that warned keeps the stored one.
+          item.stimulusRead === true,
+          normalizeStimulusForStorage(item.stimulus),
           targetRow.id,
         ]
       );

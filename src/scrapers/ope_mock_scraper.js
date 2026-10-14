@@ -32,7 +32,8 @@
 //     data= blob on the cmd=item iframe URL) for stable upserts across rescrapes.
 //   - q_code namespace prefixed `ope-` to avoid collisions with practice books.
 
-const { sanitizeStemHtml, stemHtmlToText } = require('./ope-stem');
+const { sanitizeStemHtml, stemHtmlToText, sanitizeStimulusHtml } = require('./ope-stem');
+const { readReviewFrame, inlineItdmediaImages, deriveStimulusDataText } = require('./starttest_scraper');
 const { sleep, jitter, hashSessionExternalId } = require('./scraper-utils');
 
 const STARTTEST_HOST_RE = /starttest\.com/i;
@@ -1203,6 +1204,106 @@ async function returnToScoreCard(popupPage, { timeoutMs = 60000, pollMs = 500 } 
   );
 }
 
+// The RC passage and the MSR sources are not in the item frame. The item frame
+// names them (`window.vPassageName`, e.g. V188_000439-00) and ITD shows them in
+// a sibling `cmd=display` frame whose body is `.ITSReadingPassage`: `<p>`
+// paragraphs for RC; `div.tab` + `button.tablinks` and one `div.tabcontent`
+// per source for MSR. Old frames linger in `frames()` after every Next, and an
+// MSR pane carries no item id, so a pane counts as the current item's only when
+// its URL was not there before the item was entered.
+function isDisplayFrameUrl(url) {
+  if (!/\/itd\.aspx\?/i.test(url)) return false;
+  try { return new URL(url).searchParams.get('cmd') === 'display'; } catch { return false; }
+}
+
+function displayFrameUrls(popupPage) {
+  return new Set(popupPage.frames().map((f) => f.url()).filter(isDisplayFrameUrl));
+}
+
+async function waitForPassageFrame(popupPage, staleUrls, { timeoutMs = 10000, pollMs = 250 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const fresh = popupPage.frames().filter((f) => isDisplayFrameUrl(f.url()) && !staleUrls.has(f.url()));
+    for (let i = fresh.length - 1; i >= 0; i -= 1) {
+      const ready = await fresh[i]
+        .evaluate(() => document.readyState === 'complete' && document.body.classList.contains('ITSReadingPassage'))
+        .catch(() => false);
+      if (ready) return fresh[i];
+    }
+    await sleep(pollMs);
+  } while (Date.now() < deadline);
+  throw new Error(`passage pane did not appear within ${timeoutMs}ms`);
+}
+
+async function readPassageFrame(frame) {
+  const d = await frame.evaluate(() => {
+    const body = document.body;
+    let shotIdx = 0;
+    const itdmediaSelectors = [];
+    body.querySelectorAll('img').forEach((im) => {
+      if (!/itdmedia\.aspx/i.test(im.getAttribute('src') || '')) return;
+      im.setAttribute('data-shot', String(shotIdx));
+      itdmediaSelectors.push(`[data-shot="${shotIdx}"]`);
+      shotIdx += 1;
+    });
+    // innerText skips hidden nodes: show every tab so each source's text is
+    // read, and hide the auto-passage anchor, which is not prose.
+    const toggled = Array.from(body.querySelectorAll('.tabcontent, .ITSAutoPassage')).map((n) => [n, n.style.display]);
+    toggled.forEach(([n]) => { n.style.display = n.classList.contains('tabcontent') ? 'block' : 'none'; });
+    const text = (body.innerText || '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    toggled.forEach(([n, display]) => { n.style.display = display; });
+    const clone = body.cloneNode(true);
+    clone.querySelectorAll('.ITSAutoPassage, script, style').forEach((n) => n.remove());
+    clone.querySelectorAll('.tabcontent').forEach((n) => n.removeAttribute('style'));
+    // The tab strip is <button>s, which the stimulus sanitizer drops. Spans keep
+    // the labels (Situation / Debate / Options) for the review modal's tabs.
+    clone.querySelectorAll('button.tablinks').forEach((b) => {
+      const span = document.createElement('span');
+      span.className = 'tablinks';
+      span.textContent = (b.textContent || '').trim();
+      b.replaceWith(span);
+    });
+    const isMsr = !!clone.querySelector('.tabcontent');
+    const figures = Array.from(clone.querySelectorAll('img[data-shot], table, svg'));
+    return {
+      isMsr,
+      text,
+      // An RC pane's prose goes to passage_text; only its figures, if any, become
+      // the stimulus, or the passage would render twice.
+      html: isMsr
+        ? clone.innerHTML
+        : figures.filter((el) => !figures.some((o) => o !== el && o.contains(el))).map((el) => el.outerHTML).join('\n'),
+      hasChart: itdmediaSelectors.length > 0 || !!clone.querySelector('svg'),
+      hasTable: !!clone.querySelector('table'),
+      itdmediaSelectors,
+    };
+  });
+  const html = sanitizeStimulusHtml(await inlineItdmediaImages(frame, d.html, d.itdmediaSelectors));
+  if (d.isMsr) {
+    const sources = [{ title: 'Passage:', html, text: d.text }];
+    return { passage: null, stimulus: { kind: 'msr', html: '', dataText: deriveStimulusDataText('', sources), sources } };
+  }
+  const kind = d.hasChart && d.hasTable ? 'mixed' : d.hasChart ? 'graph' : 'table';
+  return {
+    passage: d.text || null,
+    stimulus: html ? { kind, html, dataText: d.text, sources: [] } : null,
+  };
+}
+
+// The pane for `passageName`, read once per passage: every sub-question of an RC
+// passage or MSR set shares the vPassageName. `pane` is the walk's record of the
+// last pane read ({ name, read }) and the display-frame URLs that predate the
+// current item (`staleUrls`).
+async function readPassagePane(popupPage, pane, passageName, waitOpts) {
+  if (!passageName) return null;
+  if (passageName !== pane.name) {
+    const frame = await waitForPassageFrame(popupPage, pane.staleUrls, waitOpts);
+    pane.read = await readPassageFrame(frame);
+    pane.name = passageName;
+  }
+  return pane.read;
+}
+
 // Main Phase 3 loop. Returns one enriched record per question. Caller (the
 // DB writer in db.js) matches them back to question_attempts rows by q_id
 // composed as `ope-${itemName}-p${positionInSection}`.
@@ -1248,6 +1349,7 @@ async function scrapeAttemptPhase3(popup, {
 
   const enriched = [];
   const errors = [];
+  const warnings = [];
   const errorBudget = Math.max(5, Math.ceil(expectedTotal / 4));
   let aborted = false;
   let abortReason = null;
@@ -1273,6 +1375,10 @@ async function scrapeAttemptPhase3(popup, {
     throw new ScrapeAnomalyError('Phase 3: Score Card has no section tables to walk');
   }
   const plannedTotal = sections.reduce((n, t) => n + t.rowCount, 0);
+  // staleUrls is snapshotted before every navigation that can attach a pane
+  // (section entry, each Next), so a pane is fresh only if that navigation
+  // brought it.
+  const pane = { name: null, read: null, staleUrls: new Set() };
 
   let seq = 0;
   for (let si = 0; si < sections.length && !aborted; si += 1) {
@@ -1280,6 +1386,7 @@ async function scrapeAttemptPhase3(popup, {
     let frame;
     try {
       if (si > 0) await returnToScoreCard(popup);
+      pane.staleUrls = displayFrameUrls(popup);
       frame = await enterPhase3Mode(popup, { tableIdx: section.tableIdx });
     } catch (e) {
       errors.push({ seq, message: `section table ${section.tableIdx} entry failed: ${e.message}` });
@@ -1322,6 +1429,29 @@ async function scrapeAttemptPhase3(popup, {
             }
           }
         }
+        // The review frame is the same ITD engine StartTest Phase 2 reads, so
+        // its reader supplies what readReviewAllFrame never captured: the DI
+        // stimulus in the item frame (chart, TA table) and, through the passage
+        // pane, the RC passage and MSR sources. Its own stem and choices are
+        // ignored; OPE's stay authoritative. `stimulusRead` tells the DB writer
+        // the stimulus is the page's verdict, null included; a warning leaves
+        // the stored one alone.
+        data.stimulusRead = false;
+        try {
+          const st = await readReviewFrame(frame, { figuresOnly: true });
+          // readReviewFrame lifts a CR argument out of the stem into `passage`.
+          // OPE's stem keeps the argument, so storing it again would show the
+          // same text twice; only a passage the stem lacks (RC) is new.
+          const squash = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+          if (st.passage && !squash(data.stem).includes(squash(st.passage))) data.passage = st.passage;
+          data.stimulus = st.stimulus || null;
+          const paneRead = await readPassagePane(popup, pane, st.vPassageName);
+          if (paneRead?.passage) data.passage = paneRead.passage;
+          if (paneRead?.stimulus) data.stimulus = paneRead.stimulus;
+          data.stimulusRead = true;
+        } catch (e) {
+          warnings.push({ seq, message: `stimulus read failed: ${e.message}` });
+        }
       } catch (e) {
         errors.push({ seq, message: `read failed: ${e.message}` });
         if (e instanceof ScrapeAnomalyError) { aborted = true; abortReason = e.message; break; }
@@ -1329,6 +1459,7 @@ async function scrapeAttemptPhase3(popup, {
         if (!isLastInSection) {
           try {
             await sleep(jitter(minDelayMs, maxDelayMs));
+            pane.staleUrls = displayFrameUrls(popup);
             frame = await clickPhase3Next(popup, prevItemName, currentTitle);
           } catch (ne) {
             errors.push({ seq, message: `next failed during recovery: ${ne.message}` });
@@ -1358,6 +1489,7 @@ async function scrapeAttemptPhase3(popup, {
       if (!isLastInSection) {
         try {
           await sleep(jitter(minDelayMs, maxDelayMs));
+          pane.staleUrls = displayFrameUrls(popup);
           frame = await clickPhase3Next(popup, prevItemName, currentTitle);
         } catch (e) {
           errors.push({ seq, message: `next failed: ${e.message}` });
@@ -1374,6 +1506,7 @@ async function scrapeAttemptPhase3(popup, {
     takeIdx,
     items: enriched,
     errors,
+    warnings,
     aborted,
     abortReason,
     qhTotal: plannedTotal,
@@ -1416,5 +1549,9 @@ module.exports = {
     enterPhase3Mode,
     returnToScoreCard,
     jitter,
+    isDisplayFrameUrl,
+    waitForPassageFrame,
+    readPassageFrame,
+    readPassagePane,
   },
 };

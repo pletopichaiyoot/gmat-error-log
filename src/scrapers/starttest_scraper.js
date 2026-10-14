@@ -1197,8 +1197,20 @@ async function captureItdmediaImage(frame, selector) {
   } catch (_e) { return null; }
 }
 
-async function readReviewFrame(frame) {
-  const data = await frame.evaluate(() => {
+// Swap each marked <img ... data-shot="N" ...> in `html` for its fetched data:
+// image. A failed fetch leaves the itdmedia img in place for the sanitizer to drop.
+async function inlineItdmediaImages(frame, html, selectors) {
+  let out = html;
+  for (const sel of selectors || []) {
+    const shot = (sel.match(/data-shot="(\d+)"/) || [])[1];
+    const dataUri = await captureItdmediaImage(frame, sel);
+    if (dataUri) out = out.replace(new RegExp(`<img\\b[^>]*data-shot="${shot}"[^>]*>`, 'i'), `<img src="${dataUri}">`);
+  }
+  return out;
+}
+
+async function readReviewFrame(frame, { figuresOnly = false } = {}) {
+  const data = await frame.evaluate((figuresOnly) => {
     const text = (sel) => {
       const el = document.querySelector(sel);
       if (!el) return null;
@@ -1452,6 +1464,15 @@ async function readReviewFrame(frame) {
       document.querySelector('.its-item-table.ITSStem'),
       document.querySelector('.illustration-container'),
     ].filter(Boolean);
+    // Table Analysis keeps its table in a `.passageContainer` under the
+    // `.options-container` branch, whose shell is `.shell.its-item-table` with
+    // no ITSStem class, so neither root above reaches it (0 of 100 enriched TA
+    // rows had a table). The "table" is one pre-rendered itdmedia image per
+    // sort order, and `select#myselection` shows `#show<value>` on change.
+    // OG nests it under `.options-container`; OPE (engine 24.3) has no
+    // `.options-container` and puts it straight in the question cell.
+    const taBox = document.querySelector('.s-ques .passageContainer');
+    if (taBox && !stimulusRoots.some((root) => root.contains(taBox))) stimulusRoots.push(taBox);
     // MSR reference sources: titled blocks under ItemReferenceTitleText. Keep the
     // titled section HTML/text; the plain rationale (no ItemReferenceTitleText
     // sibling title) is excluded.
@@ -1474,23 +1495,58 @@ async function readReviewFrame(frame) {
     });
     const hasSvg = stimulusRoots.some((el) => el.querySelector('svg'));
     const hasTable = stimulusRoots.some((el) => el.querySelector('table.table, table[border]'));
-    // Mark itdmedia <img>s for the Node side to screenshot: give each a data-shot
-    // index so we can find and replace it after screenshotting.
+    // Mark itdmedia <img>s for the Node side to inline: give each a data-shot
+    // index so we can find and replace it after fetching. OPE's `.ITSStemText`
+    // opens with a `.solIcon` holding the right/wrong status icon, itself an
+    // itdmedia image, which made every OPE item a "graph" of that icon.
+    // StartTest OG pages have no .solIcon.
     let shotIdx = 0;
     const itdmediaSelectors = [];
     stimulusRoots.forEach((root) => {
       root.querySelectorAll('img').forEach((im) => {
         const src = im.getAttribute('src') || '';
-        if (/itdmedia\.aspx/i.test(src)) {
+        if (/itdmedia\.aspx/i.test(src) && !im.closest('.solIcon')) {
           im.setAttribute('data-shot', String(shotIdx));
           itdmediaSelectors.push(`[data-shot="${shotIdx}"]`);
           shotIdx += 1;
         }
       });
     });
-    const stimulusHtmlMarked = stimulusRoots.map((el) => el.innerHTML).join('\n');
+    // figuresOnly: a caller with its own stem reader (OPE) wants just the chart
+    // or table. The stem root's prose would otherwise repeat under the stem card.
+    const rootHtml = (el) => {
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll('.solIcon').forEach((n) => n.remove());
+      if (!figuresOnly) return clone.innerHTML;
+      const figures = Array.from(clone.querySelectorAll('img[data-shot], svg, table.table, table[border]'))
+        .filter((n) => !n.parentElement.closest('svg, table'));
+      return figures.map((n) => n.outerHTML).join('\n');
+    };
+    // The TA sort widget is a <select> plus one hidden div per sort order, which
+    // the sanitizer would reduce to five stacked images with no names. Emit the
+    // intro prose, then one labelled `.ta-sort-view` per order (label = the
+    // option whose value names the div, `#showOne` <- value "One"); the review
+    // modal turns the labels back into a "Sort by" menu. Runs after the
+    // data-shot marking above, so each image's marker rides in its outerHTML.
+    const taSortHtml = (box) => {
+      const select = box.querySelector('select#myselection');
+      const views = Array.from(box.querySelectorAll('div.myDiv'));
+      if (!select || !views.length) return null;
+      const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      const labelByValue = new Map(Array.from(select.options).map((o) => [o.value, (o.textContent || '').trim()]));
+      const intro = Array.from((box.querySelector('.passage') || box).children)
+        .filter((el) => el.id !== 'bloc_container')
+        .map((el) => el.outerHTML).join('');
+      const panes = views.map((div, i) => {
+        const label = labelByValue.get(div.id.replace(/^show/, '')) || `View ${i + 1}`;
+        return `<div class="ta-sort-view"><span class="ta-sort-label">${esc(label)}</span>${div.innerHTML}</div>`;
+      });
+      return `${intro}<div class="ta-sort-views">${panes.join('')}</div>`;
+    };
+    const taSorted = taBox ? taSortHtml(taBox) : null;
+    const stimulusHtmlMarked = stimulusRoots.map((el) => (el === taBox && taSorted) || rootHtml(el)).join('\n');
     const hasChart = hasSvg || itdmediaSelectors.length > 0;
-    const stimulusKind = referenceSources.length ? 'msr' : (hasChart && hasTable) ? 'mixed' : hasChart ? 'graph' : hasTable ? 'table' : null;
+    const stimulusKind = referenceSources.length ? 'msr' : taSorted ? 'table' : (hasChart && hasTable) ? 'mixed' : hasChart ? 'graph' : hasTable ? 'table' : null;
     // Coach-readable dump of the stimulus roots' visible text: chart <text>
     // labels and data-table cell text live here even though .ITSStemText (used
     // for `stem`) doesn't capture them.
@@ -1549,7 +1605,7 @@ async function readReviewFrame(frame) {
       itdmediaSelectors,
       itemStimulusPresent: !!(hasSvg || hasTable || referenceSources.length || itdmediaSelectors.length),
     };
-  });
+  }, figuresOnly);
 
   // Node-side: convert any returned math-bearing innerHTML to readable inline text
   // (MathML -> 1/24, 1/(n(n + 1)), x^2, √3). Only overrides fields that contained
@@ -1623,15 +1679,7 @@ async function readReviewFrame(frame) {
   // Build the DI stimulus object: inline each itdmedia chart image as a
   // self-contained data: uri, then sanitize the whole stimulus region.
   if (data.itemStimulusPresent) {
-    let html = data.stimulusHtmlMarked || '';
-    for (const sel of data.itdmediaSelectors || []) {
-      // Replace the marked <img ... data-shot="N" ...> with a data: img.
-      const shot = (sel.match(/data-shot="(\d+)"/) || [])[1];
-      const imgRe = new RegExp(`<img\\b[^>]*data-shot="${shot}"[^>]*>`, 'i');
-      const dataUri = await captureItdmediaImage(frame, sel);
-      if (!dataUri) continue; // leave the (dead) itdmedia img; sanitizer drops it
-      html = html.replace(imgRe, `<img src="${dataUri}">`);
-    }
+    const html = await inlineItdmediaImages(frame, data.stimulusHtmlMarked || '', data.itdmediaSelectors);
     const safeHtml = sanitizeStimulusHtml(html);
     const sources = (data.referenceSources || []).map((s) => ({
       title: s.title, html: sanitizeStimulusHtml(s.html), text: s.text,
@@ -1975,6 +2023,9 @@ module.exports = {
   normalizeProductHeading,
   deriveStimulusDataText,
   imageDataUri,
+  captureItdmediaImage,
+  inlineItdmediaImages,
+  readReviewFrame,
   // Exposed for direct testing + for Phase 2 module to reuse navigation helpers.
   _internals: {
     goto,

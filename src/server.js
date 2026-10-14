@@ -1356,6 +1356,7 @@ app.post('/api/sessions/:sessionId/enrich', async (req, res) => {
       dbSkipped: dbResult.skipped,
       dbErrors: dbResult.errors,
       scrapeErrors: phase2.result?.errors || [],
+      scrapeWarnings: phase2.result?.warnings || [],
       aborted: !!phase2.result?.aborted,
       abortReason: phase2.result?.abortReason || null,
       warning: phase2.result?.aborted
