@@ -135,6 +135,9 @@ async function tabIsLive() {
     }
   } catch {
     return false;
+  } finally {
+    // A connection left open keeps pausing new frames (see disconnectBrowser).
+    await browser?.close().catch(() => {});
   }
   return false;
 }

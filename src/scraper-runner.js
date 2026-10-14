@@ -176,6 +176,20 @@ async function connectBrowserOverCdp(rawUrl) {
   throw error;
 }
 
+// Every runner ends with this. On a connectOverCDP browser, close() drops only
+// this run's WebSocket: Chrome, its tabs and their logins are untouched
+// (Playwright 1.58 closes the transport and nothing else; checked live on
+// 2026-10-14). Left open, each run leaked a client, and every client pauses a
+// new frame until it releases it: 13 leaked clients left StartTest's review
+// frame paused for good ("No ITDReview.aspx frame ever appeared").
+async function disconnectBrowser(browser) {
+  try {
+    await browser?.close();
+  } catch (_error) {
+    // Already disconnected.
+  }
+}
+
 async function inferClientId(page, fallbackClientId) {
   try {
     const detected = await page.evaluate(() => {
@@ -494,10 +508,8 @@ async function openUrlInOpenBrowser(options = {}) {
 //   1. Tab pattern matches starttest.com, not gmatofficialpractice.mba.com.
 //   2. The scraper is a Node-side module (starttest_scraper.js) — we call its
 //      functions directly, no page.evaluate-injection.
-//   3. We do NOT call browser.close() anywhere. Playwright's connectOverCDP
-//      tears down wrapped contexts on close, which would close the user's
-//      logged-in tab and invalidate their StartTest session token. Leaving
-//      the WS to disconnect on process exit is the safe alternative.
+//   3. Each run disconnects when it ends (disconnectBrowser), which leaves the
+//      user's Chrome, tabs and session token alone.
 
 const {
   SOURCE_PRODUCTS: STARTTEST_SOURCE_PRODUCTS,
@@ -731,8 +743,7 @@ async function runStartTestScrapeFromOpenBrowser(options = {}) {
   } finally {
     if (startTestPage && onConsole) startTestPage.off('console', onConsole);
     if (startTestPage && onPageError) startTestPage.off('pageerror', onPageError);
-    // Intentionally DO NOT call browser.close() — it would tear down the user's
-    // logged-in StartTest tab and force a re-login. Let the WS disconnect on exit.
+    await disconnectBrowser(browser);
   }
 }
 
@@ -803,11 +814,12 @@ async function openStartTestProductInOpenBrowser(options = {}) {
       tabUrl: startTestPage?.url?.() || null,
     };
     throw wrapped;
+  } finally {
+    await disconnectBrowser(browser);
   }
-  // No `finally { browser.close() }` — same reason as above.
 }
 
-// Phase 2: per-session deep enrichment. Same no-close discipline.
+// Phase 2: per-session deep enrichment.
 // Long-running (~3–5 minutes for 20 items at jittered pacing). Caller is
 // expected to handle async/progress UX — server.js exposes this behind a
 // dedicated endpoint and times out generously.
@@ -930,7 +942,7 @@ async function runStartTestPhase2FromOpenBrowser(options = {}) {
   } finally {
     if (startTestPage && onConsole) startTestPage.off('console', onConsole);
     if (startTestPage && onPageError) startTestPage.off('pageerror', onPageError);
-    // Same no-close discipline.
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1277,7 +1289,7 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
   } finally {
     if (page && onConsole) page.off('console', onConsole);
     if (page && onPageError) page.off('pageerror', onPageError);
-    // No browser.close() — same discipline as other runners.
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1286,8 +1298,6 @@ async function runGmatClubPhase2FromOpenBrowser(options = {}) {
 // category's `?page=N` URLs. The TTP error tracker is fully cumulative (no
 // since-date concept on the page), so the `since` parameter is currently
 // unused — the user filters the resulting rows in the dashboard.
-//
-// Same no-close discipline as the other CDP-attached runners.
 
 function findTtpPage(browser) {
   const pages = browser.contexts().flatMap((ctx) => ctx.pages());
@@ -1413,7 +1423,7 @@ async function runTtpScrapeFromOpenBrowser(options = {}) {
   } finally {
     if (ttpPage && onConsole) ttpPage.off('console', onConsole);
     if (ttpPage && onPageError) ttpPage.off('pageerror', onPageError);
-    // No browser.close() — preserve the user's logged-in TTP session.
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1493,7 +1503,7 @@ async function runGmatClubCatScrapeFromOpenBrowser(options = {}) {
   } finally {
     if (page && onConsole) page.off('console', onConsole);
     if (page && onPageError) page.off('pageerror', onPageError);
-    // No browser.close() — preserve the user's logged-in GMAT Club session.
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1588,7 +1598,7 @@ async function runGmatClubCatPhase2FromOpenBrowser(options = {}) {
   } finally {
     if (page && onConsole) page.off('console', onConsole);
     if (page && onPageError) page.off('pageerror', onPageError);
-    // No browser.close().
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1639,7 +1649,7 @@ async function runOpeListAttemptsFromOpenBrowser(options = {}) {
       },
     };
   } finally {
-    void browser;
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1786,7 +1796,7 @@ async function runOpeMockScrapeFromOpenBrowser(options = {}) {
     };
     throw error;
   } finally {
-    void browser;
+    await disconnectBrowser(browser);
   }
 }
 
@@ -1950,7 +1960,7 @@ async function runOpePhase3FromOpenBrowser(options = {}) {
     };
     throw error;
   } finally {
-    void browser;
+    await disconnectBrowser(browser);
   }
 }
 
